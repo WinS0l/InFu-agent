@@ -1,0 +1,25 @@
+{
+  "name": "infu",
+  "version": "0.1.0",
+  "private": true,
+  "description": "InFu - 软件工程智能体平台（Infinite Future）",
+  "workspaces": [
+    "packages/*"
+  ],
+  "scripts": {
+    "build": "npm run build -w @infu/shared && npm run build -w @infu/agent",
+    "infu": "npm run cli -w @infu/agent --",
+    "config": "npm run cli -w @infu/agent -- config",
+    "start": "npm run start -w @infu/agent",
+    "test": "npx tsx packages/agent/tests/tools.test.ts && npx tsx packages/agent/tests/templates.test.ts"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "allowScripts": {
+    "esbuild@0.28.2": true
+  },
+  "dependencies": {
+    "zod": "^4.4.3"
+  }
+}

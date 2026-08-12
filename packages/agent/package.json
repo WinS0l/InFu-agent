@@ -1,0 +1,30 @@
+{
+  "name": "@infu/agent",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "dev": "tsx watch src/cli.ts",
+    "cli": "tsx src/cli.ts",
+    "start": "tsx src/server.ts"
+  },
+  "dependencies": {
+    "@infu/shared": "*",
+    "@ai-sdk/gateway": "^3.0.96",
+    "@ai-sdk/openai": "^3.0.94",
+    "@ai-sdk/anthropic": "^3.0.110",
+    "@ai-sdk/google": "^3.0.107",
+    "ai": "^6.0.159",
+    "zod": "^4.0.0",
+    "hono": "^4.12.12",
+    "@hono/node-server": "^1.19.14"
+  },
+  "devDependencies": {
+    "@types/node": "^25.0.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.5.0"
+  }
+}

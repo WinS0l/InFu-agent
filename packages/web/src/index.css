@@ -1,0 +1,53 @@
+@import "tailwindcss";
+
+/* ═══ InFu 设计系统（ui-ux-pro-max: Dark Mode OLED + Code dark / Run green）═══ */
+@theme {
+  --color-ink: #0f172a;        /* 页面背景 */
+  --color-panel: #1e293b;      /* 面板背景 */
+  --color-panel-2: #334155;    /* 次级面板 */
+  --color-muted: #272f42;      /* 弱化背景 */
+  --color-line: #475569;       /* 边框 */
+  --color-text: #f8fafc;       /* 主文字 */
+  --color-sub: #94a3b8;        /* 次级文字 */
+  --color-accent: #22c55e;     /* 运行/成功绿 */
+  --color-warn: #eab308;       /* 警告黄 */
+  --color-danger: #ef4444;     /* 错误红 */
+  --font-sans: "Inter", "Microsoft YaHei", "PingFang SC", system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", "Cascadia Code", Consolas, monospace;
+}
+
+/* 基础 */
+html, body, #root { height: 100%; }
+body {
+  background: var(--color-ink);
+  color: var(--color-text);
+  font-family: var(--font-sans);
+}
+
+/* 滚动条（深色） */
+::-webkit-scrollbar { width: 8px; height: 8px; }
+::-webkit-scrollbar-thumb { background: #334155; border-radius: 4px; }
+::-webkit-scrollbar-thumb:hover { background: #475569; }
+::-webkit-scrollbar-track { background: transparent; }
+
+/* 焦点可见（可访问性） */
+:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 2px;
+  border-radius: 2px;
+}
+
+/* 流式光标 */
+.stream-cursor::after {
+  content: "▍";
+  color: var(--color-accent);
+  animation: blink 1s steps(2) infinite;
+}
+@keyframes blink { 50% { opacity: 0; } }
+
+/* 工具卡片闪烁 */
+@keyframes pulse-glow {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(34, 197, 94, 0); }
+  50% { box-shadow: 0 0 8px 1px rgba(34, 197, 94, 0.35); }
+}
+.tool-running { animation: pulse-glow 1.2s ease-in-out infinite; }

@@ -43,10 +43,12 @@ start-infu.bat                 # Windows 一键启动（服务 + Web + 浏览器
 - M6：**网络出站软控制策略**（本机实测全部 OS 级按进程断网路线不可行——WFP 引擎拒绝/LSA 特权被加固删除且授不回去/AppContainer 低盒 WithTokenW 1314/SYSTEM 辅助触发通道全被硬化封死/未装 Docker，详见 ROADMAP；落地为命令级策略 `net-policy.ts`：外传命令 curl/wget/nc/ssh/powershell 网络调用等默认拦截，`network=true` 经人工审批放行（🌐，-y 不放行），审计 `egress-blocked`；OS 级断网的正确姿势 = Docker L2 `--network none` 或未来云版 microVM）
 - M5：**沙箱 L1.5 Windows 硬沙箱**（Rust 原生 `packages/sandbox-rs/`：CreateRestrictedToken 四标志 + Job Object 资源上限/杀整树 + 降级阶梯 full→reduced→basic→job-only；win32 自动启用；`INFU_SANDBOX_RESTRICTED=0` 禁用；run_command 与 run_test 统一走 `execLocal` 分派，修复了 run_test 绕过沙箱的缺口）+ **`/best-of-n` 并行尝试**（CLI `--best-of-n <N>`：N 路独立 worktree 并行完整编排，评分择优：测试×40/工具成功率×25/报告×20/效率×15，任务后保留 worktree 手动合并/丢弃）
 - 后台日志：`~/.infu/logs/agent.log`（全事件）+ `commands.log`（命令审计，含沙箱档位）
+- ✅ **v1 收官（2026-08-12）**：M1–M6 全部落地（模型接入/10 工具/Agent 循环/Web UI/审批/沙箱 L1·L1.5·L2/编排/模板/best-of-n/网络软控制），`npm test` 68 项全绿，CLI+Web 端到端实测正常。剩余项（云版/microVM/WSL2 沙箱/best-of-n Web UI）均为 v1 范围外，见 ROADMAP
 
 ## 未完成 / 下一步
 
 **以 `docs/ROADMAP.md` 为准**（本处仅摘要）：
+- 🔄 **v2 候选方向**（2026-08-12 评估，未立项）：① MCP 工具生态接入 ② 长任务/上下文压缩（突破 30 步上限）③ 模型兼容矩阵实测（GLM/通义/Kimi/Ollama 未实测）+ 会话持久化/失败重试 ④ best-of-n Web UI
 - ⏳ 沙箱长期升级 microVM（**已降级为条件触发**：仅多租户/不可信代码场景需要，如云版 InFu 落地时）
 - ⏳ 低优先级：云版 InFu、WSL2 原生沙箱、/best-of-n Web 端并行 UI
 

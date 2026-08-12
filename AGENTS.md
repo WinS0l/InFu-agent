@@ -50,7 +50,7 @@ start-infu.bat                 # Windows 一键启动（服务 + Web + 浏览器
 **以 `docs/ROADMAP.md` 为准**（本处仅摘要）：
 - 🔄 **v2 候选方向**（2026-08-12 评估，未立项）：① MCP 工具生态接入 ② 长任务/上下文压缩（突破 30 步上限）③ 模型兼容矩阵实测（GLM/通义/Kimi/Ollama 未实测）+ 会话持久化/失败重试 ④ best-of-n Web UI
 - ⏳ 沙箱长期升级 microVM（**已降级为条件触发**：仅多租户/不可信代码场景需要，如云版 InFu 落地时）
-- ⏳ 低优先级：云版 InFu、WSL2 原生沙箱、/best-of-n Web 端并行 UI
+- ⏳ 低优先级：**v3 团队版 InFu**（触发条件 = 出现第二个真实用户/团队需求，届时 microVM 一并触发，见 ROADMAP）、WSL2 原生沙箱、/best-of-n Web 端并行 UI
 
 ## 安全红线（不可妥协）
 

@@ -136,6 +136,8 @@ pub fn build_restricted(base: HANDLE) -> Result<RestrictedToken, String> {
         match create_restricted(base, *flags) {
             Ok(t) => {
                 enable_change_notify(t);
+                // 受限令牌是全新令牌：补默认 DACL（防子进程 0xC0000142）
+                crate::user::ensure_default_dacl(t);
                 return duplicate_primary(t).map(|handle| RestrictedToken { handle, level });
             }
             Err(e) => last = Some(e),

@@ -16,6 +16,9 @@ import {
 import {
   winRestrictedAvailable, runRestricted, type RestrictedRunResult,
 } from "../sandbox/win-restricted.js";
+import {
+  sandboxNetEnabled, ensureRootGranted, runElevatedSandbox, type SandboxNetKind,
+} from "../sandbox/sandbox-net.js";
 
 const execAsync = promisify(exec);
 const execFileAsync = promisify(execFile);
@@ -116,7 +119,7 @@ async function getSandboxMode(): Promise<SandboxMode> {
   return mode;
 }
 
-/** 受限执行结果 → 标准输出格式（level 映射为模式标签；退出码 0 才算成功，与 Node exec 语义一致） */
+/** 受限执行结果 → 标准输出格式（level/net 映射为模式标签；退出码 0 才算成功，与 Node exec 语义一致） */
 function fmtRestricted(r: RestrictedRunResult): { out: string; ok: boolean; code: number | null; sandbox: string } {
   const ok = r.ok && !r.timedOut && r.code === 0;
   const body = [r.stdout, r.stderr]
@@ -126,20 +129,28 @@ function fmtRestricted(r: RestrictedRunResult): { out: string; ok: boolean; code
   const out = ok
     ? clip(body || "(无输出)")
     : `命令执行失败（code=${r.code}${r.timedOut ? "，超时被终止" : ""}）：\n${clip(body)}`;
-  // full/reduced/basic 都算受限沙箱；job-only 是令牌降级档
-  const sandbox = r.level === "job-only" ? "restricted:job-only" : r.level === "none" ? "soft" : "restricted";
+  // M6：专用账号优先标注（断网/联网）；net=none 时按令牌等级映射
+  const sandbox =
+    r.net === "offline" ? "restricted:offline"
+    : r.net === "online" ? "restricted:online"
+    : r.level === "job-only" ? "restricted:job-only"
+    : r.level === "none" ? "soft"
+    : "restricted";
   return { out, ok, code: r.code, sandbox };
 }
 
 /**
- * 本地命令统一分派：Docker → 受限沙箱（win32，L1.5）→ 软沙箱（L1）
+ * 本地命令统一分派：Docker → 受限沙箱（win32，L1.5 / M6 网络出站控制）→ 软沙箱（L1）
  * run_command 与 run_test 共用（修复 run_test 绕过沙箱的历史缺口）。
+ * sandboxUser：M6 沙箱专用账号（offline=断网 / online=审批放行联网）；
+ * 专用账号不可用（未 setup/登录失败）→ 显式回退当前用户受限沙箱 + 告警（不静默）。
  * 返回 sandbox 标签用于审计与展示。
  */
 async function execLocal(
   command: string,
   cwd: string,
-  timeoutMs = 60000
+  timeoutMs = 60000,
+  sandboxUser?: SandboxNetKind
 ): Promise<{ ok: boolean; out: string; code: number | null; sandbox: string }> {
   const mode = await getSandboxMode();
   if (mode === "docker") {
@@ -152,9 +163,27 @@ async function execLocal(
   }
   // soft / auto→soft：win32 且原生受限沙箱可用时优先（OS 级强制）
   if (process.platform === "win32" && (await winRestrictedAvailable())) {
-    const r = await runRestricted(command, cwd, timeoutMs, sanitizeEnv());
-    if (r) return fmtRestricted(r);
-    // native 异常 → 降级软沙箱（下面统一处理）
+    if (sandboxUser && (await sandboxNetEnabled())) {
+      // M6：专用账号执行（先确保工作区已授权；非提权进程创建他人令牌进程需提权辅助通道）
+      await ensureRootGranted(cwd);
+      const r = await runElevatedSandbox({ command, cwd, timeoutMs, env: sanitizeEnv(), sandboxUser });
+      if (r) {
+        // 降级不静默：专用账号不可用 → 回退当前用户受限沙箱，输出与审计都明确标注
+        if (!r.ok && r.net === "none" && r.error) {
+          const fb = await runRestricted(command, cwd, timeoutMs, sanitizeEnv());
+          if (fb) {
+            const base = fmtRestricted(fb);
+            const out = `${base.out}\n⚠ 沙箱账号不可用（${r.error}），已回退当前用户受限沙箱——未断网，请检查 infu sandbox-net status`;
+            return { ...base, out, sandbox: "restricted:net-fallback" };
+          }
+        }
+        return fmtRestricted(r);
+      }
+    } else {
+      const r = await runRestricted(command, cwd, timeoutMs, sanitizeEnv());
+      if (r) return fmtRestricted(r);
+      // native 异常 → 降级软沙箱（下面统一处理）
+    }
   }
   const r = await runShell(command, cwd, timeoutMs);
   return { ...r, sandbox: "soft" };
@@ -166,6 +195,9 @@ function sandboxTag(sandbox: string): string {
     case "docker": return "（Docker 沙箱）";
     case "restricted": return "（受限沙箱）";
     case "restricted:job-only": return "（受限沙箱·仅Job）";
+    case "restricted:offline": return "（受限沙箱·断网）";
+    case "restricted:online": return "（受限沙箱·联网）";
+    case "restricted:net-fallback": return "（受限沙箱·回退未断网）";
     case "off": return "（直连）";
     default: return "（软沙箱）";
   }
@@ -175,7 +207,7 @@ function sandboxTag(sandbox: string): string {
 function walkFiles(root: string, maxFiles = 2000): string[] {
   const SKIP = new Set(["node_modules", ".git", "dist", "build", "out", ".next",
     "coverage", "venv", ".venv", "__pycache__", ".cache", ".idea", ".vscode",
-    ".infu", "target", ".turbo", ".yarn", ".pnpm-store"]);
+    ".infu", ".infu-sandbox", "target", ".turbo", ".yarn", ".pnpm-store"]);
   const results: string[] = [];
   const stack = [root];
   while (stack.length && results.length < maxFiles) {
@@ -198,10 +230,10 @@ function walkFiles(root: string, maxFiles = 2000): string[] {
   return results;
 }
 
-/** 审批辅助：风险高于阈值时请求确认 */
-async function guard(ctx: ToolContext, risk: RiskLevel, description: string): Promise<boolean> {
+/** 审批辅助：风险高于阈值时请求确认（requireExplicit：-y 自动批准也不放行——联网场景） */
+async function guard(ctx: ToolContext, risk: RiskLevel, description: string, requireExplicit?: boolean): Promise<boolean> {
   if (risk === "low") return true;
-  return ctx.requestApproval(description, risk);
+  return ctx.requestApproval(description, risk, requireExplicit);
 }
 
 // ─────────────────────────── 工具定义 ───────────────────────────
@@ -361,30 +393,53 @@ export const TOOLS: Record<string, ToolDef> = {
   run_command: {
     name: "run_command",
     description:
-      "在项目内执行 shell 命令（终端执行）。可运行构建、安装依赖、启动服务、查看环境等。高风险命令（删除/强制操作）需确认。",
+      "在项目内执行 shell 命令（终端执行）。可运行构建、安装依赖、启动服务、查看环境等。高风险命令（删除/强制操作）需确认。需要网络（如 npm install）时设 network=true，须人工审批放行（默认断网执行）。",
     risk: "medium",
     schema: z.object({
       command: z.string().describe("要执行的命令"),
       timeout: z.number().int().min(1000).max(300000).optional().describe("超时毫秒（默认 60000）"),
+      network: z.boolean().optional().describe("是否允许联网（默认 false=断网执行；true 需人工审批，自动批准模式不适用）"),
     }),
     async execute(args, ctx) {
       const command = args.command as string;
-      const DANGEROUS = /\b(rm\s+-rf|rmdir\s+\/s|del\s+\/f|format\s+|mkfs|dd\s+if=)\b/i;
-      if (DANGEROUS.test(command)) {
-        if (!(await guard(ctx, "high", `执行高风险命令：${command}`))) {
-          return "用户拒绝：高危命令未执行";
+      const wantNetwork = args.network === true;
+      const netOn = await sandboxNetEnabled();
+      let sandboxUser: SandboxNetKind | undefined;
+
+      if (wantNetwork) {
+        // 联网必须人工审批（🌐 标记 + requireExplicit：-y 自动批准也不放行）
+        if (!netOn) {
+          return "联网请求未执行：网络出站控制未安装（先运行 `infu sandbox-net setup`）——命令按断网处理？请去掉 network=true 后重试";
         }
-      } else if (!(await guard(ctx, "medium", `执行命令：${command}`))) {
-        return "用户拒绝：命令未执行";
+        if (!(await guard(ctx, "high", `🌐 联网放行执行命令：${command}`, true))) {
+          sandboxUser = "offline"; // 未获联网放行 → 按断网执行并明确告知
+        } else {
+          sandboxUser = "online";
+        }
+      } else {
+        // 常规审批（M6 已安装时默认断网账号执行）
+        const DANGEROUS = /\b(rm\s+-rf|rmdir\s+\/s|del\s+\/f|format\s+|mkfs|dd\s+if=)\b/i;
+        if (DANGEROUS.test(command)) {
+          if (!(await guard(ctx, "high", `执行高风险命令：${command}`))) {
+            return "用户拒绝：高危命令未执行";
+          }
+        } else if (!(await guard(ctx, "medium", `执行命令：${command}`))) {
+          return "用户拒绝：命令未执行";
+        }
+        sandboxUser = netOn ? "offline" : undefined;
       }
       const timeoutMs = (args.timeout as number | undefined) || 60000;
 
-      // 沙箱统一分派（docker / 受限沙箱 / 软沙箱）
-      const r = await execLocal(command, ctx.root, timeoutMs);
+      // 沙箱统一分派（docker / 受限沙箱·断网·联网 / 软沙箱）
+      const r = await execLocal(command, ctx.root, timeoutMs, sandboxUser);
+      const netNote =
+        wantNetwork && r.sandbox !== "restricted:online"
+          ? "\n⚠ 该命令未获联网放行（断网执行）"
+          : "";
 
       // 命令审计（所有模式，含沙箱档位）
       auditCommand(ctx.root, command, r.ok, r.out, r.sandbox);
-      return r.out + (r.ok ? `\n${sandboxTag(r.sandbox)}执行完成` : `\n${sandboxTag(r.sandbox)}`);
+      return r.out + netNote + (r.ok ? `\n${sandboxTag(r.sandbox)}执行完成` : `\n${sandboxTag(r.sandbox)}`);
     },
   },
 
@@ -450,8 +505,9 @@ export const TOOLS: Record<string, ToolDef> = {
         else return "未检测到测试框架，请用 command 参数指定";
       }
       if (!(await guard(ctx, "medium", `运行测试：${cmd}`))) return "用户拒绝：未运行测试";
-      // 测试命令与 run_command 同走沙箱分派（docker / 受限沙箱 / 软沙箱）
-      const r = await execLocal(cmd, abs, 300000);
+      // 测试命令与 run_command 同走沙箱分派（docker / 受限沙箱 / 软沙箱）；测试默认断网
+      const netOn = await sandboxNetEnabled();
+      const r = await execLocal(cmd, abs, 300000, netOn ? "offline" : undefined);
       auditCommand(abs, cmd, r.ok, r.out, r.sandbox);
       return r.out + (r.ok ? `\n${sandboxTag(r.sandbox)}执行完成` : `\n${sandboxTag(r.sandbox)}`);
     },

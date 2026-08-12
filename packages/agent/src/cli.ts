@@ -10,9 +10,11 @@
  * 模型配置：~/.infu/config.json（见 README）
  */
 
-import { resolve } from "node:path";
-import { writeFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
-import { homedir } from "node:os";
+import { resolve, dirname } from "node:path";
+import { writeFileSync, existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { createRequire } from "node:module";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AgentEvent, InfuConfig, ModelConfig, ProviderKind } from "@infu/shared";
 import { loadConfig, resolveModel, resolveApiKey, CONFIG_PATH } from "./providers/registry.js";
@@ -21,6 +23,12 @@ import { runAgent, makeApprovalHandler, DEFAULT_SYSTEM_PROMPT } from "./agent/lo
 import { runOrchestratedTask } from "./agent/orchestrator.js";
 import { runBestOfN, formatComparison } from "./best-of-n.js";
 import { findTemplate, renderTemplate } from "./templates.js";
+
+const require = createRequire(import.meta.url);
+import {
+  netStatus, netSetup, netRemove, netGrant, netIsElevated, installHelperTask, removeHelperTask,
+  grantCurrentUserRights,
+} from "./sandbox/sandbox-net.js";
 
 // ── 终端着色 ──
 const C = {
@@ -58,10 +66,18 @@ function printEvent(e: AgentEvent, prefix = "") {
   }
 }
 
-/** 默认审批：CLI 交互（-y 自动批准） */
+/** 默认审批：CLI 交互（-y 自动批准；联网放行等 requireExplicit 场景 -y 也不自动放行，一律拒绝） */
 function makeDecider(autoApprove: boolean) {
-  return async (description: string, risk: "low" | "medium" | "high") => {
-    if (autoApprove) return true;
+  return async (
+    description: string,
+    risk: "low" | "medium" | "high",
+    requireExplicit?: boolean
+  ) => {
+    if (requireExplicit) {
+      if (autoApprove) return false; // 联网必须人工确认，自动批准模式不适用
+    } else if (autoApprove) {
+      return true;
+    }
     const rl = await import("node:readline").then((m) =>
       m.createInterface({ input: process.stdin, output: process.stderr })
     );
@@ -249,8 +265,179 @@ async function configWizard() {
   console.log(C.dim(`\n配置保存在：${CONFIG_PATH}`));
 }
 
+// ─────────────────────── sandbox-net 子命令（M6 网络出站控制）───────────────────────
+
+/** 写入配置的 sandboxNet 开关（不触碰 models 等其它字段） */
+function setSandboxNetConfig(enabled: boolean) {
+  const cfg = loadConfig();
+  if (!cfg) return;
+  cfg.sandboxNet = { enabled };
+  saveConfig(cfg);
+}
+
+/**
+ * 自我提权重启（UAC）：node <tsx入口> <cli入口> sandbox-net <sub> --elevated，等待结束后返回。
+ * 实现：临时 .ps1（UTF-8 BOM）+ `powershell -File`——不走 -Command 命令行，
+ * 避免全角路径（如 E:\InFu（Agent））在 GBK 代码页下被 -Command 参数解析损坏。
+ * 提权子进程无可见控制台：输出重定向到临时文件，由本进程打印（成功/失败都可见）。
+ * 返回 false 表示用户取消 UAC 或 PowerShell 启动失败。
+ */
+function relaunchElevated(subArgs: string[]): boolean {
+  // tsx 包装时 argv=[node, tsx/cli.mjs, src/cli.ts, ...]；直跑时 argv[1] 即入口
+  const entry =
+    process.argv[2] && /\.(ts|js|mjs)$/.test(process.argv[2]) && existsSync(resolve(process.argv[2]))
+      ? resolve(process.argv[2])
+      : resolve(process.argv[1]);
+  const outFile = join(tmpdir(), `infu-elevate-out-${process.pid}.txt`);
+  const errFile = join(tmpdir(), `infu-elevate-err-${process.pid}.txt`);
+  const q = (a: string) => `"${a.replace(/"/g, '""')}"`;
+  // 命令 = node <tsx CLI 中间层> <cli 入口> sandbox-net <sub> --elevated
+  // 必须显式经 tsx：Node 原生 TS 不做 .js→.ts 导入重写（ERR_MODULE_NOT_FOUND）；
+  // 外层不加引号包裹（cmd /c 遇到首字符引号会剥离外层引号破坏路径）
+  // tsx 包目录 = require.resolve("tsx") 的 dist 上级（exports 屏蔽了 dist/cli.mjs 直取）
+  const tsxCli = join(dirname(require.resolve("tsx")), "cli.mjs");
+  const cmdParts = [tsxCli, entry, "sandbox-net", ...subArgs, "--elevated"];
+  // cmd /c "node ... > out 2> err"（-Verb RunAs 与 -RedirectStandardOutput 不兼容，只能 cmd 内重定向）
+  const cmdLine = `node ${cmdParts.map(q).join(" ")} > ${q(outFile)} 2> ${q(errFile)}`;
+  const ps = [
+    `$cmd = '${cmdLine.replace(/'/g, "''")}'`,
+    `Start-Process -FilePath "$env:ComSpec" -ArgumentList "/c", $cmd -Verb RunAs -Wait -WorkingDirectory '${process.cwd().replace(/'/g, "''")}'`,
+  ].join("\n");
+  const psPath = join(tmpdir(), `infu-elevate-${process.pid}.ps1`);
+  if (process.env.INFU_DEBUG_ELEVATE) {
+    console.error("[debug] argv:", JSON.stringify(process.argv));
+    console.error("[debug] entry:", entry, "\n[debug] tsxCli:", tsxCli, "\n[debug] ps1:", psPath, "\n---\n", ps, "\n---");
+  }
+  try {
+    // \uFEFF = UTF-8 BOM：PowerShell 5.1 据此按 UTF-8 解析脚本内容（全角路径不损坏）
+    writeFileSync(psPath, "\uFEFF" + ps + "\n", "utf-8");
+    const res = spawnSync("powershell.exe", ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", psPath], { stdio: "inherit" });
+    // 打印提权子进程的输出（安装成功/失败的明细）
+    for (const f of [outFile, errFile]) {
+      if (existsSync(f)) {
+        const text = readFileSync(f, "utf-8").trim();
+        if (text) process.stdout.write(text + "\n");
+      }
+    }
+    return res.status === 0;
+  } catch {
+    return false;
+  } finally {
+    for (const f of [psPath, outFile, errFile]) {
+      try { rmSync(f, { force: true }); } catch { /* 清理失败不影响主流程 */ }
+    }
+  }
+}
+
+/** `infu sandbox-net setup|status|remove|grant <dir>` */
+function sandboxNetCommand(sub: string, rest: string[]): Promise<void> {
+  return (async () => {
+    const elevated = netIsElevated();
+    const isElevatedRun = process.argv.includes("--elevated") || elevated;
+
+    if (sub === "setup") {
+      if (!isElevatedRun) {
+        console.log(C.yellow("需要管理员权限安装防火墙规则——即将弹出 UAC 确认（仅此一次）…"));
+        if (!relaunchElevated(["setup"])) {
+          console.error(C.red("✗ 提权未完成（已取消或失败，见上方输出）"));
+          process.exit(1);
+        }
+      } else {
+        try {
+          const r = netSetup();
+          grantCurrentUserRights(); // 当前用户特权（S4U 任务令牌按新策略带权）
+          installHelperTask(); // 提权辅助计划任务（沙箱命令执行通道）
+          setSandboxNetConfig(true);
+          console.log(C.green(`✓ 网络出站控制已安装（${r.createdAt}）`));
+          console.log(`  断网账号: ${r.offlineUser}（SID ${r.offlineSid}，AppContainer 无网络能力 = 出站全断）`);
+          console.log(`  联网账号: ${r.onlineUser}`);
+          console.log(`  已授权工具目录（Read+Execute）: ${r.toolDirs.length} 个`);
+          console.log(`  凭据已 DPAPI 加密存入 ~/.infu/sandbox-net.json（明文不入库）`);
+        } catch (e) {
+          console.error(C.red(`✗ 安装失败: ${(e as Error).message}`));
+          process.exit(1);
+        }
+      }
+      // 提权重启后父进程也回来走到这里 → 打印状态收尾
+      if (!isElevatedRun) await printNetStatus();
+      return;
+    }
+
+    if (sub === "remove") {
+      if (!isElevatedRun) {
+        console.log(C.yellow("需要管理员权限删除防火墙规则与账号——即将弹出 UAC 确认…"));
+        if (!relaunchElevated(["remove"])) {
+          console.error(C.red("✗ 提权未完成（已取消或失败，见上方输出）"));
+          process.exit(1);
+        }
+      } else {
+        try {
+          removeHelperTask();
+          const msg = netRemove();
+          setSandboxNetConfig(false);
+          console.log(C.green(`✓ ${msg}`));
+        } catch (e) {
+          console.error(C.red(`✗ 移除失败: ${(e as Error).message}`));
+          process.exit(1);
+        }
+      }
+      if (!isElevatedRun) await printNetStatus();
+      return;
+    }
+
+    if (sub === "grant") {
+      const dir = resolve(rest[0] ?? process.cwd());
+      try {
+        const granted = netGrant(dir);
+        console.log(C.green(`✓ 已授权沙箱账号访问 ${dir}`));
+        for (const g of granted) console.log(C.dim(`  · ${g}`));
+      } catch (e) {
+        console.error(C.red(`✗ 授权失败: ${(e as Error).message}`));
+        process.exit(1);
+      }
+      return;
+    }
+
+    if (sub === "status" || sub === undefined) {
+      await printNetStatus();
+      return;
+    }
+
+    console.error(C.red(`未知子命令: sandbox-net ${sub}（可用: setup / status / remove / grant <dir>）`));
+    process.exit(1);
+  })();
+}
+
+async function printNetStatus() {
+  const st = netStatus();
+  if (!st) {
+    console.log(C.yellow("网络出站控制不可用（非 Windows 或原生模块未构建）"));
+    return;
+  }
+  console.log(`\n网络出站控制（M6）状态：`);
+  console.log(`  状态文件: ${st.configured ? C.green("已配置") : C.yellow("未配置")}`);
+  console.log(`  提权: ${st.elevated ? "是" : "否"}`);
+  if (st.configured) {
+    console.log(`  断网账号（infu-sandbox-offline）: ${st.offlineOk ? C.green("可登录") : C.red("不可用")}`);
+    console.log(`  联网账号（infu-sandbox-online）: ${st.onlineOk ? C.green("可登录") : C.red("不可用")}`);
+    console.log(`  AppContainer 断网档案: ${st.rulesOk ? C.green("已就绪（无网络能力=出站全断）") : C.red("缺失")}`);
+    if (st.error) console.log(C.yellow(`  ${st.error}`));
+    console.log(C.dim("  沙箱命令默认以断网账号运行；联网需在审批中确认（🌐）"));
+  } else {
+    console.log(C.yellow("  运行 `infu sandbox-net setup` 一次性安装（UAC 提权，仅需一次）"));
+  }
+}
+
 function main() {
   const args = process.argv.slice(2);
+
+  if (args[0] === "sandbox-net") {
+    sandboxNetCommand(args[1] ?? "status", args.slice(2)).catch((e) => {
+      console.error(C.red(`\n✗ sandbox-net 失败: ${e.message}`));
+      process.exit(1);
+    });
+    return;
+  }
 
   if (args[0] === "config") {
     configWizard().catch((e) => console.error(C.red(`\n✗ 配置失败: ${e.message}`)));
@@ -303,6 +490,12 @@ function main() {
   infu "任务描述" [--root <项目路径>] [--model <模型id>] [-y]
   infu --setup   生成模型配置模板（JSON）
   infu --suggest 建议模式（模型只出方案，不执行工具）
+
+网络出站控制（M6，Windows——沙箱命令默认断网，联网需审批）：
+  infu sandbox-net setup    一次性安装（UAC 提权：WFP 拦截 + 沙箱专用账号）
+  infu sandbox-net status   查看状态
+  infu sandbox-net remove   移除（删规则 + 删账号）
+  infu sandbox-net grant <dir>  授权沙箱账号访问目录（新项目根时自动执行）
 
 分层编排（M4，默认开启 Planner→Executor→Reviewer）：
   infu --template init-project  模板任务：初始化新项目

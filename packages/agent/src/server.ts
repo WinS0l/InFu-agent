@@ -237,7 +237,7 @@ export function createApp(opts: ServerOptions = {}) {
 
       // 审批：推送 approval-required 事件 → 挂 pending → 等待 POST /api/approvals/:id 决策
       // 连接中断（停止）时自动拒绝并释放
-      const requestApproval = async (description: string, risk: RiskLevel) => {
+      const requestApproval = async (description: string, risk: RiskLevel, _requireExplicit?: boolean) => {
         const id = randomUUID();
         emit({ type: "approval-required", id, description, risk });
         return new Promise<boolean>((resolve) => {

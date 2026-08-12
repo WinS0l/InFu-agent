@@ -72,12 +72,16 @@ fn build_env_block(env: &HashMap<String, String>) -> Option<Vec<u16>> {
 ///     代码页是 936（Git Bash / 中文系统）还是 65001（start-infu.bat 的 chcp 65001），
 ///     命令内容都按 UTF-8 解析，输出统一为 UTF-8 字节
 ///   - 2>nul 吞掉无控制台场景下 chcp 的报错噪音（曾出现"拒绝访问"污染 stderr）
-fn write_cmd_file(command: &str) -> Result<String, String> {
+/// dir：专用账号场景传入合成档案目录（真实用户 %TEMP% 对沙箱账号不可读）
+fn write_cmd_file(command: &str, dir: Option<&str>) -> Result<String, String> {
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_nanos())
         .unwrap_or(0);
-    let file = std::env::temp_dir().join(format!("infu-cmd-{}-{}.cmd", std::process::id(), nanos));
+    let file = match dir {
+        Some(d) => std::path::Path::new(d).join(format!("infu-cmd-{}-{}.cmd", std::process::id(), nanos)),
+        None => std::env::temp_dir().join(format!("infu-cmd-{}-{}.cmd", std::process::id(), nanos)),
+    };
     let mut content: Vec<u8> = Vec::with_capacity(command.len() + 64);
     content.extend_from_slice(b"@echo off\r\n");
     content.extend_from_slice(b"@chcp 65001 >nul 2>nul\r\n");
@@ -187,7 +191,12 @@ fn build_cmdline(cmd_file: &str) -> Vec<u16> {
     cmdline.encode_utf16().collect()
 }
 
-/// 用指定令牌创建进程（CreateProcessWithTokenW → CreateProcessAsUserW 回退）
+/// 用指定令牌创建进程。
+/// 关键（2026-08-12 实测）：**提权调用者必须用 CreateProcessAsUserW**——
+/// CreateProcessWithTokenW 从提权进程创建（无论何种令牌）会让子进程
+/// DLL 初始化失败（0xC0000142，STATUS_DLL_INIT_FAILED）。
+/// 非提权调用者无 SeIncreaseQuota/SeAssignPrimaryToken，只能 WithTokenW
+/// （M5 验证可用），1314 时回退 AsUserW。
 fn create_with_token(
     token: HANDLE,
     cmdline: &[u16],
@@ -200,7 +209,16 @@ fn create_with_token(
     let cwd_w = wide(cwd);
     let env_ptr = env_block.map_or(ptr::null(), |b| b.as_ptr() as *const _);
 
-    // 1) CreateProcessWithTokenW（交互用户只需 SE_IMPERSONATE_NAME，非 LOGON 场景不加载 profile）
+    // 提权调用者：直接 AsUserW（WithTokenW 会产生 0xC0000142 子进程）
+    // INFU_SANDBOX_WITHTOKEN=1：强制 WithTokenW（调试用）
+    if crate::user::is_elevated() && std::env::var("INFU_SANDBOX_WITHTOKEN").is_err() {
+        if create_as_user(&mut pi, token, cmdline, flags, env_ptr, &cwd_w, startup) != 0 {
+            return Ok(pi);
+        }
+        return Err(last_error());
+    }
+
+    // 非提权调用者：WithTokenW（交互用户只需 SE_IMPERSONATE_NAME，非 LOGON 场景不加载 profile）
     let ok = unsafe {
         CreateProcessWithTokenW(
             token,
@@ -222,8 +240,26 @@ fn create_with_token(
         return Err(err);
     }
 
-    // 2) 回退 CreateProcessAsUserW（管理员持有 SE_INCREASE_QUOTA 时可用）
-    let ok = unsafe {
+    // 2) 回退 CreateProcessAsUserW（持有 SE_INCREASE_QUOTA/SE_ASSIGNPRIMARYTOKEN 时可用）
+    if create_as_user(&mut pi, token, cmdline, flags, env_ptr, &cwd_w, startup) != 0 {
+        Ok(pi)
+    } else {
+        Err(last_error())
+    }
+}
+
+/// CreateProcessAsUserW 封装（提权调用者的首选路径；非提权作为 WithTokenW 的回退）
+#[allow(clippy::too_many_arguments)]
+fn create_as_user(
+    pi: &mut PROCESS_INFORMATION,
+    token: HANDLE,
+    cmdline: &[u16],
+    flags: u32,
+    env_ptr: *const core::ffi::c_void,
+    cwd_w: &[u16],
+    startup: &mut STARTUPINFOW,
+) -> i32 {
+    unsafe {
         CreateProcessAsUserW(
             token,
             ptr::null(),
@@ -235,17 +271,13 @@ fn create_with_token(
             env_ptr,
             cwd_w.as_ptr(),
             startup,
-            &mut pi,
+            pi,
         )
-    };
-    if ok != 0 {
-        Ok(pi)
-    } else {
-        Err(last_error())
     }
 }
 
 /// 主流程：受限令牌 + Job Object 启动命令并等待完成
+/// cmd_dir：专用账号场景的 .cmd 落盘目录（None = 系统临时目录）
 pub fn run_restricted_process(
     token: HANDLE,
     command: &str,
@@ -253,6 +285,7 @@ pub fn run_restricted_process(
     env: &HashMap<String, String>,
     timeout_ms: u32,
     job: &crate::job::Job,
+    cmd_dir: Option<&str>,
 ) -> ProcessOutcome {
     let mut outcome = ProcessOutcome {
         code: None,
@@ -263,7 +296,7 @@ pub fn run_restricted_process(
     };
 
     // 临时命令文件
-    let cmd_file = match write_cmd_file(command) {
+    let cmd_file = match write_cmd_file(command, cmd_dir) {
         Ok(f) => f,
         Err(e) => {
             outcome.stdout = e;

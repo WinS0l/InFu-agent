@@ -11,7 +11,7 @@
     "infu": "npm run cli -w @infu/agent --",
     "config": "npm run cli -w @infu/agent -- config",
     "start": "npm run start -w @infu/agent",
-    "test": "npx tsx packages/agent/tests/tools.test.ts && npx tsx packages/agent/tests/templates.test.ts && npx tsx packages/agent/tests/win-sandbox.test.ts"
+    "test": "npx tsx packages/agent/tests/tools.test.ts && npx tsx packages/agent/tests/templates.test.ts && npx tsx packages/agent/tests/win-sandbox.test.ts && npx tsx packages/agent/tests/win-sandbox-net.test.ts"
   },
   "engines": {
     "node": ">=20"

@@ -33,7 +33,12 @@ export interface AgentRunOptions {
   /** 事件推送（CLI/SSE） */
   emit: (event: AgentEvent) => void;
   /** 审批实现（CLI 自动批准；Web 挂 UI） */
-  requestApproval: (description: string, risk: ToolDef["risk"]) => Promise<boolean>;
+  /** 审批（requireExplicit：联网放行等 -y 自动批准也不放行的场景） */
+  requestApproval: (
+    description: string,
+    risk: ToolDef["risk"],
+    requireExplicit?: boolean
+  ) => Promise<boolean>;
   maxSteps?: number;
   /** 无工具调用能力的模型降级：只出方案不执行 */
   suggestOnly?: boolean;
@@ -179,9 +184,13 @@ export async function runAgent(opts: AgentRunOptions): Promise<RunResult> {
   const approvals = { required: 0, approved: 0, denied: 0 };
 
   // 审批计数（包装 requestApproval），工具层走计数版
-  const guardedApproval = async (description: string, risk: ToolDef["risk"]) => {
+  const guardedApproval = async (
+    description: string,
+    risk: ToolDef["risk"],
+    requireExplicit?: boolean
+  ) => {
     approvals.required++;
-    const approved = await requestApproval(description, risk);
+    const approved = await requestApproval(description, risk, requireExplicit);
     if (approved) approvals.approved++;
     else approvals.denied++;
     return approved;
@@ -346,12 +355,20 @@ export async function runAgent(opts: AgentRunOptions): Promise<RunResult> {
 /** 审批请求辅助：生成唯一 id 并推送事件 */
 export function makeApprovalHandler(
   emit: (e: AgentEvent) => void,
-  decide: (description: string, risk: ToolDef["risk"]) => Promise<boolean>
-): (description: string, risk: ToolDef["risk"]) => Promise<boolean> {
-  return async (description, risk) => {
+  decide: (
+    description: string,
+    risk: ToolDef["risk"],
+    requireExplicit?: boolean
+  ) => Promise<boolean>
+): (
+  description: string,
+  risk: ToolDef["risk"],
+  requireExplicit?: boolean
+) => Promise<boolean> {
+  return async (description, risk, requireExplicit) => {
     const id = randomUUID();
     emit({ type: "approval-required", id, description, risk });
-    const approved = await decide(description, risk);
+    const approved = await decide(description, risk, requireExplicit);
     emit({ type: "approval-result", id, approved });
     return approved;
   };

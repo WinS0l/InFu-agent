@@ -70,7 +70,7 @@ export const DEFAULT_SYSTEM_PROMPT = `你是 InFu，一个软件工程智能体�
 5. 任务完成时用中文输出简明总结：做了什么、改动了哪些文件、测试结果、遗留风险。
 6. 只做用户要求的事，不要擅自扩大范围。
 
-（若处于"建议模式"：你只输出方案与命令建议，不执行任何工具。）`;
+（若处于"建议模式"：你只输出方案与命令建议，不执行任何工具——**不要输出任何工具调用格式**（如 XML <invoke> / JSON tool_calls），直接用中文给出方案文本。）`;
 
 /**
  * 交付报告生成 — 基于工具执行记录的结构化总结（PRD 验收标准第 6 条）
@@ -272,9 +272,16 @@ export async function runAgent(opts: AgentRunOptions): Promise<RunResult> {
       });
 
     if (!calls.length) {
+      // 建议模式兜底：模型仍可能输出工具调用格式文本（DeepSeek 实测会模仿 XML <invoke>），
+      // 明确提示未执行，避免用户误以为任务在跑
+      let finalText = text;
+      if (suggestOnly && /<tool_calls|<invoke\b|"tool_calls"/i.test(text)) {
+        finalText +=
+          "\n\n⚠ 当前为「方案」模式（只出方案，不执行工具），以上工具调用格式仅为模型文本、未被执行。如需实际执行任务，请切换到「编排」或「直接」模式后重发。";
+      }
       const report = finishWithReport(step + 1);
-      if (!suppressFinal) emit({ type: "done", text, toolCount, steps: step + 1 });
-      return { text, report, steps: step + 1, toolCount, approvals, toolLogs };
+      if (!suppressFinal) emit({ type: "done", text: finalText, toolCount, steps: step + 1 });
+      return { text: finalText, report, steps: step + 1, toolCount, approvals, toolLogs };
     }
 
     // 3) 执行工具（含审批）

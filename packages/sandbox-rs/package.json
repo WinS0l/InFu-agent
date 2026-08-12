@@ -1,0 +1,22 @@
+{
+  "name": "@infu/sandbox-rs",
+  "version": "0.1.0",
+  "private": true,
+  "description": "InFu Windows 硬沙箱原生模块（restricted tokens + job objects，借鉴 OpenAI Codex）",
+  "main": "index.node",
+  "types": "index.d.ts",
+  "napi": {
+    "name": "infu-sandbox",
+    "triples": {
+      "defaults": true,
+      "additional": []
+    }
+  },
+  "scripts": {
+    "build": "napi build --platform --release && node scripts/copy-node.js",
+    "build:debug": "napi build --platform && node scripts/copy-node.js"
+  },
+  "devDependencies": {
+    "@napi-rs/cli": "^3.0.0"
+  }
+}

@@ -21,11 +21,12 @@
 | 级别 | 名称 | 隔离手段 | 依赖 | 默认 |
 |---|---|---|---|---|
 | L0 | 本机受限执行 | 审批 + 危险命令拦截 + 路径越界防护 | 无 | 兜底（Docker 不可用时） |
-| **L1** | **本机软沙箱** | 环境变量消毒 + 敏感路径写保护 + 命令审计 + 工作区约束 + 超时 | 无 | **默认** |
+| **L1** | **本机软沙箱** | 环境变量消毒 + 敏感路径写保护 + 命令审计 + 工作区约束 + 超时 | 无 | 默认（受限沙箱不可用时） |
+| **L1.5** | **Windows 硬沙箱** | 受限令牌（restricted tokens）+ Job Object：OS 级强制写不了系统目录/提不了权/资源上限 | Rust 原生模块（已随包构建） | win32 自动启用 |
 | L2 | Docker 沙箱 | 容器执行：默认断网、只读挂载或工作区副本、任务后销毁、凭据不进容器 | Docker Desktop | 检测到 Docker 自动启用 |
 | L3 | 内核级/微VM（未来） | WSL2 Landlock / MXC / Firecracker | WSL2 更新 / 云端 | 预留 |
 
-**模式选择**：`auto`（默认）——检测到 Docker 用 L2，否则 L1；可强制 `sandbox=off|soft|docker`。
+**模式选择**：`auto`（默认）——检测到 Docker 用 L2；win32 无 Docker 时用 L1.5 受限沙箱（原生不可用则退回 L1）；可强制 `sandbox=off|soft|docker`。`INFU_SANDBOX_RESTRICTED=0` 可禁用 L1.5（故障排查）。
 
 ## 三、L1 软沙箱实现（默认，零依赖）
 
@@ -35,10 +36,47 @@
 2. **敏感路径写保护**（write_file / edit_file / run_command）：
    - 写保护清单：`~/.ssh/**`、`~/.infu/**`、`~/.aws/**`、`~/.gnupg/**`、`%APPDATA%` 下凭据文件等。
    - 命中 → 拦截并说明原因（升级为审批也不放行——写敏感路径没有合法场景）。
-3. **命令审计**：每次命令执行写入 `~/.infu/logs/commands.log`（时间、命令、cwd、退出码、输出摘要）——与 agent.log 互补。
+3. **命令审计**：每次命令执行写入 `~/.infu/logs/commands.log`（时间、命令、cwd、退出码、输出摘要、沙箱档位）——与 agent.log 互补。
 4. **危险命令拦截**（已有，保留）：`rm -rf`、`format`、`mkfs`、`dd if=` 等 → high 审批。
 5. **工作区约束**（已有）：cwd 必须在项目根内；路径越界拒绝。
 6. **超时**（已有）：命令默认 60s。
+
+## 三·五、L1.5 Windows 硬沙箱（restricted tokens + job objects）✅
+
+> 实现于 M5（2026-08-12），借鉴 OpenAI Codex windows-sandbox-rs（`packages/sandbox-rs/`，Rust N-API 原生模块）。
+> 目标（ROADMAP 完成标准）：run_command 在 Windows 上以受限权限执行——**危险命令即使绕过应用层检查也无法造成系统级破坏**（OS 级强制，而非仅应用层检查）。
+
+### 机制
+
+| 层 | 手段 | 效果 |
+|---|---|---|
+| 受限令牌 | `CreateRestrictedToken`：`DISABLE_MAX_PRIVILEGE \| LUA_TOKEN \| WRITE_RESTRICTED \| DISALLOW_VIRTUALIZATION` | 全部特权禁用（仅保留 SeChangeNotify）；Administrators 组 SID 变 deny-only（写系统目录被 OS 拒绝）；禁止 UAC 虚拟化（防 VirtualStore 绕过） |
+| 进程创建 | `CreateProcessWithTokenW`（1314 时回退 `CreateProcessAsUserW`）；命令写入临时 .cmd 文件执行；`CREATE_SUSPENDED` → 挂 Job → resume（出生即入 Job，无竞态窗口） | 标准用户/管理员均可运行；无命令行长度与引号限制 |
+| Job Object | `KILL_ON_JOB_CLOSE \| ACTIVE_PROCESS(256) \| PROCESS_MEMORY(4GB) \| JOB_MEMORY(8GB)` | 防 fork bomb / 内存炸弹；超时 `TerminateJobObject` 杀整树，不留孤儿 |
+| 输出捕获 | 匿名管道 + 读线程（8MB 上限）；stdin 接 NUL | 与 Node exec 语义一致，防写满死锁 |
+| 输出解码 | 先按 UTF-8 严格解码（Node/tsx 等外部程序），失败回退 GBK（cmd 内置命令按代码页 936） | 中文输出在两种来源下均正确，无乱码 |
+
+### 降级阶梯（透明降级，不静默）
+
+`full`（完整标志）→ `reduced`（去 WRITE_RESTRICTED）→ `basic`（去 LUA_TOKEN）→ `job-only`（受限令牌创建失败，仅 Job Object 约束）。每级在 commands.log 与工具输出中标注实际档位。
+
+### 与 L1 的分工（安全边界）
+
+- **OS 级强制**：写系统目录/提权/资源炸弹——L1.5 负责（受限令牌 + Job）。
+- **应用层**：敏感文件（~/.ssh 等）的**读**隔离——仍由 L1 负责（restricted token 不改变用户 SID 的文件读权限，Codex 同样依赖应用层保护路径）。
+- **网络**：Windows 原生无法像 Linux seccomp 那样按进程断网——网络默认断属 L3（WSL2 Landlock/云沙箱），本档不做。
+- **不降完整性级别**：低 IL 会挡住工作区正常写入，破坏 Agent 本职（Codex 亦不降 IL）。
+
+### 红队对照
+
+| 攻击 | L1.5 防御 |
+|---|---|
+| `rm -rf C:\Windows` 绕过审批 | 受限令牌下 Administrators deny-only → OS 拒绝（Access Denied） |
+| 写 Program Files 被 VirtualStore 重定向 | DISALLOW_VIRTUALIZATION → 真实 ACL 检查 → 拒绝 |
+| fork bomb / 内存炸弹 | Job：ActiveProcessLimit 256 / ProcessMemory 4GB |
+| 超时后孤儿进程 | KILL_ON_JOB_CLOSE + TerminateJobObject |
+| 提权（SeDebug 注入等） | 特权全禁用（DISABLE_MAX_PRIVILEGE） |
+| 嵌套 Job 环境（CI/任务计划程序） | 挂载失败仅警告不阻断（令牌限制仍生效，照抄 Codex 姿态） |
 
 ## 四、L2 Docker 沙箱实现（检测到 Docker 时启用）
 
@@ -91,11 +129,11 @@ Agent 要执行命令
 
 **对 InFu 的启示（Windows 平台）**：
 1. 前沿产品几乎都首选 **OS 原生原语**而非 Docker——轻量、快、零依赖。我们的 L1 方向正确，且借鉴点明确：
-   - 借鉴 Codex 的"保护路径始终只读"（我们已做：~/.ssh、~/.infu 等，可扩展 .git、凭据文件）
-   - 借鉴 Codex Windows 方案：**restricted tokens + job objects**（L1 增强方向，需 Rust/原生实现或 PowerShell 包装）
-   - 网络默认断（WSL2 下可用 Linux 沙箱实现；Windows 原生受限，标记为 L3）
+   - ✅ 已实现：借鉴 Codex 的"保护路径始终只读"（我们已做：~/.ssh、~/.infu 等，可扩展 .git、凭据文件）
+   - ✅ 已实现：借鉴 Codex Windows 方案：**restricted tokens + job objects**（M5，Rust 原生模块 `packages/sandbox-rs/`，见"三·五"节）
+   - ⏳ 网络默认断：受限令牌不拦网络，是 L1.5 最大真实缺口（防 prompt 注入外传）——已升为高优先级待办（见 ROADMAP：WFP 进程级防火墙 / 引导 Docker 断网）
 2. Docker 定位为"可选增强"档（对应 Claude 的 Docker microVM 档）——我们的 L2 设计方向一致。
-3. 未来可借鉴 Cursor 的 **/worktree 模式**：每任务独立工作树副本，任务间零污染。
+3. ✅ 已实现：借鉴 Cursor 的 **/worktree 模式**（M4）+ **/best-of-n 并行尝试**（M5，CLI `--best-of-n`）。
 
 ## 六、参考资料
 

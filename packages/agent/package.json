@@ -13,6 +13,7 @@
   },
   "dependencies": {
     "@infu/shared": "*",
+    "@infu/sandbox-rs": "*",
     "@ai-sdk/gateway": "^3.0.96",
     "@ai-sdk/openai": "^3.0.94",
     "@ai-sdk/anthropic": "^3.0.110",

@@ -19,6 +19,7 @@ import { loadConfig, resolveModel, resolveApiKey, CONFIG_PATH } from "./provider
 import { TOOLS } from "./tools/index.js";
 import { runAgent, makeApprovalHandler, DEFAULT_SYSTEM_PROMPT } from "./agent/loop.js";
 import { runOrchestratedTask } from "./agent/orchestrator.js";
+import { runBestOfN, formatComparison } from "./best-of-n.js";
 import { findTemplate, renderTemplate } from "./templates.js";
 
 // ── 终端着色 ──
@@ -30,28 +31,29 @@ const C = {
   red: (s: string) => `\x1b[31m${s}\x1b[0m`,
 };
 
-function printEvent(e: AgentEvent) {
+function printEvent(e: AgentEvent, prefix = "") {
+  const P = prefix ? `${prefix} ` : "";
   switch (e.type) {
     case "phase-start":
-      console.error(C.green(`\n◆ 阶段：${e.label}（${e.phase}）`));
+      console.error(C.green(`\n${P}◆ 阶段：${e.label}（${e.phase}）`));
       break;
     case "tool-start":
-      console.error(C.cyan(`\n⚙ [${e.tool}]`) + C.dim(` risk=${e.risk} args=${JSON.stringify(e.args).slice(0, 120)}`));
+      console.error(C.cyan(`\n${P}⚙ [${e.tool}]`) + C.dim(` risk=${e.risk} args=${JSON.stringify(e.args).slice(0, 120)}`));
       break;
     case "tool-result":
-      console.error(C.dim(`   ↳ ${e.ok ? "✓" : "✗"} ${e.summary.replace(/\n/g, " ").slice(0, 150)}`));
+      console.error(C.dim(`   ${P}↳ ${e.ok ? "✓" : "✗"} ${e.summary.replace(/\n/g, " ").slice(0, 150)}`));
       break;
     case "approval-required":
-      console.error(C.yellow(`\n🔒 审批请求 [${e.risk}]：${e.description}`));
+      console.error(C.yellow(`\n${P}🔒 审批请求 [${e.risk}]：${e.description}`));
       break;
     case "approval-result":
-      console.error(C.dim(`   ↳ 审批结果：${e.approved ? "已批准" : "已拒绝"}`));
+      console.error(C.dim(`   ${P}↳ 审批结果：${e.approved ? "已批准" : "已拒绝"}`));
       break;
     case "review":
-      console.error(C.green(`\n◆ 审查意见：\n${e.content}`));
+      console.error(C.green(`\n${P}◆ 审查意见：\n${e.content}`));
       break;
     case "error":
-      console.error(C.red(`\n✗ ${e.message}`));
+      console.error(C.red(`\n${P}✗ ${e.message}`));
       break;
   }
 }
@@ -280,6 +282,7 @@ function main() {
   const orchestrate = args.includes("--no-orchestrate") ? "off" : "full";
   const planApproval = !args.includes("--no-plan-approval");
   const templateId = getArg("--template");
+  const bestOfN = parseInt(getArg("--best-of-n") || "", 10) || 0;
 
   // 模板任务：--template <id> 用模板 prompt 代替手动输入（字段用默认值）
   if (templateId) {
@@ -324,7 +327,7 @@ function main() {
 
   console.error(C.dim(`模型: ${modelCfg.name} (${modelCfg.provider}/${modelCfg.model})`));
   console.error(C.dim(`项目: ${root}`));
-  console.error(C.dim(`审批: ${autoApprove ? "自动批准" : "交互确认"}${suggestOnly ? " | 建议模式" : ""}${orchestrate === "off" ? "" : " | 分层编排 " + (orchestrate === "full" ? "(Planner→Executor→Reviewer)" : "(Planner→Executor)")}${orchestrate === "off" || suggestOnly ? "" : planApproval ? " | 计划需确认" : " | 计划不确认"}`));
+  console.error(C.dim(`审批: ${autoApprove ? "自动批准" : "交互确认"}${suggestOnly ? " | 建议模式" : ""}${orchestrate === "off" ? "" : " | 分层编排 " + (orchestrate === "full" ? "(Planner→Executor→Reviewer)" : "(Planner→Executor)")}${orchestrate === "off" || suggestOnly ? "" : planApproval ? " | 计划需确认" : " | 计划不确认"}${bestOfN ? ` | /best-of-n ×${bestOfN}` : ""}`));
   console.error(C.dim(`工具: ${Object.keys(TOOLS).length} 个\n`));
 
   const common = {
@@ -340,6 +343,29 @@ function main() {
     requestApproval: makeApprovalHandler(emit, decide),
     maxSteps,
   };
+
+  // /best-of-n 并行尝试：N 路独立 worktree + 评分择优（计划确认自动关闭）
+  if (bestOfN) {
+    if (suggestOnly || orchestrate === "off") {
+      console.error(C.red("--best-of-n 与 --suggest/--no-orchestrate 不能同时使用（并行的是完整编排）"));
+      process.exit(1);
+    }
+    if (!autoApprove) {
+      console.error(C.yellow("提示：/best-of-n 并行模式下计划确认已关闭；建议加 -y 自动批准（否则审批将逐条询问）"));
+    }
+    console.error(C.yellow(`⚠  /best-of-n 将消耗 ${bestOfN} 倍 token`));
+    const controller = new AbortController();
+    process.once("SIGINT", () => controller.abort());
+    runBestOfN({ n: bestOfN, ...common, abortSignal: controller.signal })
+      .then((r) => {
+        process.stdout.write(formatComparison(r) + "\n");
+      })
+      .catch((e) => {
+        console.error(C.red(`\n✗ /best-of-n 运行失败: ${e.message}`));
+        process.exit(1);
+      });
+    return;
+  }
 
   // 建议模式 / 关闭编排：直跑单 Agent（保持一期行为）
   if (suggestOnly || orchestrate === "off") {

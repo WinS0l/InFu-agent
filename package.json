@@ -7,11 +7,11 @@
     "packages/*"
   ],
   "scripts": {
-    "build": "npm run build -w @infu/shared && npm run build -w @infu/agent",
+    "build": "npm run build -w @infu/shared && npm run build -w @infu/sandbox-rs && npm run build -w @infu/agent",
     "infu": "npm run cli -w @infu/agent --",
     "config": "npm run cli -w @infu/agent -- config",
     "start": "npm run start -w @infu/agent",
-    "test": "npx tsx packages/agent/tests/tools.test.ts && npx tsx packages/agent/tests/templates.test.ts"
+    "test": "npx tsx packages/agent/tests/tools.test.ts && npx tsx packages/agent/tests/templates.test.ts && npx tsx packages/agent/tests/win-sandbox.test.ts"
   },
   "engines": {
     "node": ">=20"

@@ -1,0 +1,31 @@
+[package]
+name = "infu-sandbox"
+version = "0.1.0"
+edition = "2021"
+description = "InFu Windows 硬沙箱（restricted tokens + job objects）"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+napi = { version = "3", default-features = false, features = ["napi8", "async", "tokio_rt", "serde-json"] }
+napi-derive = "3"
+tokio = { version = "1", features = ["rt"] }
+serde_json = "1"
+encoding_rs = "0.8"
+windows-sys = { version = "0.59", features = [
+  "Win32_Foundation",
+  "Win32_Security",
+  "Win32_Storage_FileSystem",
+  "Win32_System_IO",
+  "Win32_System_JobObjects",
+  "Win32_System_Pipes",
+  "Win32_System_Threading",
+] }
+
+[build-dependencies]
+napi-build = "2"
+
+[profile.release]
+lto = true
+strip = "symbols"

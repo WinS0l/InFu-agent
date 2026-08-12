@@ -51,10 +51,11 @@ export function isProtectedPath(abs: string): string | null {
 
 /** 命令审计日志 */
 export const COMMAND_LOG = path.join(os.homedir(), ".infu", "logs", "commands.log");
-export function auditCommand(cwd: string, command: string, ok: boolean, detail: string) {
+export function auditCommand(cwd: string, command: string, ok: boolean, detail: string, sandbox = "") {
   try {
     mkdirSync(path.dirname(COMMAND_LOG), { recursive: true });
-    const line = `[${new Date().toISOString()}] ${ok ? "OK " : "ERR"} | cwd=${cwd} | ${command.slice(0, 200)} | ${detail.slice(0, 120)}`;
+    const tag = sandbox ? ` | sandbox=${sandbox}` : "";
+    const line = `[${new Date().toISOString()}] ${ok ? "OK " : "ERR"} | cwd=${cwd} | ${command.slice(0, 200)} | ${detail.slice(0, 120)}${tag}`;
     appendFileSync(COMMAND_LOG, line + "\n", "utf-8");
   } catch {
     /* 审计失败不影响主流程 */

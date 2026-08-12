@@ -13,6 +13,9 @@ import {
   sanitizeEnv, isProtectedPath, auditCommand, dockerAvailable, buildDockerArgs,
   resolveSandboxMode, type SandboxMode,
 } from "../sandbox/index.js";
+import {
+  winRestrictedAvailable, runRestricted, type RestrictedRunResult,
+} from "../sandbox/win-restricted.js";
 
 const execAsync = promisify(exec);
 const execFileAsync = promisify(execFile);
@@ -103,7 +106,7 @@ async function runInDocker(command: string, root: string, timeoutMs = 120000): P
   }
 }
 
-/** 沙箱模式解析（auto：有 Docker 用容器，否则软沙箱） */
+/** 沙箱模式解析（auto：有 Docker 用容器，否则本地软沙箱/受限沙箱） */
 async function getSandboxMode(): Promise<SandboxMode> {
   const mode = resolveSandboxMode();
   if (mode === "auto") {
@@ -111,6 +114,61 @@ async function getSandboxMode(): Promise<SandboxMode> {
     return hasDocker ? "docker" : "soft";
   }
   return mode;
+}
+
+/** 受限执行结果 → 标准输出格式（level 映射为模式标签；退出码 0 才算成功，与 Node exec 语义一致） */
+function fmtRestricted(r: RestrictedRunResult): { out: string; ok: boolean; code: number | null; sandbox: string } {
+  const ok = r.ok && !r.timedOut && r.code === 0;
+  const body = [r.stdout, r.stderr]
+    .filter((s) => s.trim())
+    .join(r.stdout.trim() && r.stderr.trim() ? "\n[stderr] " : "\n")
+    .trim();
+  const out = ok
+    ? clip(body || "(无输出)")
+    : `命令执行失败（code=${r.code}${r.timedOut ? "，超时被终止" : ""}）：\n${clip(body)}`;
+  // full/reduced/basic 都算受限沙箱；job-only 是令牌降级档
+  const sandbox = r.level === "job-only" ? "restricted:job-only" : r.level === "none" ? "soft" : "restricted";
+  return { out, ok, code: r.code, sandbox };
+}
+
+/**
+ * 本地命令统一分派：Docker → 受限沙箱（win32，L1.5）→ 软沙箱（L1）
+ * run_command 与 run_test 共用（修复 run_test 绕过沙箱的历史缺口）。
+ * 返回 sandbox 标签用于审计与展示。
+ */
+async function execLocal(
+  command: string,
+  cwd: string,
+  timeoutMs = 60000
+): Promise<{ ok: boolean; out: string; code: number | null; sandbox: string }> {
+  const mode = await getSandboxMode();
+  if (mode === "docker") {
+    const r = await runInDocker(command, cwd, timeoutMs);
+    return { ...r, sandbox: "docker" };
+  }
+  if (mode === "off") {
+    const r = await runShell(command, cwd, timeoutMs);
+    return { ...r, sandbox: "off" };
+  }
+  // soft / auto→soft：win32 且原生受限沙箱可用时优先（OS 级强制）
+  if (process.platform === "win32" && (await winRestrictedAvailable())) {
+    const r = await runRestricted(command, cwd, timeoutMs, sanitizeEnv());
+    if (r) return fmtRestricted(r);
+    // native 异常 → 降级软沙箱（下面统一处理）
+  }
+  const r = await runShell(command, cwd, timeoutMs);
+  return { ...r, sandbox: "soft" };
+}
+
+/** 沙箱标签 → 展示文本 */
+function sandboxTag(sandbox: string): string {
+  switch (sandbox) {
+    case "docker": return "（Docker 沙箱）";
+    case "restricted": return "（受限沙箱）";
+    case "restricted:job-only": return "（受限沙箱·仅Job）";
+    case "off": return "（直连）";
+    default: return "（软沙箱）";
+  }
 }
 
 /** 递归遍历（跳过常见噪音目录），返回匹配文件列表 */
@@ -321,17 +379,12 @@ export const TOOLS: Record<string, ToolDef> = {
       }
       const timeoutMs = (args.timeout as number | undefined) || 60000;
 
-      // 沙箱模式执行（auto：有 Docker 用容器，否则软沙箱）
-      const mode = await getSandboxMode();
-      const r =
-        mode === "docker"
-          ? await runInDocker(command, ctx.root, timeoutMs)
-          : await runShell(command, ctx.root, timeoutMs);
+      // 沙箱统一分派（docker / 受限沙箱 / 软沙箱）
+      const r = await execLocal(command, ctx.root, timeoutMs);
 
-      // 命令审计（所有模式）
-      auditCommand(ctx.root, command, r.ok, r.out);
-      const modeTag = mode === "docker" ? "（Docker 沙箱）" : mode === "soft" ? "（软沙箱）" : "（直连）";
-      return r.out + (r.ok ? `\n${modeTag}执行完成` : `\n${modeTag}`);
+      // 命令审计（所有模式，含沙箱档位）
+      auditCommand(ctx.root, command, r.ok, r.out, r.sandbox);
+      return r.out + (r.ok ? `\n${sandboxTag(r.sandbox)}执行完成` : `\n${sandboxTag(r.sandbox)}`);
     },
   },
 
@@ -397,8 +450,10 @@ export const TOOLS: Record<string, ToolDef> = {
         else return "未检测到测试框架，请用 command 参数指定";
       }
       if (!(await guard(ctx, "medium", `运行测试：${cmd}`))) return "用户拒绝：未运行测试";
-      const r = await runShell(cmd, abs, 300000);
-      return r.out;
+      // 测试命令与 run_command 同走沙箱分派（docker / 受限沙箱 / 软沙箱）
+      const r = await execLocal(cmd, abs, 300000);
+      auditCommand(abs, cmd, r.ok, r.out, r.sandbox);
+      return r.out + (r.ok ? `\n${sandboxTag(r.sandbox)}执行完成` : `\n${sandboxTag(r.sandbox)}`);
     },
   },
 

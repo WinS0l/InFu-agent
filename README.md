@@ -113,6 +113,7 @@ npm run start -w @infu/agent
 - **审批钩子**：写文件/编辑/执行命令前请求用户确认（Web UI 挂接；CLI 可用 `-y` 自动批准），支持队列化处理
 - **高风险命令检测**：`rm -rf` / `format` 等强制审批
 - **沙箱（L1 软沙箱，默认）**：环境变量消毒（API Key 不进命令环境）、敏感路径写保护（~/.ssh、~/.infu 等）、命令审计（~/.infu/logs/commands.log）
+- **沙箱（L1.5 Windows 硬沙箱）**：Windows 下命令以受限令牌 + Job Object 执行（Rust 原生，借鉴 OpenAI Codex）——写系统目录/提权被 OS 级拒绝、资源上限、超时杀进程树；透明降级（full→reduced→basic→仅Job），`INFU_SANDBOX_RESTRICTED=0` 禁用
 - **沙箱（L2 Docker）**：检测到 Docker 自动启用——默认断网、项目只读挂载、资源限制（2g/2c/256pids）、非 root、任务后销毁、凭据不进容器；`INFU_SANDBOX=soft|docker|off` 可切换
 - **交付报告**：任务结束自动生成结构化报告（改动清单/测试结果/命令执行/失败项/风险提示）
 - **Key 不入库**：API Key 存 `~/.infu/config.json`（或环境变量），.gitignore 已排除
@@ -127,3 +128,4 @@ npm run start -w @infu/agent
 | M2 | Web 三栏 UI（对话/工具过程/Diff）+ SSE 流式 + 停止/审批队列 | ✅ 完成 |
 | M3 | 沙箱（L1 软沙箱 + L2 Docker）+ 交付报告 + 模型管理 UI | ✅ 完成 |
 | M4 | 模板任务引导（小白一键开跑）+ Planner/Reviewer 分层编排 | ✅ 完成 |
+| M5 | Windows 硬沙箱（restricted tokens + job objects，Rust 原生）+ `/best-of-n` 并行尝试（CLI） | ✅ 完成 |

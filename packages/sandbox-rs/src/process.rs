@@ -3,6 +3,8 @@
 //! 借鉴 Codex process.rs，差异与理由：
 //!   - 优先 CreateProcessWithTokenW（交互用户只需 SE_IMPERSONATE_NAME），
 //!     ERROR_PRIVILEGE_NOT_HELD(1314) 时回退 CreateProcessAsUserW（需 SE_INCREASE_QUOTA）
+//!   - M6 曾加入"提权调用者强制 AsUserW"分流（WithTokenW 产生 0xC0000142），
+//!     随账号方案移除——该坑只影响专用账号令牌，当前用户受限令牌无此问题（M5 验证）
 //!   - 命令统一写入临时 .cmd 文件再执行：绕开 CreateProcessWithTokenW 的
 //!     1024 字符命令行限制与引号转义地狱
 //!   - CREATE_SUSPENDED → AssignProcessToJobObject → ResumeThread：进程出生即入 Job，
@@ -209,16 +211,7 @@ fn create_with_token(
     let cwd_w = wide(cwd);
     let env_ptr = env_block.map_or(ptr::null(), |b| b.as_ptr() as *const _);
 
-    // 提权调用者：直接 AsUserW（WithTokenW 会产生 0xC0000142 子进程）
-    // INFU_SANDBOX_WITHTOKEN=1：强制 WithTokenW（调试用）
-    if crate::user::is_elevated() && std::env::var("INFU_SANDBOX_WITHTOKEN").is_err() {
-        if create_as_user(&mut pi, token, cmdline, flags, env_ptr, &cwd_w, startup) != 0 {
-            return Ok(pi);
-        }
-        return Err(last_error());
-    }
-
-    // 非提权调用者：WithTokenW（交互用户只需 SE_IMPERSONATE_NAME，非 LOGON 场景不加载 profile）
+    // 1) CreateProcessWithTokenW（交互用户只需 SE_IMPERSONATE_NAME，非 LOGON 场景不加载 profile）
     let ok = unsafe {
         CreateProcessWithTokenW(
             token,
@@ -240,7 +233,7 @@ fn create_with_token(
         return Err(err);
     }
 
-    // 2) 回退 CreateProcessAsUserW（持有 SE_INCREASE_QUOTA/SE_ASSIGNPRIMARYTOKEN 时可用）
+    // 2) 回退 CreateProcessAsUserW（管理员持有 SE_INCREASE_QUOTA 时可用）
     if create_as_user(&mut pi, token, cmdline, flags, env_ptr, &cwd_w, startup) != 0 {
         Ok(pi)
     } else {

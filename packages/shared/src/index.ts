@@ -36,14 +36,6 @@ export interface ModelConfig {
 export interface InfuConfig {
   models: ModelConfig[];
   defaultModelId?: string;
-  /**
-   * 网络出站控制（M6，Windows）——`infu sandbox-net setup` 写入：
-   * 沙箱命令默认以断网账号运行（WFP 拦截出站），联网需审批放行
-   */
-  sandboxNet?: {
-    /** 是否启用（默认 true；INFU_SANDBOX_NET=0 或 false 时沙箱命令走当前用户受限令牌） */
-    enabled?: boolean;
-  };
 }
 
 /** 风险级别（审批挂钩） */

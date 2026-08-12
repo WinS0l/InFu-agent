@@ -3,50 +3,6 @@
 /** 当前平台是否支持受限执行（Windows 且模块加载成功） */
 export declare function available(): boolean
 
-/**
- * 授权沙箱账号访问工作区：root Modify（继承）+ 祖先路径 Traverse + Low 完整性级别。
- * 授权主体含 AppContainer 包 SID（AppContainer 进程按包 SID 做路径访问检查，
- * 仅授用户 SID 会报 WinError 267）。非提权可调用（当前用户拥有目录）。返回授权明细。
- */
-export declare function netGrantDir(path: string): Array<string>
-
-/** 当前进程是否管理员提权（UAC TokenElevation） */
-export declare function netIsElevated(): boolean
-
-/** 移除网络出站控制：删档案 + 删账号 + 删状态文件。需提权。幂等。 */
-export declare function netRemove(): string
-
-/**
- * 安装网络出站控制：创建两个沙箱账号 + AppContainer 断网档案 + 写状态文件 + 授权工具目录。
- * 需提权（`infu sandbox-net setup` 通过 UAC 触发）。幂等（档案先删后建、账号重置密码）。
- */
-export declare function netSetup(): NetSetupResult
-
-export interface NetSetupResult {
-  offlineUser: string
-  onlineUser: string
-  offlineSid: string
-  /** setup 时授权的工具目录（Read+Execute） */
-  toolDirs: Array<string>
-  createdAt: string
-}
-
-/** 查询网络出站控制状态（非提权可调用，如实报告各环节） */
-export declare function netStatus(): NetStatusResult
-
-export interface NetStatusResult {
-  /** 状态文件存在（账号+规则已配置过） */
-  configured: boolean
-  /** 当前进程是否提权 */
-  elevated: boolean
-  /** offline 账号登录测试通过（账号存在 + 密文可解 + 密码正确） */
-  offlineOk: boolean
-  onlineOk: boolean
-  /** WFP 双栈拦截规则已安装（非提权下查询受限时为 false） */
-  rulesOk: boolean
-  error?: string
-}
-
 export interface RunOptions {
   cwd: string
   timeoutMs: number
@@ -54,8 +10,6 @@ export interface RunOptions {
   processMemoryMb?: number
   jobMemoryMb?: number
   activeProcessLimit?: number
-  /** 沙箱账号："offline"（断网）/ "online"（联网）；不传 = 当前用户受限令牌 */
-  sandboxUser?: string
 }
 
 /** 以受限令牌 + Job Object 执行命令（异步，后台线程） */
@@ -69,7 +23,5 @@ export interface RunResult {
   timedOut: boolean
   /** full | reduced | basic | job-only | none */
   level: string
-  /** offline | online | none（none = 未用专用账号） */
-  net: string
   error?: string
 }

@@ -40,13 +40,13 @@ start-infu.bat                 # Windows 一键启动（服务 + Web + 浏览器
 - M3：**沙箱 L1**（环境变量消毒/敏感路径写保护/命令审计）+ **沙箱 L2**（Docker：断网/只读挂载/资源限制/任务后销毁）、**交付报告**（buildReport，任务结束自动生成）、**模型管理 Web UI**（CRUD API + 弹窗）
 - git worktree 任务工作树：每任务独立分支 + 工作树，任务后手动合并/丢弃（server 三端点 + Web 开关/操作条）
 - M4：**模板任务引导**（4 模板：初始化项目/修复测试失败/分析项目/添加功能；Web 空态欢迎面板 + CLI `--template`）+ **Planner/Reviewer 分层编排**（`orchestrator.ts`：Planner 只读规划 → 计划确认 → Executor 全工具执行 → Reviewer 只读审查 → 汇总报告；Web 输入框旁**三档模式选择器**（编排/直接/方案，Shift+Tab 切换）+ **计划卡片**（可编辑、批准后执行，`POST /api/plan/:id`）；CLI `--no-orchestrate`/`--no-plan-approval`）
+- M6：**网络出站软控制策略**（本机实测全部 OS 级按进程断网路线不可行——WFP 引擎拒绝/LSA 特权被加固删除且授不回去/AppContainer 低盒 WithTokenW 1314/SYSTEM 辅助触发通道全被硬化封死/未装 Docker，详见 ROADMAP；落地为命令级策略 `net-policy.ts`：外传命令 curl/wget/nc/ssh/powershell 网络调用等默认拦截，`network=true` 经人工审批放行（🌐，-y 不放行），审计 `egress-blocked`；OS 级断网的正确姿势 = Docker L2 `--network none` 或未来云版 microVM）
 - M5：**沙箱 L1.5 Windows 硬沙箱**（Rust 原生 `packages/sandbox-rs/`：CreateRestrictedToken 四标志 + Job Object 资源上限/杀整树 + 降级阶梯 full→reduced→basic→job-only；win32 自动启用；`INFU_SANDBOX_RESTRICTED=0` 禁用；run_command 与 run_test 统一走 `execLocal` 分派，修复了 run_test 绕过沙箱的缺口）+ **`/best-of-n` 并行尝试**（CLI `--best-of-n <N>`：N 路独立 worktree 并行完整编排，评分择优：测试×40/工具成功率×25/报告×20/效率×15，任务后保留 worktree 手动合并/丢弃）
 - 后台日志：`~/.infu/logs/agent.log`（全事件）+ `commands.log`（命令审计，含沙箱档位）
 
 ## 未完成 / 下一步
 
 **以 `docs/ROADMAP.md` 为准**（本处仅摘要）：
-- ⏳ **网络出站控制**（L1.5 最大真实缺口：受限令牌不拦网络，防 prompt 注入外传；方案 WFP 进程级防火墙或引导用 Docker 断网）
 - ⏳ 沙箱长期升级 microVM（**已降级为条件触发**：仅多租户/不可信代码场景需要，如云版 InFu 落地时）
 - ⏳ 低优先级：云版 InFu、WSL2 原生沙箱、/best-of-n Web 端并行 UI
 

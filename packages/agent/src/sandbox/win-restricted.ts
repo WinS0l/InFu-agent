@@ -28,7 +28,6 @@ type NativeModule = {
       jobMemoryMb?: number;
       activeProcessLimit?: number;
       /** M6 网络出站控制：沙箱专用账号 "offline"（断网）/ "online"（联网） */
-      sandboxUser?: "offline" | "online";
     }
   ): Promise<RestrictedRunResult>;
 };
@@ -108,15 +107,12 @@ export async function winRestrictedAvailable(): Promise<boolean> {
 /**
  * 受限执行命令。返回 null 表示 native 不可用/异常（调用方应回退软沙箱）；
  * 返回结果但 ok=false 是正常语义（命令退出码非 0 / 超时 / 创建失败）。
- * sandboxUser：M6 沙箱专用账号（"offline"=断网 / "online"=联网审批放行）；
- * 未配置 sandbox-net 时传入会得到明确的错误结果（不静默降级）。
  */
 export async function runRestricted(
   command: string,
   cwd: string,
   timeoutMs: number,
-  env: ProcessEnv,
-  sandboxUser?: "offline" | "online"
+  env: ProcessEnv
 ): Promise<RestrictedRunResult | null> {
   const m = loadNative();
   if (!m) return null;
@@ -125,7 +121,6 @@ export async function runRestricted(
       cwd,
       timeoutMs,
       env: pickEnv(env),
-      ...(sandboxUser ? { sandboxUser } : {}),
     });
   } catch {
     return null;

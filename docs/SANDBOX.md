@@ -64,7 +64,7 @@
 
 - **OS 级强制**：写系统目录/提权/资源炸弹——L1.5 负责（受限令牌 + Job）。
 - **应用层**：敏感文件（~/.ssh 等）的**读**隔离——仍由 L1 负责（restricted token 不改变用户 SID 的文件读权限，Codex 同样依赖应用层保护路径）。
-- **网络**：Windows 原生无法像 Linux seccomp 那样按进程断网——网络默认断属 L3（WSL2 Landlock/云沙箱），本档不做。
+- **网络**：OS 级按进程断网在本机实测不可行（加固环境，见三·六）——命令级断网策略（外传拦截 + network 审批）由 M6 负责；容器级断网用 Docker L2。
 - **不降完整性级别**：低 IL 会挡住工作区正常写入，破坏 Agent 本职（Codex 亦不降 IL）。
 
 ### 红队对照
@@ -77,6 +77,36 @@
 | 超时后孤儿进程 | KILL_ON_JOB_CLOSE + TerminateJobObject |
 | 提权（SeDebug 注入等） | 特权全禁用（DISABLE_MAX_PRIVILEGE） |
 | 嵌套 Job 环境（CI/任务计划程序） | 挂载失败仅警告不阻断（令牌限制仍生效，照抄 Codex 姿态） |
+
+## 三·六、网络出站软控制策略（M6 收尾版）✅
+
+> 实现于 M6（2026-08-12）。**本机实测 OS 级按进程断网全部路线不可行**（见下表），
+> M6 落地为应用层命令策略：外传命令默认拦截（断网语义），`network=true` 经人工审批放行。
+
+### 为什么收尾为软控制（本机实测结论）
+
+| OS 级路线 | 结果 | 决定性证据 |
+|---|---|---|
+| 专用沙箱账号（Codex elevated 模式） | ❌ | LSA 特权数据库被本机加固策略删除 `SeImpersonate`/`SeAssignPrimaryToken`/`SeIncreaseQuota`，`LsaAddAccountRights` 返回"特权不存在"（0xC0000060=STATUS_NO_SUCH_PRIVILEGE），**无法补授**；他人令牌 WithTokenW/AsUserW 均 1314 |
+| 当前用户 AppContainer 低盒（无网络能力=出站全断） | ❌ | 低盒令牌 + `CreateProcessWithTokenW` = 1314（实测）；AsUserW 需缺失的 SeAssignPrimaryToken |
+| SYSTEM 提权辅助任务 | ❌ | SYSTEM 持有全部特权，但非提权触发被任务 DACL 拒绝；本机 schtasks `/SD` 被改为 startdate、TaskScheduler COM 校验拒绝 `LogonType=ServiceAccount`、事件触发器只认真实事件信道——**所有触发变通被硬化封死** |
+| WFP 防火墙（ALE_USER_ID 按进程/用户规则） | ❌ | 引擎拒绝全部 12 种值编码（Windows 11 25H2 build 26200） |
+| Docker L2 容器断网（`--network none`） | ⚠️ 机器未装 Docker | 安装 Docker Desktop 后 `INFU_SANDBOX=docker` 即得容器级断网（L2 已有实现，见第四章） |
+
+> 结论：非代码缺陷，是**环境限制**（加固策略 + 未装 Docker）。若未来落地云版/多租户（microVM 触发），
+> 网络隔离在可控环境（云服务器）下随 microVM 一并解决。
+
+### 机制（应用层命令策略，`net-policy.ts`）
+
+- **外传工具整词检测**：`curl / wget / nc / ncat / netcat / telnet / sftp / scp / ftp / rsync / ssh / socat / aria2c / axel`（排除 `ssh-keygen` 等变体前缀）；语言组合模式：`powershell Invoke-WebRequest/Net.WebClient/...`、`python urllib/requests/socket/...`、`node http/net/ws...`、`openssl s_client`。
+- **默认断网语义**：`run_command`/`run_test` 命中外传意图 → 命令**不执行**，提示"断网策略拦截，确需联网请用 network=true 经人工审批放行"；审计写入 `sandbox=egress-blocked`。
+- **联网放行**：`network=true` → 必须人工审批（🌐 标记，`-y` 自动批准也不放行）→ 通过则正常执行并标注"（联网放行）"，拒绝则仍拦截。
+- **与沙箱本体叠加**：拦截发生在外传工具执行前；放行的命令仍走 L1.5 受限令牌 + Job（OS 级）。
+
+### 局限（如实标注）
+
+- **可被绕过**（变体/编码/白名单外的外传通道）——属风险降低措施，**不是内核强制断网**。
+- OS 级强制断网的正确姿势：Docker L2（`INFU_SANDBOX=docker`，`--network none`）或未来云版 microVM。
 
 ## 四、L2 Docker 沙箱实现（检测到 Docker 时启用）
 

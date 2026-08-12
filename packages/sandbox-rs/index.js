@@ -701,9 +701,4 @@ if (!nativeBinding) {
 
 module.exports = nativeBinding
 module.exports.available = nativeBinding.available
-module.exports.netGrantDir = nativeBinding.netGrantDir
-module.exports.netIsElevated = nativeBinding.netIsElevated
-module.exports.netRemove = nativeBinding.netRemove
-module.exports.netSetup = nativeBinding.netSetup
-module.exports.netStatus = nativeBinding.netStatus
 module.exports.runRestricted = nativeBinding.runRestricted

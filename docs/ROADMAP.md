@@ -16,13 +16,16 @@
 - **实现**：Rust N-API 原生模块 `packages/sandbox-rs/`（CreateRestrictedToken 四标志 + CreateProcessWithTokenW/AsUserW 回退 + Job Object 资源上限/杀整树），win32 自动启用，透明降级阶梯 full→reduced→basic→job-only
 - **验证**：`npm test` 的 win-sandbox 自测（令牌权限断言/超时杀进程树/消毒端到端）+ 文档 docs/SANDBOX.md「三·五」节
 
-### ⏳ 网络出站控制（L1.5 受限沙箱的最大真实缺口）【2026-08-12 评估新增】
-- **缺口**：受限令牌只约束「写系统目录/提权/资源」，**不拦网络**——Agent 被 prompt 注入诱导后，可 `curl` 外传项目代码（凭据已消毒，但项目代码本身是敏感资产）
-- **可选方案**（渐进）：
-  1. **WFP 防火墙按进程规则**（借鉴 Codex elevated 模式的 `INetFwRule3.LocalUserAuthorizedList`）：默认禁出站 + 白名单放行；需提权安装规则，可做成 `infu sandbox-net setup` 一次性配置
-  2. **文档化引导**：需要断网隔离时用 `INFU_SANDBOX=docker`（L2 容器自带 `--network none`）；受限沙箱用户接受出站
-- **完成标准**：受限进程默认无出站网络（白名单例外），或提供文档化的一键断网方案
-- **优先级理由**：当前威胁模型下真实存在的攻击面，成本可控；WSL2 下可更轻量（Landlock/bubblewrap + 网络 namespace）
+### ✅ 网络出站控制（M6 收尾版：命令级软控制）【完成 2026-08-12】
+- **结论**：本机（Windows 11 25H2 build 26200，深度加固 + 未装 Docker）**实测全部 OS 级按进程断网路线不可行**：
+  - WFP `ALE_USER_ID` 12 种值编码全被引擎拒绝（WFP 方案死）
+  - LSA 特权数据库被加固删除 `SeImpersonate`/`SeAssignPrimaryToken`/`SeIncreaseQuota`，`LsaAddAccountRights` 返回"特权不存在"且**无法补授**（专用账号方案死；SYSTEM 有特权但不可被非提权触发，且 schtasks /SD、TaskScheduler COM、事件触发器全部被硬化封死——SYSTEM 辅助方案死）
+  - AppContainer 低盒令牌 + `CreateProcessWithTokenW` = 1314（当前用户低盒方案死）
+  - 机器未装 Docker（L2 容器断网暂不可用）
+  - 均为**环境限制而非代码缺陷**；若未来落地云版/多租户（microVM 触发），网络隔离随 microVM 在可控环境一并解决
+- **完成形态**：应用层命令策略（`net-policy.ts`）——外传命令（curl/wget/nc/ssh/powershell/python 网络调用等）默认拦截（断网语义），`network=true` 经人工审批放行（🌐，-y 不自动放行），审计 `sandbox=egress-blocked`；放行命令仍走 L1.5 受限令牌 + Job
+- **验证**：`npm test` 的 win-sandbox-net 自测 21 项（检测/拦截/放行/审计）+ 文档 docs/SANDBOX.md「三·六」
+- **OS 级断网的正确姿势**：装 Docker Desktop 后 `INFU_SANDBOX=docker`（L2 自带 `--network none`）；云版落地后 microVM
 
 ### ⏳ 沙箱长期升级：Docker microVM 模式（借鉴 Claude Code）【降级为条件触发】
 - **目标**：L2 Docker 沙箱从共享内核容器升级为 microVM（独立内核，Docker Desktop 4.58+ 的 VM 模式）

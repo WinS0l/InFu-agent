@@ -94,20 +94,32 @@ export function inferCapabilities(cfg: ModelConfig): NonNullable<ModelConfig["ca
   };
 }
 
-/** 读取用户配置（~/.infu/config.json） */
-import { readFileSync, existsSync } from "node:fs";
+/** 读取用户配置（~/.infu/config.json；v2.1 起 zod schema 校验 + 损坏备份） */
+import { readFileSync, existsSync, copyFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import type { InfuConfig } from "@infu/shared";
+import { parseInfuConfig } from "@infu/shared";
 
 export const CONFIG_PATH = join(homedir(), ".infu", "config.json");
 
 export function loadConfig(): InfuConfig | null {
   if (!existsSync(CONFIG_PATH)) return null;
   try {
-    return JSON.parse(readFileSync(CONFIG_PATH, "utf-8")) as InfuConfig;
+    const raw = JSON.parse(readFileSync(CONFIG_PATH, "utf-8"));
+    const r = parseInfuConfig(raw);
+    if (r.ok) return r.config;
+    // 格式错误：备份原文件（防数据丢失），返回 null 走"未配置"引导
+    const backup = `${CONFIG_PATH}.broken-${Date.now()}`;
+    try { copyFileSync(CONFIG_PATH, backup); } catch { /* 备份失败忽略 */ }
+    console.error(`[infu] 配置文件格式错误（已备份到 ${backup}）：${r.error}`);
+    return null;
   } catch (e) {
-    throw new Error(`模型配置文件解析失败 ${CONFIG_PATH}: ${(e as Error).message}`);
+    // JSON 语法损坏：同样备份后走"未配置"引导
+    const backup = `${CONFIG_PATH}.broken-${Date.now()}`;
+    try { copyFileSync(CONFIG_PATH, backup); } catch { /* 备份失败忽略 */ }
+    console.error(`[infu] 配置文件解析失败（已备份到 ${backup}）：${(e as Error).message}`);
+    return null;
   }
 }
 

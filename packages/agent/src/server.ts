@@ -20,10 +20,12 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import type { ModelConfig, AgentEvent, RiskLevel, InfuConfig, OrchestrateMode } from "@infu/shared";
 import { loadConfig, resolveApiKey, CONFIG_PATH } from "./providers/registry.js";
+import { parseInfuConfig } from "@infu/shared";
 import { TOOLS } from "./tools/index.js";
 import { runAgent, DEFAULT_SYSTEM_PROMPT } from "./agent/loop.js";
 import { runOrchestratedTask } from "./agent/orchestrator.js";
 import { TASK_TEMPLATES } from "./templates.js";
+import { getStore, buildContinuationPrompt, type SessionSummary } from "./db/store.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -43,15 +45,16 @@ async function isGitRepo(root: string): Promise<boolean> {
   }
 }
 
-/** 模型配置持久化（安全写入） */
+/** 模型配置持久化（安全写入；v2.1 起带 schema 版本号） */
 function saveConfig(cfg: InfuConfig) {
   mkdirSync(join(homedir(), ".infu"), { recursive: true });
-  writeFileSync(CONFIG_PATH, JSON.stringify(cfg, null, 2), "utf-8");
+  writeFileSync(CONFIG_PATH, JSON.stringify({ ...cfg, version: cfg.version ?? 1 }, null, 2), "utf-8");
 }
 function readConfigRaw(): InfuConfig {
   if (!existsSync(CONFIG_PATH)) return { models: [] };
   try {
-    return JSON.parse(readFileSync(CONFIG_PATH, "utf-8")) as InfuConfig;
+    const r = parseInfuConfig(JSON.parse(readFileSync(CONFIG_PATH, "utf-8")));
+    return r.ok ? r.config : { models: [] };
   } catch {
     return { models: [] };
   }
@@ -186,7 +189,6 @@ export function createApp(opts: ServerOptions = {}) {
 
       const body = await c.req.json().catch(() => ({}));
       const prompt: string = body.prompt || "";
-      const root: string = body.root || opts.defaultRoot || process.cwd();
       const modelId: string | undefined = body.modelId;
       const maxSteps: number | undefined = typeof body.maxSteps === "number" ? body.maxSteps : undefined;
       // 分层编排（M4）：默认 full（Planner→Executor→Reviewer）；计划默认需用户确认
@@ -203,6 +205,10 @@ export function createApp(opts: ServerOptions = {}) {
       stream.onAbort(() => {
         stopHeartbeat();
         controller.abort();
+        // 中断/停止（用户停止/连接断流）：会话标记 stopped（正常收尾由 finally 处理，不覆盖）
+        if (sessionId && store.getSession(sessionId)?.status === "running") {
+          store.updateStatus(sessionId, "stopped");
+        }
       });
 
       if (!prompt) {
@@ -210,8 +216,33 @@ export function createApp(opts: ServerOptions = {}) {
         return;
       }
 
+      // ── v2.1 会话绑定（持久化落库）──
+      const store = getStore();
+      let sessionId: string | undefined =
+        typeof body.sessionId === "string" && body.sessionId ? body.sessionId : undefined;
+      let root: string = body.root || opts.defaultRoot || process.cwd();
+      let effectivePrompt = prompt;
+      if (sessionId) {
+        // 继续会话：校验存在 + 历史回顾注入 + 沿用历史 root/model
+        const s = store.getSession(sessionId);
+        if (!s) {
+          await stream.writeSSE({ event: "error", data: JSON.stringify({ message: `会话不存在: ${sessionId}` }) });
+          return;
+        }
+        if (!body.root && s.root) root = s.root;
+        effectivePrompt = buildContinuationPrompt(store.summarizeSession(sessionId), prompt);
+      } else {
+        // 新会话：SSE 首帧回传会话 id（Web 绑定 activeSessionId）
+        const title = prompt.slice(0, 40);
+        sessionId = store.createSession({ title, root, modelId, mode: suggestOnly ? "ask" : orchestrate === "off" ? "direct" : "orchestrate" });
+        await stream.writeSSE({ event: "session", data: JSON.stringify({ type: "session", id: sessionId }) });
+      }
+      // 用户消息落库（检查点之一：Rewind 锚点）
+      store.appendEvent(sessionId, { type: "user-message", text: prompt });
+
       // 项目根目录校验：路径不存在/不是目录时直接报明确错误（避免 AI 根据工具报错瞎猜路径）
       if (!existsSync(root) || !statSync(root).isDirectory()) {
+        store.updateStatus(sessionId, "error");
         await stream.writeSSE({
           event: "error",
           data: JSON.stringify({ message: `项目根目录不存在或不是目录: ${root}（请检查输入框里的路径是否正确，使用绝对路径）` }),
@@ -222,6 +253,7 @@ export function createApp(opts: ServerOptions = {}) {
       const config = loadConfig();
       const models = config?.models ?? [];
       if (!models.length) {
+        store.updateStatus(sessionId, "error");
         await stream.writeSSE({ event: "error", data: JSON.stringify({ message: "未配置模型，请先配置 ~/.infu/config.json" }) });
         return;
       }
@@ -232,6 +264,7 @@ export function createApp(opts: ServerOptions = {}) {
 
       const emit = (e: AgentEvent) => {
         logEvent(e); // 后台日志（窗口 + 文件）
+        store.appendEvent(sessionId, e); // 全量落库（tool-result 含完整输出）
         stream.writeSSE({ event: "agent", data: JSON.stringify(e) }).catch(() => {});
       };
 
@@ -299,7 +332,9 @@ export function createApp(opts: ServerOptions = {}) {
               confirmPlan,
             });
         await stream.writeSSE({ event: "done", data: JSON.stringify({ final: final.text }) });
+        store.updateStatus(sessionId, "done");
       } catch (e) {
+        store.updateStatus(sessionId, "error");
         await stream.writeSSE({ event: "error", data: JSON.stringify({ message: (e as Error).message }) });
       } finally {
         stopHeartbeat();
@@ -391,6 +426,74 @@ export function createApp(opts: ServerOptions = {}) {
       approved: !!body.approved,
       plan: typeof body.plan === "string" ? body.plan : undefined,
     });
+    return c.json({ ok: true });
+  });
+
+  // ── 会话管理（v2.1 持久化：多会话/历史浏览/继续会话/Rewind）──
+
+  // 创建会话（Web 新建 / v1 数据迁移；任务发起请直接 POST /api/chat）
+  app.post("/api/sessions", async (c) => {
+    const body = await c.req.json().catch(() => ({}));
+    const store = getStore();
+    const id = store.createSession({
+      title: String(body.title || "新会话").slice(0, 200),
+      root: String(body.root || opts.defaultRoot || process.cwd()),
+      modelId: typeof body.modelId === "string" ? body.modelId : undefined,
+      mode: typeof body.mode === "string" ? body.mode : undefined,
+    });
+    // 手动创建 → 非运行中（避免列表显示 running 残留）
+    store.updateStatus(id, "stopped");
+    return c.json({ ok: true, id });
+  });
+
+  // 批量导入事件（v1 localStorage 数据迁移；校验事件类型与格式）
+  app.post("/api/sessions/:id/events", async (c) => {
+    const id = c.req.param("id");
+    const body = await c.req.json().catch(() => ({}));
+    const store = getStore();
+    if (!store.getSession(id)) return c.json({ ok: false, message: "会话不存在" }, 404);
+    const events: unknown[] = Array.isArray(body.events) ? body.events : [];
+    if (!events.length) return c.json({ ok: false, message: "events 不能为空" }, 400);
+    for (const e of events) {
+      if (!e || typeof e !== "object" || typeof (e as any).type !== "string") {
+        return c.json({ ok: false, message: "事件格式错误" }, 400);
+      }
+      store.appendEvent(id, e as AgentEvent);
+    }
+    return c.json({ ok: true, count: events.length });
+  });
+
+  // 会话列表（多会话/历史浏览）
+  app.get("/api/sessions", (c) => {
+    const limit = Math.min(parseInt(String(c.req.query("limit") ?? "50"), 10) || 50, 200);
+    return c.json({ sessions: getStore().listSessions(limit) });
+  });
+
+  // 会话详情（全量事件流 → Web 端重放历史）
+  app.get("/api/sessions/:id", (c) => {
+    const id = c.req.param("id");
+    const store = getStore();
+    const session = store.getSession(id);
+    if (!session) return c.json({ ok: false, message: "会话不存在" }, 404);
+    return c.json({ session, events: store.getEvents(id) });
+  });
+
+  // 删除会话（事件流一并删除）
+  app.delete("/api/sessions/:id", (c) => {
+    const id = c.req.param("id");
+    const store = getStore();
+    if (!store.getSession(id)) return c.json({ ok: false, message: "会话不存在" }, 404);
+    store.deleteSession(id);
+    return c.json({ ok: true });
+  });
+
+  // Rewind：回滚到检查点（seq 及之后的事件全部删除，会话回到"未完成"态）
+  app.post("/api/sessions/:id/rewind", async (c) => {
+    const id = c.req.param("id");
+    const body = await c.req.json().catch(() => ({}));
+    const seq = parseInt(String(body.seq ?? ""), 10);
+    if (!Number.isInteger(seq) || seq < 0) return c.json({ ok: false, message: "seq 必须是 >= 0 的整数" }, 400);
+    if (!getStore().rewind(id, seq)) return c.json({ ok: false, message: "会话不存在" }, 404);
     return c.json({ ok: true });
   });
 

@@ -2,13 +2,13 @@ import { useEffect, useRef, useState } from "react";
 import {
   Send, Bot, User, Sparkles, Square, GitBranch, GitMerge, Trash2, Loader2,
   FolderPlus, FlaskConical, SearchCode, Puzzle, ArrowLeft, Check,
-  Workflow, Zap, MessageSquareText,
+  Workflow, Zap, MessageSquareText, RotateCcw,
 } from "lucide-react";import { Streamdown } from "streamdown";
 import type { TaskTemplate, PhaseId } from "@infu/shared";
 import { renderTemplate } from "@infu/shared";
 import { useStore } from "../store";
 import type { ChatMode } from "../store";
-import { sendChat, mergeWorktree, discardWorktree, fetchTemplates } from "../api";
+import { sendChat, mergeWorktree, discardWorktree, fetchTemplates, rewindSession } from "../api";
 import Timeline from "./Timeline";
 import ReasoningBlock from "./ReasoningBlock";
 import PlanCard from "./PlanCard";
@@ -84,7 +84,7 @@ function StructuredBlock({ content, tone }: { content: string; tone: "accent" | 
 
 /** 中间栏：对话 + 工具过程 + 输入框 */
 export default function ChatPanel() {
-  const { messages, running, abortRun, worktree, worktreeNote, root, clearWorktree, mode, setMode, plan, useWorktree, setUseWorktree } = useStore();
+  const { messages, running, abortRun, worktree, worktreeNote, root, clearWorktree, mode, setMode, plan, useWorktree, setUseWorktree, activeSessionId } = useStore();
   const [input, setInput] = useState("");
   const [wtBusy, setWtBusy] = useState(false);
   const [wtMsg, setWtMsg] = useState("");
@@ -93,6 +93,58 @@ export default function ChatPanel() {
   const [templates, setTemplates] = useState<TaskTemplate[]>([]);
   const [selectedTpl, setSelectedTpl] = useState<TaskTemplate | null>(null);
   const [fieldValues, setFieldValues] = useState<Record<string, string>>({});
+  // Rewind（微信撤回式）：点「回滚到此」进入待定态——消息不立即删除，
+  // 编辑后发送 = 提交回滚（截断+重发），点「取消回滚」= 恢复原样
+  const { pendingRollback, setPendingRollback, clearPendingRollback } = useStore();
+  const inputRef = useRef<HTMLTextAreaElement>(null);
+
+  /** 进入回滚待定态：锚点 = 被点轮次对应的最后一条用户消息（编辑重发 = 替换它），
+   *  该用户消息及之后全部进入待回滚；输入框填充该消息原文 */
+  const askRewind = (seq: number) => {
+    if (!activeSessionId || running || pendingRollback) return;
+    const idx = messages.findIndex((m) => m.role === "assistant" && (m.seqStart ?? Infinity) >= seq);
+    // 回滚锚点：该轮之前最后一条用户消息（user-message 事件 seq）；无则退回该轮 step-start
+    let anchorIdx = idx >= 0 ? idx : messages.length;
+    let anchorSeq = seq;
+    for (let i = idx - 1; i >= 0; i--) {
+      if (messages[i].role === "user" && messages[i].seqStart != null) {
+        anchorIdx = i;
+        anchorSeq = messages[i].seqStart!;
+        break;
+      }
+    }
+    const count = messages.length - anchorIdx;
+    const fillText = messages[anchorIdx]?.role === "user" ? messages[anchorIdx].text : "";
+    setPendingRollback({ seq: anchorSeq, count, fillText });
+    setInput(fillText);
+    requestAnimationFrame(() => {
+      const ta = inputRef.current;
+      if (ta) { ta.focus(); ta.setSelectionRange(ta.value.length, ta.value.length); }
+    });
+  };
+
+  /** 取消回滚：恢复原样（消息不变、输入框清空） */
+  const cancelRollback = () => {
+    clearPendingRollback();
+    setInput("");
+  };
+
+  /** 提交任务；待定态下先提交回滚（截断服务端事件）再发送新消息 */
+  const submit = async () => {
+    const text = input.trim();
+    if (!text || running) return;
+    if (pendingRollback && activeSessionId) {
+      try {
+        await rewindSession(activeSessionId, pendingRollback.seq);
+        clearPendingRollback();
+      } catch (e) {
+        useStore.getState().addError(`回滚提交失败: ${(e as Error).message}`);
+        return; // 回滚失败不发送
+      }
+    }
+    setInput("");
+    sendChat(text);
+  };
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -102,13 +154,6 @@ export default function ChatPanel() {
   useEffect(() => {
     fetchTemplates().then(setTemplates).catch(() => {});
   }, []);
-
-  const submit = () => {
-    const text = input.trim();
-    if (!text || running) return;
-    setInput("");
-    sendChat(text);
-  };
 
   /** 模板一键开跑：无字段直接发；有字段先进内联表单 */
   const pickTemplate = (tpl: TaskTemplate) => {
@@ -163,6 +208,21 @@ export default function ChatPanel() {
     <main className="flex min-w-0 flex-1 flex-col">
       {/* 消息区 */}
       <div className="min-h-0 flex-1 overflow-y-auto">
+        {/* 回滚待定态：被回滚消息顶部标记条 */}
+        {pendingRollback && (
+          <div className="flex items-center gap-2 border-b border-warn/30 bg-warn/10 px-4 py-1.5 text-xs text-warn">
+            <RotateCcw className="h-3 w-3 shrink-0" />
+            <span className="min-w-0 flex-1 truncate">
+              待回滚 {pendingRollback.count} 条消息——编辑后发送将替换，或取消回滚
+            </span>
+            <button
+              className="shrink-0 cursor-pointer rounded border border-line bg-muted px-2 py-0.5 text-[11px] text-text transition-colors hover:border-warn/60 hover:text-warn"
+              onClick={cancelRollback}
+            >
+              取消回滚
+            </button>
+          </div>
+        )}
         {messages.length === 0 && (
           <div className="flex h-full flex-col items-center justify-center gap-4 px-6 text-center">
             <div className="flex h-14 w-14 items-center justify-center rounded-2xl bg-panel-2 text-accent">
@@ -240,8 +300,20 @@ export default function ChatPanel() {
           </div>
         )}
 
-        {messages.map((m) => (
-          <div key={m.id} className="border-b border-line/40 px-4 py-3">
+        {messages.map((m, idx) => {
+          // 待回滚范围：锚点消息（用户消息或该轮）起的所有消息（变灰 + 标记）
+          const rmIdx = pendingRollback
+            ? messages.findIndex((x) => (x.seqStart ?? Infinity) >= pendingRollback.seq)
+            : -1;
+          const pending = rmIdx >= 0 && idx >= rmIdx;
+          return (
+          <div key={m.id} className={`group border-b border-line/40 px-4 py-3 transition-opacity duration-200 ${pending ? "opacity-40" : ""}`}>
+            {pending && (
+              <div className="mb-1 flex items-center gap-1 text-[10px] font-medium text-warn">
+                <RotateCcw className="h-2.5 w-2.5" />
+                待回滚
+              </div>
+            )}
             <div className="mb-1.5 flex items-center gap-2">
               {m.role === "user" ? (
                 <>
@@ -256,6 +328,17 @@ export default function ChatPanel() {
                     <span className={`rounded-full border px-1.5 py-px text-[10px] font-medium ${PHASE_BADGE[m.phase].cls}`}>
                       {PHASE_BADGE[m.phase].label}
                     </span>
+                  )}
+                  {/* v2.1 Rewind：回滚到该轮检查点（悬停出现；进入待定态，编辑发送后替换） */}
+                  {m.seqStart != null && !running && !pendingRollback && (
+                    <button
+                      className="ml-auto hidden items-center gap-1 rounded-md border border-line px-1.5 py-0.5 text-[10px] text-sub transition-colors duration-150 hover:border-warn/60 hover:text-warn group-hover:flex"
+                      onClick={() => askRewind(m.seqStart!)}
+                      title="回滚到该轮：消息进入待回滚状态，编辑发送后替换，可取消"
+                    >
+                      <RotateCcw className="h-2.5 w-2.5" />
+                      回滚到此
+                    </button>
                   )}
                 </>
               )}
@@ -293,7 +376,8 @@ export default function ChatPanel() {
               </>
             )}
           </div>
-        ))}
+          );
+        })}
         <div ref={bottomRef} />
       </div>
 
@@ -365,6 +449,7 @@ export default function ChatPanel() {
         </div>
         <div className="flex items-end gap-2 rounded-lg border border-line bg-muted p-2 transition-colors focus-within:border-accent/60">
           <textarea
+            ref={inputRef}
             className="max-h-40 min-h-[40px] flex-1 resize-none bg-transparent px-1 py-1 text-sm text-text placeholder:text-sub/60 focus:outline-none"
             placeholder={
               mode === "orchestrate"

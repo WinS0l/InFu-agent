@@ -40,7 +40,7 @@
 > 分期原则：地基先于智能，智能先于生态；**阶段是路线图不是合同**——每期做完按实际体量校准下一期。
 > UI 决策必须先讨论后动手（见 AGENTS.md 项目约定）。
 
-### v2.1 持久化与会话
+### ✅ v2.1 持久化与会话【完成 2026-08-12】
 - 会话/任务持久化（数据库层）——记忆/任务/统计/审计全部依赖
 - 多会话、历史浏览、继续会话；断点恢复 + Rewind（会话回滚到检查点）
 - 配置 schema 基础
@@ -94,3 +94,4 @@
 - ✅ git worktree 任务工作树（Cursor /worktree 借鉴）：每任务独立分支 + 工作树，任务后手动合并/丢弃，主代码零污染
 - ✅ M4：模板任务引导（一键初始化项目/修复测试失败/分析项目/添加功能，Web 空态欢迎面板 + CLI --template）+ Planner/Reviewer 分层编排（Planner 只读规划→计划确认→Executor 执行→Reviewer 只读审查→汇总报告；Web 三档模式选择器 编排/直接/方案 + 可编辑计划卡片，CLI --no-orchestrate/--no-plan-approval）
 - ✅ M5：沙箱中期升级（L1.5 Windows 硬沙箱：restricted tokens + job objects，Rust 原生模块 + 降级阶梯 + 自测）+ /best-of-n 并行尝试（CLI `--best-of-n <N>`：N 路独立 worktree 并行完整编排 + 评分择优）
+- ✅ **v2.1 持久化与会话（2026-08-12）**：SQLite 会话库 `~/.infu/infu.db`（node:sqlite 零依赖，Node ≥22.5）+ 全量事件流落库（tool-result 存完整输出，Diff 面板升级为完整 diff）+ 会话 API（列表/详情/删除/Rewind）+ Web 左侧栏会话列表（新建/切换/删除/状态徽标）+ 继续会话（历史回顾注入，消息级重建留 v2.2）+ 消息轮次内嵌「回滚到此」（两段式确认，检查点 = user-message/step-start）+ CLI `infu sessions`/`--session <id>` + v1 localStorage 数据一次性迁移 + 配置 zod schema 基础（version 字段/损坏备份/未知字段保留，v2.4 权限/沙箱设置的地基）。验证：`npm test` 86 项全绿 + CLI/Web 端到端实测（真实模型建会话/继续/回滚）

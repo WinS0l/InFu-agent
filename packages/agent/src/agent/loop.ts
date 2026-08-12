@@ -295,16 +295,17 @@ export async function runAgent(opts: AgentRunOptions): Promise<RunResult> {
         });
         continue;
       }
-      emit({ type: "tool-start", tool: call.toolName, args: call.input, risk: tools[call.toolName]?.risk ?? "low" });
+      emit({ type: "tool-start", tool: call.toolName, args: call.input, risk: tools[call.toolName]?.risk ?? "low", callId: call.toolCallId });
       toolCount++;
       try {
         const out = await execute(call.input, ctx);
-        emit({ type: "tool-result", tool: call.toolName, ok: true, summary: out.slice(0, 200) });
+        // summary 推完整输出（v2.1 会话落库与 Diff 面板需要完整内容；显示层自行截断）
+        emit({ type: "tool-result", tool: call.toolName, ok: true, summary: out, callId: call.toolCallId });
         toolLogs.push({ tool: call.toolName, args: call.input, ok: true, summary: out });
         toolResultParts.push({ role: "tool", tool_call_id: call.toolCallId, content: out });
       } catch (e) {
         const msg = `工具执行异常: ${(e as Error).message}`;
-        emit({ type: "tool-result", tool: call.toolName, ok: false, summary: msg });
+        emit({ type: "tool-result", tool: call.toolName, ok: false, summary: msg, callId: call.toolCallId });
         toolLogs.push({ tool: call.toolName, args: call.input, ok: false, summary: msg });
         toolResultParts.push({ role: "tool", tool_call_id: call.toolCallId, content: msg });
       }

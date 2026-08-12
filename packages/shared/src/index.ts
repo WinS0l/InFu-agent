@@ -32,10 +32,12 @@ export interface ModelConfig {
   };
 }
 
-/** 全局配置 */
+/** 全局配置（v2.1 schema 基础：version 字段 + 未知字段保留前向兼容） */
 export interface InfuConfig {
   models: ModelConfig[];
   defaultModelId?: string;
+  /** 配置 schema 版本（v2.1 起写入；v2.4 权限/沙箱设置升级时递增） */
+  version?: number;
 }
 
 /** 风险级别（审批挂钩） */
@@ -47,21 +49,26 @@ export type PhaseId = "planner" | "executor" | "reviewer";
 /** 分层编排模式：off=单 Agent；plan=Planner→Executor；full=Planner→Executor→Reviewer */
 export type OrchestrateMode = "off" | "plan" | "full";
 
-/** Agent 过程事件（CLI 打印 / SSE 推送前端） */
+/** Agent 过程事件（CLI 打印 / SSE 推送前端；v2.1 起全量落库 ~/.infu/infu.db） */
 export type AgentEvent =
   | { type: "text"; text: string }
   | { type: "reasoning"; text: string }
   | { type: "step-start"; step: number }
   | { type: "phase-start"; phase: PhaseId; label: string }
-  | { type: "tool-start"; tool: string; args: Record<string, unknown>; risk: RiskLevel }
-  | { type: "tool-result"; tool: string; ok: boolean; summary: string }
+  | { type: "tool-start"; tool: string; args: Record<string, unknown>; risk: RiskLevel; callId?: string }
+  | { type: "tool-result"; tool: string; ok: boolean; summary: string; callId?: string }
   | { type: "approval-required"; id: string; description: string; risk: RiskLevel }
   | { type: "approval-result"; id: string; approved: boolean }
   | { type: "report"; content: string }
   | { type: "review"; content: string }
   | { type: "plan"; id: string; content: string }
   | { type: "done"; text: string; toolCount: number; steps: number }
-  | { type: "error"; message: string };
+  | { type: "error"; message: string }
+  // ── v2.1 会话持久化新增 ──
+  /** SSE 首帧：回传新会话 id（Web 端绑定 activeSessionId） */
+  | { type: "session"; id: string }
+  /** 用户消息（服务端落库/重放历史用；模型不消费） */
+  | { type: "user-message"; text: string };
 
 /** 工具执行上下文 */
 export interface ToolContext {
@@ -128,6 +135,34 @@ export function renderTemplate(tpl: TaskTemplate, values: Record<string, string>
   return out;
 }
 
+// ── v2.1 会话持久化（服务端 / Web 共享的 API 形状）──
+
+/** 会话状态（Web 列表徽标 / 继续会话判断） */
+export type SessionStatus = "running" | "done" | "error" | "stopped";
+
+/** 会话元数据（列表项 / 详情） */
+export interface SessionMeta {
+  id: string;
+  title: string;
+  root: string;
+  modelId?: string;
+  mode?: string;
+  status: SessionStatus;
+  createdAt: number;
+  updatedAt: number;
+  /** 统计（列表展示用） */
+  eventCount: number;
+  toolCount: number;
+  promptCount: number;
+}
+
+/** 事件流条目（seq 全局有序；ts 为事件时间戳） */
+export interface StoredEvent {
+  seq: number;
+  ts: number;
+  event: AgentEvent;
+}
+
 /** /api/chat 任务请求体 */
 export interface TaskRequest {
   prompt: string;
@@ -141,4 +176,47 @@ export interface TaskRequest {
   planApproval?: boolean;
   /** 建议模式：模型只出方案，不执行任何工具 */
   suggestOnly?: boolean;
+}
+
+// ── v2.1 配置 schema（zod 校验 + 默认值合并；passthrough 保留未知字段，前向兼容 v2.4 权限/沙箱设置）──
+import { z } from "zod";
+
+const modelConfigSchema = z
+  .object({
+    id: z.string().min(1),
+    name: z.string().min(1),
+    provider: z.enum(["openai", "anthropic", "google", "deepseek", "zhipu", "qwen", "ollama", "custom"]),
+    model: z.string().min(1),
+    baseURL: z.string().optional(),
+    apiKey: z.string().optional(),
+    capabilities: z
+      .object({
+        toolCalling: z.boolean().optional(),
+        vision: z.boolean().optional(),
+        streaming: z.boolean().optional(),
+      })
+      .passthrough()
+      .optional(),
+  })
+  .passthrough();
+
+/** InfuConfig 校验 schema（未知字段保留；version 缺省补 1） */
+export const infuConfigSchema = z
+  .object({
+    models: z.array(modelConfigSchema).default([]),
+    defaultModelId: z.string().optional(),
+    version: z.number().int().positive().default(1),
+  })
+  .passthrough();
+
+/** 校验并归一化配置：返回 { ok:true, config } 或 { ok:false, error }（损坏文件不抛异常，由调用方备份处理） */
+export function parseInfuConfig(raw: unknown): { ok: true; config: InfuConfig } | { ok: false; error: string } {
+  const r = infuConfigSchema.safeParse(raw);
+  if (!r.success) {
+    // 只报第一条错误，消息保持简洁（zod v4 的 issues 数组）
+    const issue = r.error.issues[0];
+    const where = issue?.path?.length ? `${issue.path.join(".")}: ` : "";
+    return { ok: false, error: `${where}${issue?.message ?? "配置格式错误"}` };
+  }
+  return { ok: true, config: r.data as unknown as InfuConfig };
 }

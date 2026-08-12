@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useStore } from "./store";
-import { fetchModels, sendChat } from "./api";
+import { fetchModels, sendChat, fetchSessions, fetchSessionEvents, maybeMigrateV1 } from "./api";
 import Sidebar from "./components/Sidebar";
 import ChatPanel from "./components/ChatPanel";
 import DiffPanel from "./components/DiffPanel";
@@ -35,6 +35,25 @@ export default function App() {
     if (loaded.current) return;
     loaded.current = true;
     loadModels();
+    // v2.1 会话：v1 localStorage 数据迁移 + 加载会话列表 + 恢复上次会话
+    (async () => {
+      try {
+        await maybeMigrateV1();
+        await fetchSessions();
+        const st = useStore.getState();
+        if (st.activeSessionId) {
+          // 恢复上次会话（服务端已删除时回到空态）
+          try {
+            const { events } = await fetchSessionEvents(st.activeSessionId);
+            st.loadSession(events);
+          } catch {
+            st.newSession();
+          }
+        }
+      } catch {
+        /* 会话服务未就绪时静默，5 秒重试（与模型加载同一节奏） */
+      }
+    })();
     // Agent 服务可能尚未就绪：每 5 秒自动重试直到模型加载成功
     const timer = setInterval(() => {
       if (useStore.getState().models.length === 0) loadModels();

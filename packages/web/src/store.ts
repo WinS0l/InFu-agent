@@ -1,6 +1,6 @@
 import { create } from "zustand";
 import { persist } from "zustand/middleware";
-import type { AgentEvent, ModelConfig, PhaseId } from "@infu/shared";
+import type { AgentEvent, ModelConfig, PhaseId, SessionMeta, StoredEvent } from "@infu/shared";
 
 /** 任务模式（三档选择器，对齐 Cursor/Copilot 的模式切换） */
 export type ChatMode = "orchestrate" | "direct" | "ask";
@@ -19,6 +19,8 @@ export interface ChatMsg {
   phase?: PhaseId;
   /** 审查意见（Reviewer 最终输出，独立渲染块） */
   review?: string;
+  /** v2.1：该轮第一条事件的 seq（Rewind 回滚锚点；历史重放时标记） */
+  seqStart?: number;
 }
 
 /** 工具事件状态（UI 呈现） */
@@ -64,6 +66,22 @@ interface StoreState {
   setModels: (models: ModelConfig[]) => void;
   setModelId: (id: string) => void;
   setRoot: (root: string) => void;
+  /** v2.1 会话：列表 + 当前会话 */
+  sessions: SessionMeta[];
+  activeSessionId: string | null;
+  setSessions: (s: SessionMeta[]) => void;
+  setActiveSessionId: (id: string | null) => void;
+  /** 新建会话：清空聊天区并脱离当前会话（下一轮任务由服务端新建） */
+  newSession: () => void;
+  /** 加载历史会话（事件流重放为消息；跳过 plan/审批交互事件） */
+  loadSession: (events: StoredEvent[]) => void;
+  /**
+   * v2.1 Rewind 待定态（微信撤回式）：点「回滚到此」后不立即删除，
+   * 消息进入待回滚状态；编辑发送 = 提交回滚（截断+重发），取消 = 恢复原样。
+   */
+  pendingRollback: { seq: number; count: number; fillText: string } | null;
+  setPendingRollback: (p: { seq: number; count: number; fillText: string }) => void;
+  clearPendingRollback: () => void;
   addUserMsg: (text: string) => void;
   ensureAssistant: () => ChatMsg;
   appendText: (text: string) => void;
@@ -123,6 +141,9 @@ export const useStore = create<StoreState>()(
   messages: [],
   running: false,
   approvals: [],
+  sessions: [],
+  activeSessionId: null,
+  pendingRollback: null,
   useWorktree: true,
   worktree: null,
   worktreeNote: "",
@@ -144,6 +165,117 @@ export const useStore = create<StoreState>()(
   },
   setModelId: (id) => set({ modelId: id }),
   setRoot: (root) => set({ root }),
+  setSessions: (sessions) => set({ sessions }),
+  setActiveSessionId: (id) => set({ activeSessionId: id }),
+  setPendingRollback: (p) => set({ pendingRollback: p }),
+  clearPendingRollback: () => set({ pendingRollback: null }),
+  newSession: () =>
+    set({
+      messages: [],
+      activeSessionId: null,
+      pendingRollback: null,
+      running: false,
+      approvals: [],
+      diffContent: "",
+      fileChanges: [],
+      currentStep: 1,
+      stepStartTimes: {},
+      currentPhase: null,
+      plan: null,
+    }),
+
+  /** 历史会话重放：事件流 → 消息（复用消息结构，右侧 Diff/文件改动一并恢复） */
+  loadSession: (events) => {
+    const msgs: ChatMsg[] = [];
+    const fileChanges: string[] = [];
+    let diffContent = "";
+    let cur: ChatMsg | null = null; // 当前 assistant 轮次（每个 step-start 一条）
+    let phase: PhaseId | undefined;
+    let currentStep = 1;
+    for (const { seq, ts, event } of events) {
+      switch (event.type) {
+        case "user-message":
+          // seqStart 记 user-message 事件 seq（回滚锚点：编辑重发 = 替换这条用户消息）
+          msgs.push({ id: nextId(), role: "user", text: event.text, tools: [], seqStart: seq });
+          cur = null;
+          break;
+        case "phase-start":
+          phase = event.phase;
+          cur = null;
+          break;
+        case "step-start": {
+          // 检查点锚点：该轮第一条事件的 seq（Rewind 用）
+          cur = { id: nextId(), role: "assistant", text: "", tools: [], phase, seqStart: seq };
+          msgs.push(cur);
+          currentStep = event.step;
+          break;
+        }
+        case "text":
+          if (!cur) { cur = { id: nextId(), role: "assistant", text: "", tools: [], phase }; msgs.push(cur); }
+          cur.text += event.text;
+          break;
+        case "reasoning":
+          if (!cur) { cur = { id: nextId(), role: "assistant", text: "", tools: [], phase }; msgs.push(cur); }
+          cur.reasoning = (cur.reasoning ?? "") + event.text;
+          break;
+        case "tool-start": {
+          if (!cur) { cur = { id: nextId(), role: "assistant", text: "", tools: [], phase }; msgs.push(cur); }
+          cur.tools.push({
+            id: `${cur.id}-t${cur.tools.length}-${event.tool}`,
+            tool: event.tool,
+            args: event.args,
+            risk: event.risk,
+            status: "running",
+            step: currentStep,
+            phase,
+            startedAt: ts, // 历史时间戳（耗时展示）
+          });
+          break;
+        }
+        case "tool-result": {
+          if (cur) {
+            const t = cur.tools.find((x) => x.status === "running" && x.tool === event.tool);
+            if (t) { t.status = event.ok ? "ok" : "error"; t.summary = event.summary; t.output = event.summary; }
+          }
+          // 恢复右侧面板（与 finishTool 同规则）
+          if (event.tool === "git_diff" || /^diff --git/m.test(event.summary)) diffContent = event.summary;
+          if (event.tool === "write_file" || event.tool === "edit_file") fileChanges.push(event.summary);
+          break;
+        }
+        case "report":
+          if (cur) cur.report = event.content;
+          break;
+        case "review":
+          if (cur) cur.review = event.content;
+          break;
+        case "done":
+          if (cur) { cur.streaming = false; cur.seqStart = cur.seqStart ?? seq; }
+          break;
+        case "error":
+          msgs.push({ id: nextId(), role: "assistant", text: `⚠️ ${event.message}`, tools: [] });
+          cur = null;
+          break;
+        // 跳过：plan（历史计划已决策，不显示确认卡片）、approval-*、session（非流事件）
+      }
+    }
+    // 收尾：清掉 running 状态工具、streaming 标记
+    for (const m of msgs) {
+      m.streaming = false;
+      for (const t of m.tools) if (t.status === "running") t.status = "error";
+    }
+    set({
+      messages: msgs,
+      fileChanges,
+      diffContent,
+      currentStep,
+      stepStartTimes: {},
+      currentPhase: null,
+      plan: null,
+      pendingRollback: null,
+      running: false,
+      approvals: [],
+    });
+  },
 
   addUserMsg: (text) =>
     set((s) => ({
@@ -349,32 +481,20 @@ export const useStore = create<StoreState>()(
     }),
   }),
   {
-    name: "infu-chat", // localStorage 持久化（刷新不丢对话）
+    name: "infu-chat", // localStorage 持久化（设置项；消息已由 v2.1 服务端会话库托管）
     partialize: (s) => ({
-      messages: s.messages,
       root: s.root,
       modelId: s.modelId,
       useWorktree: s.useWorktree,
       orchestrate: s.orchestrate,
       mode: s.mode,
+      activeSessionId: s.activeSessionId,
     }),
     merge: (persisted, current) => {
       const p = (persisted ?? {}) as Partial<StoreState>;
-      // 恢复时清洗：流式标记清除、中断中的工具标记为 error（连接已断）
-      const messages = (p.messages ?? []).map((m) => ({
-        ...m,
-        streaming: false,
-        tools: (m.tools ?? []).map((t) =>
-          t.status === "running" ? { ...t, status: "error" as const } : t
-        ),
-      }));
-      return {
-        ...current,
-        ...p,
-        messages,
-        running: false,
-        approvals: [],
-      };
+      // 丢弃持久化的旧 messages（v1 数据由 maybeMigrateV1 单独导入为会话）
+      const { messages: _oldMsgs, ...rest } = p;
+      return { ...current, ...rest };
     },
   }
 ));

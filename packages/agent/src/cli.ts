@@ -25,6 +25,7 @@ import { sanitizeEnv } from "./sandbox/index.js";
 import { runOrchestratedTask } from "./agent/orchestrator.js";
 import { runBestOfN, formatComparison } from "./best-of-n.js";
 import { findTemplate, renderTemplate } from "./templates.js";
+import { getStore, buildContinuationPrompt } from "./db/store.js";
 
 const require = createRequire(import.meta.url);
 
@@ -178,7 +179,7 @@ function ask(question: string, def?: string): Promise<string> {
 
 function saveConfig(cfg: InfuConfig) {
   mkdirSync(join(homedir(), ".infu"), { recursive: true });
-  writeFileSync(CONFIG_PATH, JSON.stringify(cfg, null, 2), "utf-8");
+  writeFileSync(CONFIG_PATH, JSON.stringify({ ...cfg, version: cfg.version ?? 1 }, null, 2), "utf-8");
 }
 
 async function configWizard() {
@@ -283,12 +284,35 @@ function main() {
     return;
   }
 
+  // 会话历史（v2.1 持久化）
+  if (args[0] === "sessions") {
+    const list = getStore().listSessions(50);
+    if (!list.length) {
+      console.log("暂无会话历史（运行 infu \"任务描述\" 开始第一个任务）");
+      return;
+    }
+    console.log(C.cyan(`\n═══ InFu 会话历史（${list.length}）═══`));
+    list.forEach((s, i) => {
+      const st =
+        s.status === "done" ? C.green("done") : s.status === "error" ? C.red("error") : C.yellow(s.status);
+      const t = new Date(s.updatedAt).toLocaleString("zh-CN", {
+        month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit",
+      });
+      console.log(` ${String(i + 1).padStart(2)}. ${s.title}`);
+      console.log(`     ${st} · ${t} · ${s.promptCount} 轮 ${s.toolCount} 工具 · ${s.root}`);
+      console.log(C.dim(`     id: ${s.id}`));
+    });
+    console.log(C.dim(`\n继续会话：infu --session <id> "你的指令"`));
+    return;
+  }
+
   const getArg = (name: string) => {
     const i = args.indexOf(name);
     return i >= 0 ? args[i + 1] : undefined;
   };
   let prompt = args.filter((a) => !a.startsWith("--")).join(" ") || "";
-  const root = resolve(getArg("--root") || process.cwd());
+  const rootArg = getArg("--root");
+  let root = resolve(rootArg || process.cwd());
   const modelId = getArg("--model");
   const maxSteps = parseInt(getArg("--max-steps") || "", 10) || undefined;
   const autoApprove = args.includes("-y") || args.includes("--yes");
@@ -315,6 +339,8 @@ function main() {
 用法：
   infu config   ★ 交互式配置模型与 API Key（推荐）
   infu "任务描述" [--root <项目路径>] [--model <模型id>] [-y]
+  infu sessions 会话历史（每次任务自动保存，可继续）
+  infu --session <id> "继续的指令"   继续之前的会话
   infu --setup   生成模型配置模板（JSON）
   infu --suggest 建议模式（模型只出方案，不执行工具）
 
@@ -337,11 +363,61 @@ function main() {
   const config = loadConfig();
   const modelCfg = resolveModel(config, modelId);
   const decide = makeDecider(autoApprove);
-  const emit = (e: AgentEvent) => printEvent(e);
+
+  // ── v2.1 会话（自动落库；--session 继续会话）──
+  const store = getStore();
+  let sessionId: string | undefined;
+  let effectivePrompt = prompt;
+  if (bestOfN) {
+    console.error(C.dim("（/best-of-n 并行模式不写入会话历史）"));
+  } else {
+    const sessionArg = getArg("--session");
+    if (sessionArg) {
+      const s = store.getSession(sessionArg);
+      if (!s) {
+        console.error(C.red(`会话不存在：${sessionArg}（可用 infu sessions 查看）`));
+        process.exit(1);
+      }
+      sessionId = sessionArg;
+      if (!rootArg) root = s.root; // 继续会话：沿用历史项目目录
+      effectivePrompt = buildContinuationPrompt(store.summarizeSession(sessionId), prompt);
+      console.error(C.dim(`继续会话：${s.title}（上次状态 ${s.status}）`));
+    } else {
+      sessionId = store.createSession({
+        title: prompt.slice(0, 40),
+        root,
+        modelId,
+        mode: suggestOnly ? "ask" : orchestrate === "off" ? "direct" : "orchestrate",
+      });
+    }
+    store.appendEvent(sessionId, { type: "user-message", text: prompt });
+  }
+
+  const emit = (e: AgentEvent) => {
+    printEvent(e);
+    if (sessionId) store.appendEvent(sessionId, e);
+  };
+
+  // Ctrl+C：中止 Agent 并将会话标记 stopped（进度保留，可继续）
+  const abortController = new AbortController();
+  process.once("SIGINT", () => {
+    abortController.abort();
+    if (sessionId && store.getSession(sessionId)?.status === "running") {
+      store.updateStatus(sessionId, "stopped");
+      console.error(C.yellow("\n（已停止任务，进度已保存，可用 infu --session 继续）"));
+    }
+  });
+
+  /** 任务收尾：标记状态 + 打印会话 ID */
+  const finishSession = (status: "done" | "error") => {
+    if (!sessionId) return;
+    store.updateStatus(sessionId, status);
+    console.error(C.dim(`\n会话已保存：${sessionId}（查看/继续：infu sessions / infu --session ${sessionId} "指令"）`));
+  };
 
   console.error(C.dim(`模型: ${modelCfg.name} (${modelCfg.provider}/${modelCfg.model})`));
   console.error(C.dim(`项目: ${root}`));
-  console.error(C.dim(`审批: ${autoApprove ? "自动批准" : "交互确认"}${suggestOnly ? " | 建议模式" : ""}${orchestrate === "off" ? "" : " | 分层编排 " + (orchestrate === "full" ? "(Planner→Executor→Reviewer)" : "(Planner→Executor)")}${orchestrate === "off" || suggestOnly ? "" : planApproval ? " | 计划需确认" : " | 计划不确认"}${bestOfN ? ` | /best-of-n ×${bestOfN}` : ""}`));
+  console.error(C.dim(`审批: ${autoApprove ? "自动批准" : "交互确认"}${suggestOnly ? " | 建议模式" : ""}${orchestrate === "off" ? "" : " | 分层编排 " + (orchestrate === "full" ? "(Planner→Executor→Reviewer)" : "(Planner→Executor)")}${orchestrate === "off" || suggestOnly ? "" : planApproval ? " | 计划需确认" : " | 计划不确认"}${bestOfN ? ` | /best-of-n ×${bestOfN}` : ""}${sessionId ? " | 会话已记录" : ""}`));
   console.error(C.dim(`工具: ${Object.keys(TOOLS).length} 个\n`));
 
   const common = {
@@ -351,7 +427,7 @@ function main() {
       baseURL: modelCfg.baseURL,
       apiKey: resolveApiKey(modelCfg),
     },
-    prompt,
+    prompt: effectivePrompt,
     root,
     emit,
     requestApproval: makeApprovalHandler(emit, decide),
@@ -368,9 +444,7 @@ function main() {
       console.error(C.yellow("提示：/best-of-n 并行模式下计划确认已关闭；建议加 -y 自动批准（否则审批将逐条询问）"));
     }
     console.error(C.yellow(`⚠  /best-of-n 将消耗 ${bestOfN} 倍 token`));
-    const controller = new AbortController();
-    process.once("SIGINT", () => controller.abort());
-    runBestOfN({ n: bestOfN, ...common, abortSignal: controller.signal })
+    runBestOfN({ n: bestOfN, ...common, abortSignal: abortController.signal })
       .then((r) => {
         process.stdout.write(formatComparison(r) + "\n");
       })
@@ -388,22 +462,27 @@ function main() {
       system: DEFAULT_SYSTEM_PROMPT,
       tools: TOOLS,
       suggestOnly,
+      abortSignal: abortController.signal,
     })
       .then((r) => {
         process.stdout.write("\n" + r.text + "\n");
+        finishSession("done");
       })
       .catch((e) => {
+        finishSession("error");
         console.error(C.red(`\n✗ Agent 运行失败: ${e.message}`));
         process.exit(1);
       });
     return;
   }
 
-  runOrchestratedTask({ ...common, orchestrate, planApproval })
+  runOrchestratedTask({ ...common, orchestrate, planApproval, abortSignal: abortController.signal })
     .then((r) => {
       process.stdout.write("\n" + r.text + "\n");
+      finishSession("done");
     })
     .catch((e) => {
+      finishSession("error");
       console.error(C.red(`\n✗ Agent 运行失败: ${e.message}`));
       process.exit(1);
     });

@@ -28,8 +28,10 @@ npm run build                  # shared → sandbox-rs(native) → agent
 npm run config                 # 交互式模型配置向导（~/.infu/config.json，Key 不入库）
 npm run infu -- "任务" --root <路径> -y   # CLI 跑 Agent
 npm run infu -- "任务" --root <路径> -y --best-of-n 3   # /best-of-n 并行尝试（N 路 worktree + 评分择优）
+npm run infu -- sessions       # 会话历史（v2.1：每次任务自动落库）
+npm run infu -- --session <id> "继续的指令"   # 继续之前的会话（历史回顾注入）
 npm run start                  # 启动 Agent 服务
-npm run test                   # 工具/模板/Windows 硬沙箱自测（平台自动门控）
+npm run test                   # 工具/模板/Windows 硬沙箱/会话库自测（平台自动门控）
 start-infu.bat                 # Windows 一键启动（服务 + Web + 浏览器）
 ```
 
@@ -44,11 +46,12 @@ start-infu.bat                 # Windows 一键启动（服务 + Web + 浏览器
 - M5：**沙箱 L1.5 Windows 硬沙箱**（Rust 原生 `packages/sandbox-rs/`：CreateRestrictedToken 四标志 + Job Object 资源上限/杀整树 + 降级阶梯 full→reduced→basic→job-only；win32 自动启用；`INFU_SANDBOX_RESTRICTED=0` 禁用；run_command 与 run_test 统一走 `execLocal` 分派，修复了 run_test 绕过沙箱的缺口）+ **`/best-of-n` 并行尝试**（CLI `--best-of-n <N>`：N 路独立 worktree 并行完整编排，评分择优：测试×40/工具成功率×25/报告×20/效率×15，任务后保留 worktree 手动合并/丢弃）
 - 后台日志：`~/.infu/logs/agent.log`（全事件）+ `commands.log`（命令审计，含沙箱档位）
 - ✅ **v1 收官（2026-08-12）**：M1–M6 全部落地（模型接入/10 工具/Agent 循环/Web UI/审批/沙箱 L1·L1.5·L2/编排/模板/best-of-n/网络软控制），`npm test` 68 项全绿，CLI+Web 端到端实测正常。剩余项（云版/microVM/WSL2 沙箱/best-of-n Web UI）均为 v1 范围外，见 ROADMAP
+- ✅ **v2.1 持久化与会话（2026-08-12）**：SQLite 会话库 `~/.infu/infu.db`（node:sqlite，零依赖，**需 Node ≥22.5**，本机 24）+ 全量事件流落库（tool-result 存完整输出，Diff 面板升级为完整 diff）+ 会话 API（列表/详情/删除/Rewind）+ Web 左侧栏会话列表（新建/切换/删除/状态徽标）+ 继续会话（历史回顾注入，消息级上下文重建留 v2.2）+ 消息轮次内嵌「回滚到此」按钮（两段式确认；检查点 = user-message/step-start 事件）+ CLI `infu sessions` / `--session <id>` + v1 localStorage 数据一次性迁移 + 配置 zod schema 基础（version 字段/损坏自动备份/未知字段保留）。`npm test` 86 项全绿 + 真实模型端到端实测（建会话/继续/回滚/Web 重放）
 
 ## 未完成 / 下一步
 
 **以 `docs/ROADMAP.md` 为准**（本处仅摘要）：
-- 🔄 **v2 候选方向**（2026-08-12 评估，未立项）：① MCP 工具生态接入 ② 长任务/上下文压缩（突破 30 步上限）③ 模型兼容矩阵实测（GLM/通义/Kimi/Ollama 未实测）+ 会话持久化/失败重试 ④ best-of-n Web UI。**v2.1 配置系统含：权限等级设置（审批策略：按风险/工具/命令配置，全自动↔全确认）+ 沙箱等级设置（off/L1 软/L1.5 受限/L2 Docker/自动，取代 INFU_SANDBOX 环境变量）**
+- 🔄 **v2 按 ROADMAP 7 阶段推进**（v2.1 ✅）：下一步 **v2.2 模型适配与可靠性**（provider 兼容矩阵实测 GLM/通义/Kimi/Ollama + API 失败自动重试/降级备用模型 + 上下文压缩（长会话自动摘要，v2.1 继续会话的消息级重建也在这里）+ 动态步数；**模型选择流程（codex 式）细节实施前单独讨论**）。v2.4 设置界面含**权限等级设置**（审批策略：按风险/工具/命令配置，全自动↔全确认）+ **沙箱等级设置**（off/L1 软/L1.5 受限/L2 Docker/自动，取代 INFU_SANDBOX 环境变量）——配置 schema 基础已就位（zod + version + 未知字段保留）
 - ⏳ 沙箱长期升级 microVM（**已降级为条件触发**：仅多租户/不可信代码场景需要，如云版 InFu 落地时）
 - ⏳ 低优先级：**v3 团队版 InFu**（触发条件 = 出现第二个真实用户/团队需求，届时 microVM 一并触发，见 ROADMAP）、WSL2 原生沙箱、/best-of-n Web 端并行 UI
 

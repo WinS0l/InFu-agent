@@ -24,6 +24,10 @@ import { parseInfuConfig } from "@infu/shared";
 import { TOOLS } from "./tools/index.js";
 import { runAgent, DEFAULT_SYSTEM_PROMPT } from "./agent/loop.js";
 import { runOrchestratedTask, type OrchestratedRunOptions } from "./agent/orchestrator.js";
+import { inferResumePhase } from "./agent/resume.js";
+import { loadMcpTools } from "./mcp/index.js";
+import { loadPlugins } from "./plugin/index.js";
+import { listSkills, buildSkillsPrompt } from "./plugin/skills.js";
 import { TASK_TEMPLATES } from "./templates.js";
 import { getStore } from "./db/store.js";
 import { rebuildMessages } from "./db/rebuild.js";
@@ -409,6 +413,8 @@ export function createApp(opts: ServerOptions = {}) {
       let effectivePrompt = prompt;
       // v2.2 断点恢复：继续会话 = 从事件流重建完整 messages（工具结果直接来自 DB，不重放副作用）
       let initialMessages: ChatMessageLike[] | undefined;
+      // v2.3 阶段级精确续跑：从事件流推断续跑起点（已确认计划 → 跳过规划阶段）
+      let resumePoint: ReturnType<typeof inferResumePhase> = {};
       if (sessionId) {
         // 继续会话：校验存在 + 消息级重建 + 沿用历史 root/model
         const s = store.getSession(sessionId);
@@ -418,6 +424,7 @@ export function createApp(opts: ServerOptions = {}) {
         }
         if (!body.root && s.root) root = s.root;
         initialMessages = rebuildMessages(store.getEvents(sessionId));
+        resumePoint = inferResumePhase(store.getEvents(sessionId));
       } else {
         // 新会话：SSE 首帧回传会话 id（Web 绑定 activeSessionId）
         const title = prompt.slice(0, 40);
@@ -508,37 +515,59 @@ export function createApp(opts: ServerOptions = {}) {
       };
 
       try {
-        const modelRun = {
-          modelConfig: toRuntimeModel(config, modelCfg),
-          fallbackModelConfigs: fallbackModels.map((m) => toRuntimeModel(config, m)),
-          roleModelConfigs,
-          roleThinking,
-          initialMessages,
-          thinkingLevel,
-          prompt,
-          root,
-          emit,
-          requestApproval,
-          abortSignal: controller.signal,
-          maxSteps,
-        };
-        // 建议模式：单 Agent 直跑（不注入工具，模型只出方案）
-        const final = suggestOnly
-          ? await runAgent({
-              ...modelRun,
-              system: DEFAULT_SYSTEM_PROMPT,
-              tools: TOOLS,
-              suggestOnly: true,
-            })
-          : await runOrchestratedTask({
-              ...modelRun,
-              orchestrate,
-              planApproval,
-              confirmPlan,
-              templateId,
-            });
-        await stream.writeSSE({ event: "done", data: JSON.stringify({ final: final.text }) });
-        store.updateStatus(sessionId, "done");
+        // v2.3 动态扩展：MCP 服务器 + JS 插件（suggestOnly 不注入任何外部能力；
+        // 连接/加载失败的跳过不阻塞任务）。任务结束后统一 close/释放。
+        const mcp = suggestOnly ? null : await loadMcpTools(config?.mcpServers, emit);
+        const plugin = suggestOnly ? null : await loadPlugins(config?.plugins, emit);
+        // skill 发现层：可用技能 name+description 追加到 Executor system（progressive disclosure）
+        const skillsPrompt = buildSkillsPrompt(listSkills(config, root));
+        try {
+          // 阶段级续跑提示（emit 已就绪；跳过规划阶段直接续执行）
+          if (resumePoint.startPhase) {
+            emit({ type: "text", text: "↻ 阶段级续跑：历史中已有确认过的计划，跳过规划阶段，直接从执行阶段继续。" });
+          }
+          const modelRun = {
+            modelConfig: toRuntimeModel(config, modelCfg),
+            fallbackModelConfigs: fallbackModels.map((m) => toRuntimeModel(config, m)),
+            roleModelConfigs,
+            roleThinking,
+            initialMessages,
+            thinkingLevel,
+            prompt,
+            root,
+            emit,
+            requestApproval,
+            abortSignal: controller.signal,
+            maxSteps,
+          };
+          // 建议模式：单 Agent 直跑（不注入工具，模型只出方案）
+          const final = suggestOnly
+            ? await runAgent({
+                ...modelRun,
+                system: DEFAULT_SYSTEM_PROMPT,
+                tools: TOOLS,
+                suggestOnly: true,
+              })
+            : await runOrchestratedTask({
+                ...modelRun,
+                orchestrate,
+                planApproval,
+                confirmPlan,
+                templateId,
+                // v2.3：MCP 工具 + 插件工具只进 Executor（Planner/Reviewer 架构级只读不暴露）；
+                // 插件钩子随 Executor 生效；skill 描述注入 Executor system
+                executorTools: [...(mcp?.tools ?? []), ...(plugin?.tools ?? [])],
+                hooks: plugin?.hooks,
+                skillsPrompt,
+                // 阶段级续跑：跳过已完成的规划阶段（计划沿用上次确认的）
+                startPhase: resumePoint.startPhase,
+                resumePlanText: resumePoint.planText,
+              });
+          await stream.writeSSE({ event: "done", data: JSON.stringify({ final: final.text }) });
+          store.updateStatus(sessionId, "done");
+        } finally {
+          if (mcp) await mcp.close();
+        }
       } catch (e) {
         store.updateStatus(sessionId, "error");
         await stream.writeSSE({ event: "error", data: JSON.stringify({ message: (e as Error).message }) });
@@ -704,6 +733,261 @@ export function createApp(opts: ServerOptions = {}) {
     const seq = parseInt(String(body.seq ?? ""), 10);
     if (!Number.isInteger(seq) || seq < 0) return c.json({ ok: false, message: "seq 必须是 >= 0 的整数" }, 400);
     if (!getStore().rewind(id, seq)) return c.json({ ok: false, message: "会话不存在" }, 404);
+    return c.json({ ok: true });
+  });
+
+  // ── v2.3 MCP 服务器管理（MCP 客户端作为第一个插件类型；工具动态注入 Agent 循环）──
+
+  // 服务器列表（脱敏：env 只回传键名，防密钥泄漏）
+  app.get("/api/mcp", (c) => {
+    const cfg = readConfigRaw();
+    const servers = (cfg.mcpServers ?? []).map((s) => ({
+      id: s.id,
+      name: s.name,
+      type: s.type,
+      command: s.command,
+      args: s.args,
+      url: s.url,
+      enabled: s.enabled !== false,
+      envKeys: s.env ? Object.keys(s.env) : [],
+      riskOverrides: s.riskOverrides,
+    }));
+    return c.json({ servers });
+  });
+
+  // 新增服务器（stdio：command/args；http：url）
+  app.post("/api/mcp", async (c) => {
+    const body = await c.req.json().catch(() => ({}));
+    const cfg = readConfigRaw();
+    const id = String(body.id || "").trim();
+    const name = String(body.name || "").trim();
+    const type = body.type === "http" ? "http" : "stdio";
+    if (!id || !name) return c.json({ ok: false, message: "id/name 不能为空" }, 400);
+    if ((cfg.mcpServers ?? []).some((x) => x.id === id)) {
+      return c.json({ ok: false, message: `MCP 服务器 id "${id}" 已存在` }, 409);
+    }
+    const s: NonNullable<InfuConfig["mcpServers"]>[number] = { id, name, type };
+    if (type === "stdio") {
+      if (!body.command) return c.json({ ok: false, message: "stdio 类型需要 command" }, 400);
+      s.command = String(body.command);
+      if (Array.isArray(body.args)) s.args = body.args.map(String);
+    } else {
+      if (!body.url) return c.json({ ok: false, message: "http 类型需要 url" }, 400);
+      s.url = String(body.url);
+    }
+    if (body.env && typeof body.env === "object") {
+      const env: Record<string, string> = {};
+      for (const [k, v] of Object.entries(body.env)) if (typeof v === "string") env[k] = v;
+      if (Object.keys(env).length) s.env = env;
+    }
+    if (typeof body.enabled === "boolean") s.enabled = body.enabled;
+    if (body.riskOverrides && typeof body.riskOverrides === "object") {
+      const ro: Record<string, RiskLevel> = {};
+      for (const [k, v] of Object.entries(body.riskOverrides)) {
+        if (v === "low" || v === "medium" || v === "high") ro[k] = v;
+      }
+      if (Object.keys(ro).length) s.riskOverrides = ro;
+    }
+    cfg.mcpServers = [...(cfg.mcpServers ?? []), s];
+    saveConfig(cfg);
+    return c.json({ ok: true, server: s.id });
+  });
+
+  // 更新服务器（enabled 切换/编辑）
+  app.put("/api/mcp/:id", async (c) => {
+    const id = c.req.param("id");
+    const body = await c.req.json().catch(() => ({}));
+    const cfg = readConfigRaw();
+    const s = (cfg.mcpServers ?? []).find((x) => x.id === id);
+    if (!s) return c.json({ ok: false, message: "MCP 服务器不存在" }, 404);
+    if (body.name) s.name = String(body.name);
+    if (typeof body.enabled === "boolean") s.enabled = body.enabled;
+    if (typeof body.command === "string") s.command = body.command || undefined;
+    if (Array.isArray(body.args)) s.args = body.args.map(String);
+    if (typeof body.url === "string") s.url = body.url || undefined;
+    if (body.env && typeof body.env === "object") {
+      const env: Record<string, string> = {};
+      for (const [k, v] of Object.entries(body.env)) if (typeof v === "string") env[k] = v;
+      s.env = Object.keys(env).length ? env : undefined;
+    }
+    if (body.riskOverrides && typeof body.riskOverrides === "object") {
+      const ro: Record<string, RiskLevel> = {};
+      for (const [k, v] of Object.entries(body.riskOverrides)) {
+        if (v === "low" || v === "medium" || v === "high") ro[k] = v;
+      }
+      s.riskOverrides = Object.keys(ro).length ? ro : undefined;
+    }
+    saveConfig(cfg);
+    return c.json({ ok: true });
+  });
+
+  // 删除服务器
+  app.delete("/api/mcp/:id", (c) => {
+    const id = c.req.param("id");
+    const cfg = readConfigRaw();
+    if (!(cfg.mcpServers ?? []).some((x) => x.id === id)) {
+      return c.json({ ok: false, message: "MCP 服务器不存在" }, 404);
+    }
+    cfg.mcpServers = (cfg.mcpServers ?? []).filter((x) => x.id !== id);
+    saveConfig(cfg);
+    return c.json({ ok: true });
+  });
+
+  // 探测：连接服务器拉取工具列表（返回名称/描述/有效风险；15s 超时仿上游模型拉取）
+  app.post("/api/mcp/:id/tools", async (c) => {
+    const id = c.req.param("id");
+    const cfg = readConfigRaw();
+    const s = (cfg.mcpServers ?? []).find((x) => x.id === id);
+    if (!s) return c.json({ ok: false, message: "MCP 服务器不存在" }, 404);
+    let conn: Awaited<ReturnType<typeof import("./mcp/index.js").connectMcp>> | undefined;
+    try {
+      const { connectMcp, resolveToolRisk } = await import("./mcp/index.js");
+      conn = await Promise.race([
+        connectMcp(s),
+        new Promise<never>((_, reject) =>
+          setTimeout(() => reject(new Error("连接超时（15s）")), 15000)
+        ),
+      ]);
+      const tools = await conn.listTools();
+      return c.json({
+        ok: true,
+        tools: tools.map((t) => ({
+          name: t.name,
+          description: t.description ?? "",
+          risk: resolveToolRisk(s, t.name),
+        })),
+      });
+    } catch (e) {
+      return c.json({ ok: false, message: `连接失败：${(e as Error).message.slice(0, 200)}` }, 502);
+    } finally {
+      if (conn) {
+        try {
+          await conn.close();
+        } catch {
+          /* 忽略 */
+        }
+      }
+    }
+  });
+
+  // ── v2.3 批 2 插件管理（JS 模块插件：工具/钩子/技能）──
+
+  // 插件列表
+  app.get("/api/plugins", (c) => {
+    const cfg = readConfigRaw();
+    return c.json({ plugins: cfg.plugins ?? [] });
+  });
+
+  // 添加插件
+  app.post("/api/plugins", async (c) => {
+    const body = await c.req.json().catch(() => ({}));
+    const cfg = readConfigRaw();
+    const id = String(body.id || "").trim().toLowerCase().replace(/[^a-z0-9-]+/g, "-").replace(/^-+|-+$/g, "");
+    const path = String(body.path || "").trim();
+    if (!id || !path) return c.json({ ok: false, message: "id/path 不能为空" }, 400);
+    if ((cfg.plugins ?? []).some((x) => x.id === id)) {
+      return c.json({ ok: false, message: `插件 "${id}" 已存在` }, 409);
+    }
+    cfg.plugins = [...(cfg.plugins ?? []), { id, path }];
+    saveConfig(cfg);
+    return c.json({ ok: true, plugin: id });
+  });
+
+  // 更新插件（启停/路径）
+  app.put("/api/plugins/:id", async (c) => {
+    const id = c.req.param("id");
+    const body = await c.req.json().catch(() => ({}));
+    const cfg = readConfigRaw();
+    const p = (cfg.plugins ?? []).find((x) => x.id === id);
+    if (!p) return c.json({ ok: false, message: "插件不存在" }, 404);
+    if (typeof body.path === "string" && body.path.trim()) p.path = body.path.trim();
+    if (typeof body.enabled === "boolean") p.enabled = body.enabled;
+    saveConfig(cfg);
+    return c.json({ ok: true });
+  });
+
+  // 删除插件
+  app.delete("/api/plugins/:id", (c) => {
+    const id = c.req.param("id");
+    const cfg = readConfigRaw();
+    if (!(cfg.plugins ?? []).some((x) => x.id === id)) {
+      return c.json({ ok: false, message: "插件不存在" }, 404);
+    }
+    cfg.plugins = (cfg.plugins ?? []).filter((x) => x.id !== id);
+    saveConfig(cfg);
+    return c.json({ ok: true });
+  });
+
+  // 探测：动态 import 加载插件，报告工具/钩子数（失败返回结构化错误）
+  app.post("/api/plugins/:id/probe", async (c) => {
+    const id = c.req.param("id");
+    const cfg = readConfigRaw();
+    const p = (cfg.plugins ?? []).find((x) => x.id === id);
+    if (!p) return c.json({ ok: false, message: "插件不存在" }, 404);
+    try {
+      const { loadPlugins } = await import("./plugin/index.js");
+      const r = await loadPlugins([p], () => {});
+      if (r.failures.length) {
+        return c.json({ ok: false, message: `加载失败：${r.failures[0].message.slice(0, 200)}` }, 502);
+      }
+      return c.json({
+        ok: true,
+        tools: r.tools.map((t) => ({ name: t.name, risk: t.risk })),
+        hooks: { preToolUse: r.hooks.preToolUse.length, postToolUse: r.hooks.postToolUse.length },
+      });
+    } catch (e) {
+      return c.json({ ok: false, message: `加载失败：${(e as Error).message.slice(0, 200)}` }, 502);
+    }
+  });
+
+  // ── v2.3 批 2 skill 管理（SKILL.md 社区标准；列表来自用户级/项目级/显式引用）──
+
+  // 可用技能列表（含显式引用与来源层级）
+  app.get("/api/skills", (c) => {
+    const cfg = readConfigRaw();
+    const root = opts.defaultRoot || process.cwd();
+    const skills = listSkills(cfg, root).map((s) => ({
+      name: s.name,
+      description: s.description.slice(0, 200),
+      path: s.path,
+      level: s.level,
+    }));
+    return c.json({ skills });
+  });
+
+  // 添加显式引用（path 缺省 = 按 name 查找；校验 SKILL.md 合法性）
+  app.post("/api/skills", async (c) => {
+    const body = await c.req.json().catch(() => ({}));
+    const cfg = readConfigRaw();
+    const name = String(body.name || "").trim();
+    if (!name) return c.json({ ok: false, message: "name 不能为空" }, 400);
+    if ((cfg.skills ?? []).some((s) => s.name === name)) {
+      return c.json({ ok: false, message: `技能 "${name}" 已在显式引用中` }, 409);
+    }
+    const { readSkillMeta } = await import("./plugin/skills.js");
+    const pathArg = typeof body.path === "string" && body.path.trim() ? body.path.trim() : undefined;
+    if (pathArg) {
+      const meta = readSkillMeta(path.resolve(pathArg), "config");
+      if (!meta) {
+        return c.json({ ok: false, message: `路径 "${pathArg}" 下未找到合法 SKILL.md` }, 400);
+      }
+    } else if (!listSkills(cfg, opts.defaultRoot || process.cwd()).some((s) => s.name === name)) {
+      return c.json({ ok: false, message: `未找到技能 "${name}"（需 --path 或放到 skills 目录）` }, 404);
+    }
+    cfg.skills = [...(cfg.skills ?? []), pathArg ? { name, path: pathArg } : { name }];
+    saveConfig(cfg);
+    return c.json({ ok: true, skill: name });
+  });
+
+  // 移除显式引用（不删文件）
+  app.delete("/api/skills/:name", (c) => {
+    const name = c.req.param("name");
+    const cfg = readConfigRaw();
+    if (!(cfg.skills ?? []).some((s) => s.name === name)) {
+      return c.json({ ok: false, message: "技能不在显式引用中" }, 404);
+    }
+    cfg.skills = (cfg.skills ?? []).filter((s) => s.name !== name);
+    saveConfig(cfg);
     return c.json({ ok: true });
   });
 

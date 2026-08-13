@@ -27,6 +27,12 @@ import { runBestOfN, formatComparison } from "./best-of-n.js";
 import { findTemplate, renderTemplate } from "./templates.js";
 import { getStore } from "./db/store.js";
 import { rebuildMessages } from "./db/rebuild.js";
+import { inferResumePhase } from "./agent/resume.js";
+import { loadMcpTools, withMcpTools } from "./mcp/index.js";
+import { mcpCli } from "./mcp/cli.js";
+import { loadPlugins, withPlugins } from "./plugin/index.js";
+import { listSkills, buildSkillsPrompt } from "./plugin/skills.js";
+import { pluginCli, skillCli } from "./plugin/cli.js";
 import type { ChatMessageLike } from "./providers/chat.js";
 
 const require = createRequire(import.meta.url);
@@ -290,9 +296,24 @@ async function configWizard() {
   }
   console.log(C.dim(`\n配置保存在：${CONFIG_PATH}`));
 }
-function main() {
+async function main() {
   const args = process.argv.slice(2);
 
+
+  if (args[0] === "mcp") {
+    mcpCli(args.slice(1)).catch((e) => console.error(C.red(`\n✗ mcp: ${e.message}`)));
+    return;
+  }
+
+  if (args[0] === "plugin") {
+    pluginCli(args.slice(1)).catch((e) => console.error(C.red(`\n✗ plugin: ${e.message}`)));
+    return;
+  }
+
+  if (args[0] === "skill") {
+    skillCli(args.slice(1)).catch((e) => console.error(C.red(`\n✗ skill: ${e.message}`)));
+    return;
+  }
 
   if (args[0] === "config") {
     configWizard().catch((e) => console.error(C.red(`\n✗ 配置失败: ${e.message}`)));
@@ -388,6 +409,9 @@ function main() {
   infu config   ★ 交互式配置模型与 API Key（推荐）
   infu "任务描述" [--root <项目路径>] [--model <模型id>] [-y]
   infu sessions 会话历史（每次任务自动保存，可继续）
+  infu mcp add/list/remove/status   MCP 服务器管理（v2.3：工具动态注入执行阶段）
+  infu plugin add/list/remove/status   插件管理（v2.3 批 2：JS 模块 = 工具/钩子/技能）
+  infu skill add/list/remove       技能管理（SKILL.md 社区标准）
   infu --session <id> "继续的指令"   继续之前的会话（消息级重建：完整恢复历史与进度）
   infu --setup   生成模型配置模板（JSON）
   infu --suggest 建议模式（模型只出方案，不执行工具）
@@ -442,6 +466,8 @@ function main() {
   let sessionId: string | undefined;
   // v2.2 断点恢复：继续会话 = 从事件流重建完整 messages（工具结果直接来自 DB，不重放副作用）
   let initialMessages: ChatMessageLike[] | undefined;
+  // v2.3 阶段级精确续跑：已确认过计划的会话 → 跳过规划阶段（executor 起点）
+  let resumePoint: ReturnType<typeof inferResumePhase> = {};
   let effectivePrompt = prompt;
   if (bestOfN) {
     console.error(C.dim("（/best-of-n 并行模式不写入会话历史）"));
@@ -456,6 +482,7 @@ function main() {
       sessionId = sessionArg;
       if (!rootArg) root = s.root; // 继续会话：沿用历史项目目录
       initialMessages = rebuildMessages(store.getEvents(sessionId));
+      resumePoint = inferResumePhase(store.getEvents(sessionId));
       console.error(C.dim(`继续会话（消息级重建）：${s.title}（上次状态 ${s.status}，历史已完整恢复）`));
     } else {
       sessionId = store.createSession({
@@ -472,6 +499,27 @@ function main() {
     printEvent(e);
     if (sessionId) store.appendEvent(sessionId, e);
   };
+
+  // v2.3 MCP 动态注入：仅非建议模式/非 best-of-n 加载（suggestOnly 不注入外部工具；
+  // best-of-n 并行 worktree 场景不注入，保持 v1 简单）；任务结束后统一 close（防残留子进程）
+  const mcp = suggestOnly || bestOfN ? null : await loadMcpTools(config?.mcpServers, emit);
+  if (mcp) {
+    if (mcp.tools.length) console.error(C.green(`MCP 工具已注入：${mcp.tools.length} 个（仅执行阶段可用，默认 medium 审批）`));
+    for (const f of mcp.failures) console.error(C.yellow(`⚠ MCP 服务器连接失败（已跳过）：${f.message.slice(0, 120)}`));
+  }
+  // v2.3 批 2 插件（JS 模块：工具/钩子/技能）+ skill 发现层描述注入
+  const plugin = suggestOnly || bestOfN ? null : await loadPlugins(config?.plugins, emit);
+  if (plugin) {
+    if (plugin.tools.length) console.error(C.green(`插件工具已注入：${plugin.tools.length} 个（仅执行阶段可用）`));
+    if (plugin.hooks.preToolUse.length || plugin.hooks.postToolUse.length) {
+      console.error(C.dim(`插件钩子已挂载：pre=${plugin.hooks.preToolUse.length} post=${plugin.hooks.postToolUse.length}`));
+    }
+    for (const f of plugin.failures) console.error(C.yellow(`⚠ 插件加载失败（已跳过）：${f.message.slice(0, 120)}`));
+  }
+  const skillsPrompt = buildSkillsPrompt(listSkills(config, root));
+  if (resumePoint.startPhase) {
+    console.error(C.dim("↻ 阶段级续跑：历史中已有确认过的计划，跳过规划阶段，直接从执行阶段继续"));
+  }
 
   // Ctrl+C：中止 Agent 并将会话标记 stopped（进度保留，可继续）
   const abortController = new AbortController();
@@ -534,12 +582,13 @@ function main() {
     return;
   }
 
-  // 建议模式 / 关闭编排：直跑单 Agent（保持一期行为）
+  // 建议模式 / 关闭编排：直跑单 Agent（保持一期行为；suggestOnly 不注入 MCP/插件工具）
   if (suggestOnly || orchestrate === "off") {
     runAgent({
       ...common,
-      system: DEFAULT_SYSTEM_PROMPT,
-      tools: TOOLS,
+      system: DEFAULT_SYSTEM_PROMPT + skillsPrompt,
+      tools: mcp || plugin ? withPlugins(withMcpTools(TOOLS, mcp?.tools ?? []), plugin?.tools ?? []) : TOOLS,
+      hooks: plugin?.hooks,
       suggestOnly,
       abortSignal: abortController.signal,
     })
@@ -551,7 +600,8 @@ function main() {
         finishSession("error");
         console.error(C.red(`\n✗ Agent 运行失败: ${e.message}`));
         process.exit(1);
-      });
+      })
+      .finally(() => mcp?.close());
     return;
   }
 
@@ -565,7 +615,22 @@ function main() {
     return { plan: undefined, feedback: feedback.trim() || "批准执行" };
   };
 
-  runOrchestratedTask({ ...common, orchestrate, planApproval, templateId, confirmPlan: cliConfirmPlan, abortSignal: abortController.signal })
+  runOrchestratedTask({
+    ...common,
+    orchestrate,
+    planApproval,
+    templateId,
+    confirmPlan: cliConfirmPlan,
+    abortSignal: abortController.signal,
+    // v2.3：MCP 工具 + 插件工具只进 Executor（Planner/Reviewer 架构级只读不暴露）；
+    // 插件钩子随 Executor 生效；skill 描述注入 Executor system；
+    // 阶段级续跑：跳过已完成的规划阶段（计划沿用上次确认的）
+    executorTools: [...(mcp?.tools ?? []), ...(plugin?.tools ?? [])],
+    hooks: plugin?.hooks,
+    skillsPrompt,
+    startPhase: resumePoint.startPhase,
+    resumePlanText: resumePoint.planText,
+  })
     .then((r) => {
       process.stdout.write("\n" + r.text + "\n");
       finishSession("done");
@@ -574,7 +639,11 @@ function main() {
       finishSession("error");
       console.error(C.red(`\n✗ Agent 运行失败: ${e.message}`));
       process.exit(1);
-    });
+    })
+    .finally(() => mcp?.close());
 }
 
-main();
+main().catch((e) => {
+  console.error(C.red(`\n✗ 运行失败: ${e.message}`));
+  process.exit(1);
+});

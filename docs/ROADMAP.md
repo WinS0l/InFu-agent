@@ -60,14 +60,24 @@
   - 验证：`npm test` 179 项全绿（新增 compress 24 / steps 17）+ 真实模型端到端（编排任务动态步数 Planner 建议 5 生效 / phase-start 模型字段 / 角色路由打到 glm-5.2 端点 401 正确失败）+ probe 实测
 - ✅ **模型管理重构（v2 供应商凭据，2026-08-13）**：见 AGENTS.md 已完成区（config v2 迁移/供应商模板表 8 家/上游模型获取/思考级别 4 档/Web 双 Tab + 输入框旁选择器；`npm test` 226 项全绿 + 真实 DeepSeek 上游实测）。供应商模板数据 2026-08 联网调研校准（DeepSeek/GLM-5.2/GPT-5.6/Claude 5/Gemini/Kimi 均 1M 窗口）
 - ✅ **角色路由面板（2026-08-13）**：Web 模型管理「角色路由」面板（三行模型+思考级别，PUT/GET /api/roles，config roles 支持对象形态，orchestrator 角色级 thinkingLevel 优先）——Web 角色 UI 讨论项已落地
-- ⏳ **遗留**：阶段级精确续跑（跳过已完成阶段的编排续跑；勿拖过 v2.3）；完整 codex 式模型选择流程（细节实施前讨论）
+- ✅ **阶段级精确续跑（v2.3 批 1 顺带落地，2026-08-13）**：继续会话时从事件流推断续跑起点——尾部 planner/executor 且有计划事件 → 跳过规划阶段直接 Executor 续跑（计划沿用上次确认的，不重跑 Planner）；无计划/reviewer 尾部/直接模式 → 从头。`inferResumePhase`（agent/resume.ts）+ orchestrator `startPhase`/`resumePlanText`
+- ⏳ **遗留**：完整 codex 式模型选择流程（细节实施前讨论）
 
-### v2.3 扩展机制与 MCP
-- 插件系统架构 v1（插件 = 可注册工具/命令/技能/钩子的包）
-- 钩子系统（生命周期事件：PreToolUse/PostToolUse 等）
-- skill 加载机制（SKILL.md 社区标准兼容）
-- **MCP 客户端作为第一个插件类型**（`infu mcp add <server>`，工具动态注入 Agent 循环，审批/审计覆盖）
-
+### v2.3 扩展机制与 MCP【批 1 ✅ 2026-08-13；批 2 待推进】
+- ✅ **批 1 MCP 客户端（2026-08-13）**：
+  - `@modelcontextprotocol/sdk` 1.30 + 新 `src/mcp/`：client（stdio 子进程 / Streamable HTTP 两种传输 + 20s 握手超时兜底）、schema（JSON Schema → zod 转换器，未知回退 z.any）、tools（ToolDef 适配器：默认 medium 审批防 prompt 注入投毒，`riskOverrides` 工具名精确 > 前缀*通配 > 默认）、index（`loadMcpTools`：只连 enabled、失败跳过不阻塞、重名工具加服务器前缀、任务结束统一 close 防残留子进程）
+  - **注入范围**：仅 Executor 阶段与直接模式（Planner/Reviewer 架构级只读不暴露；suggestOnly / /best-of-n 不注入）——server / orchestrator / cli 三处统一 `executorTools` 注入
+  - **审批/审计**：复用现有通道——approval-required/result 事件 + tool-start/tool-result 全量落库（会话回放 = 完整审计轨迹）；`commands.log` 仍为 run_command 专用
+  - **CLI**：`infu mcp add/list/remove/status`（交互向导 + --type/--command/--args/--url 直传）；**API**：`/api/mcp` CRUD（env 脱敏只回键名）+ `POST /api/mcp/:id/tools` 探测（15s 超时）；**Web**：顶栏「MCP」按钮 → 独立弹窗（列表/启停开关/探测工具+风险徽标/添加表单/两段式删除）
+  - **config**：`InfuConfig.mcpServers[]`（zod schema + passthrough 兼容，无需迁移）
+  - 验证：`npm test` 290 项全绿（新增 tests/mcp.test.ts 58 项：schema/风险/适配器审批/加载去重/config/API/续跑推断）+ CLI 端到端实测（真实 stdio MCP server：greet 调用成功 / add_note medium 审批拒绝与批准 / 文件落盘 / 事件落库可回放）
+  - 安全边界（docs/MCP.md）：MCP 服务器子进程**不受 L1.5 沙箱约束**（配置即信任，工具调用层审批兜底）；Windows 下 npx 需写 `npx.cmd`
+  - ✅ **自注册闭环增强（同批，2026-08-13）**：新工具 `mcp_register`（第 11 个内置工具，opencode config-hook 模式）——Agent 可自主「编写 MCP server → 注册给 InFu 自己用」：白名单只写 `mcpServers` 节（models/providers/roles/apiKey 不可达，防自我提权/投毒）+ high 级 requireExplicit 审批（-y 不放行，与联网放行同级）+ 校验与 CLI/API 一致。实测：Agent 自主写 `self-mcp-server.mjs`（get_time）→ mcp_register 注册 my-time（审批批准）→ 下一任务自动注入调用成功。`npm test` 306 项全绿（register 新增 16 项）
+- ✅ **批 2 插件系统 v1 + 钩子 + skill（2026-08-13）**：
+  - **插件协议**（opencode 式 JS 模块，`docs/PLUGINS.md`）：`PluginDef`（tools 数组或延迟函数 / hooks / skills）+ config `plugins[]` 节 + `loadPlugins`（失败跳过不阻塞/重名加前缀/工具 risk 缺省 medium/只注入 Executor 与直接模式）+ 内置工具 `plugin_add`（第 12 个，high + requireExplicit + 白名单写 plugins 节——Agent 自主装插件闭环）+ CLI `infu plugin add/list/remove/status`（含探测）+ API `/api/plugins` CRUD + probe
+  - **函数式钩子**（opencode 式，非命令式）：`preToolUse`（block 拦截/改 args）/`postToolUse`（改 result），挂 loop 统一执行段（对全部工具含 MCP 生效），抛错放行不阻塞；`applyPreToolUseHooks`/`applyPostToolUseHooks` 导出可测。**选型定稿（2026-08-13 联网调研）**：ZCode/Claude Code 的 hooks 是与插件**分离的独立系统**（config 直配 + 子进程 JSON 协议 + user/workspace/plugin 三层），opencode 是插件内函数式统一——InFu 选择 opencode 式（函数式、热加载、简单）；「零插件配钩子」的独立 config 通道**不做**（触发条件：出现真实多端共享钩子/团队策略需求时，届时再评估 B/C 档）
+  - **skill 加载**（SKILL.md 社区标准，agentskills.io 规范，progressive disclosure 三级）：发现层 name+description 常驻 Executor system（`buildSkillsPrompt`）+ 激活层内置工具 `use_skill`（第 13 个，low 只读，进 Planner/Reviewer 白名单）读全文 + 执行层按需 read_file references/scripts；目录 `~/.infu/skills/` > `<root>/.infu/skills/` > config `skills[]` 显式；CLI `infu skill add/list/remove` + API `/api/skills`；Web 管理 UI 留 v2.4 设置界面
+  - 验证：`npm test` 367 项全绿（新增 tests/plugin.test.ts 61 项）+ 端到端实测（示例插件工具调用 + preToolUse 钩子拦截、SKILL.md use_skill 读取）
 ### v2.4 设置界面与终端
 - 配置系统 UI 化：**权限等级设置**（审批模式/按风险/按工具/命令白名单/通配符/禁用工具）+ **沙箱等级设置**（off/L1/L1.5/L2 Docker/自动，取代 INFU_SANDBOX 环境变量）+ 常规/外观/模型设置
 - Web 交互式终端

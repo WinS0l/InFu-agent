@@ -34,7 +34,15 @@ export function sanitizeEnv(env: NodeJS.ProcessEnv = process.env): NodeJS.Proces
 /** 敏感路径写保护清单（写这些路径没有合法场景，直接拦截） */
 const PROTECTED_PATTERNS: Array<{ name: string; match: (abs: string) => boolean }> = [
   { name: "SSH 密钥目录", match: (a) => /(^|[\\/])\.ssh([\\/]|$)/.test(a) },
-  { name: "InFu 配置目录", match: (a) => /(^|[\\/])\.infu([\\/]|$)/.test(a) },
+  // v2.3 批 2：项目内 .infu/ 有合法场景（项目级 .infu/skills/ 技能目录）——
+  // 保护精确到用户级 ~/.infu（全局配置/凭据/日志），项目内 .infu 放开写
+  {
+    name: "InFu 配置目录",
+    match: (a) => {
+      const home = path.join(os.homedir(), ".infu");
+      return a === home || a.startsWith(home + path.sep);
+    },
+  },
   { name: "AWS 凭据目录", match: (a) => /(^|[\\/])\.aws([\\/]|$)/.test(a) },
   { name: "GnuPG 密钥目录", match: (a) => /(^|[\\/])\.gnupg([\\/]|$)/.test(a) },
   { name: "Docker 配置", match: (a) => /(^|[\\/])\.docker([\\/]|$)/.test(a) },

@@ -5,8 +5,10 @@ import Sidebar from "./components/Sidebar";
 import ChatPanel from "./components/ChatPanel";
 import DiffPanel from "./components/DiffPanel";
 import ApprovalModal from "./components/ApprovalModal";
-import { RefreshCw, AlertTriangle, Settings2 } from "lucide-react";
+import { RefreshCw, AlertTriangle, Settings2, Plug, Puzzle } from "lucide-react";
 import ModelManagerModal from "./components/ModelManagerModal";
+import McpManagerModal from "./components/McpManagerModal";
+import ExtensionsModal from "./components/ExtensionsModal";
 
 const SVG_LOGO = (
   <svg viewBox="0 0 24 24" className="h-5 w-5" fill="none" stroke="currentColor" strokeWidth="2">
@@ -20,6 +22,8 @@ export default function App() {
   const { models, modelId, setModelId, root, setRoot, running, messages } = useStore();
   const [modelError, setModelError] = useState("");
   const [showModels, setShowModels] = useState(false);
+  const [showMcp, setShowMcp] = useState(false);
+  const [showExtensions, setShowExtensions] = useState(false);
   const loaded = useRef(false);
 
   const loadModels = useCallback(async () => {
@@ -120,6 +124,22 @@ export default function App() {
           )}
           <button
             className="flex h-8 cursor-pointer items-center gap-1 rounded-md border border-line bg-muted px-2 text-xs text-text transition-colors hover:border-accent hover:text-accent"
+            onClick={() => setShowExtensions(true)}
+            title="扩展管理（v2.3 批 2：插件 = 工具/钩子/技能；skill = SKILL.md）"
+          >
+            <Puzzle className="h-3.5 w-3.5" />
+            扩展
+          </button>
+          <button
+            className="flex h-8 cursor-pointer items-center gap-1 rounded-md border border-line bg-muted px-2 text-xs text-text transition-colors hover:border-accent hover:text-accent"
+            onClick={() => setShowMcp(true)}
+            title="MCP 服务器管理（v2.3：工具动态注入执行阶段）"
+          >
+            <Plug className="h-3.5 w-3.5" />
+            MCP
+          </button>
+          <button
+            className="flex h-8 cursor-pointer items-center gap-1 rounded-md border border-line bg-muted px-2 text-xs text-text transition-colors hover:border-accent hover:text-accent"
             onClick={() => setShowModels(true)}
             title="模型管理"
           >
@@ -138,6 +158,8 @@ export default function App() {
 
       <ApprovalModal />
       {showModels && <ModelManagerModal onClose={() => setShowModels(false)} />}
+      {showMcp && <McpManagerModal onClose={() => setShowMcp(false)} />}
+      {showExtensions && <ExtensionsModal onClose={() => setShowExtensions(false)} />}
     </div>
   );
 }

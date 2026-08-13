@@ -15,6 +15,7 @@
 import type { AgentEvent, OrchestrateMode, PhaseId, RiskLevel, ToolDef } from "@infu/shared";
 import { runAgent, buildReport, DEFAULT_SYSTEM_PROMPT, type RunResult } from "./loop.js";
 import { TOOLS, getReadOnlyTools, getReviewerTools } from "../tools/index.js";
+import { withMcpTools } from "../mcp/index.js";
 import { resolveMaxSteps } from "./steps.js";
 import { interpretPlanFeedback } from "./plan-feedback.js";
 import type { ModelCandidate } from "../providers/gateway.js";
@@ -92,6 +93,23 @@ export interface OrchestratedRunOptions {
    * （如"批准执行" / "先不做" / "改成只改 README"——由编排层调模型判断意图）。
    */
   confirmPlan?: (planText: string) => Promise<{ plan?: string; feedback: string } | null>;
+  // ── v2.3 扩展机制 ──
+  /**
+   * Executor 阶段额外工具（MCP 动态注入，v2.3 批 1）。
+   * 只作用于 Executor——Planner/Reviewer 保持架构级只读，不注入任何额外工具。
+   */
+  executorTools?: ToolDef[];
+  /**
+   * 阶段级精确续跑（v2.2 遗留）：已确认过计划的会话续跑时跳过 Planner（不重新规划）。
+   * 由调用方从事件流推断（inferResumePhase）；resumePlanText 为上次确认的计划。
+   */
+  startPhase?: "executor";
+  resumePlanText?: string;
+  // ── v2.3 批 2 ──
+  /** 插件钩子（只作用于 Executor 阶段——插件工具只在 Executor 注入，钩子与之同生命周期） */
+  hooks?: import("./loop.js").AgentRunOptions["hooks"];
+  /** skill 发现层提示段（追加到 Executor system；Planner/Reviewer 保持简洁，v1 不注入） */
+  skillsPrompt?: string;
 }
 
 /** 编排运行结果（含各阶段产出） */
@@ -110,10 +128,11 @@ export async function runOrchestratedTask(opts: OrchestratedRunOptions): Promise
   const {
     modelConfig, fallbackModelConfigs, roleModelConfigs, initialMessages, prompt, root, emit, requestApproval,
     maxSteps, abortSignal, orchestrate = "full", planApproval = true,
-    confirmPlan, templateId, thinkingLevel, roleThinking,
+    confirmPlan, templateId, thinkingLevel, roleThinking, executorTools, startPhase, resumePlanText,
+    hooks, skillsPrompt,
   } = opts;
 
-  let planText = "";
+  let planText = resumePlanText ?? "";
   let reviewText = "";
   // 批准计划时用户附带的指示（v2.3：如"不要动 xxx 文件"）——注入执行阶段 prompt
   let userInstruction = "";
@@ -147,8 +166,9 @@ export async function runOrchestratedTask(opts: OrchestratedRunOptions): Promise
     ...(fallbackModelConfigs ?? []).map((f) => ({ provider: f.provider, model: f.model, baseURL: f.baseURL, apiKey: f.apiKey })),
   ];
 
-  // ① Planner：只读规划（orchestrate ≠ off；v2.2 按角色路由模型）
-  if (orchestrate !== "off") {
+  // ① Planner：只读规划（orchestrate ≠ off；v2.2 按角色路由模型；
+  //    v2.3 阶段级续跑 startPhase=executor 时跳过——计划沿用上次确认的 resumePlanText）
+  if (orchestrate !== "off" && startPhase !== "executor") {
     const rc = roleCfg("planner");
     const plan = await runAgent({
       modelConfig: rc.modelConfig,
@@ -236,7 +256,8 @@ export async function runOrchestratedTask(opts: OrchestratedRunOptions): Promise
     }
   }
 
-  // ③ Executor：全工具按计划执行（v2.2 动态步数：显式 > Planner 建议步数 > 启发式 > 默认 30）
+  // ③ Executor：全工具按计划执行（v2.2 动态步数：显式 > Planner 建议步数 > 启发式 > 默认 30；
+  //    v2.3 MCP 动态注入：executorTools 仅此阶段生效，Planner/Reviewer 不暴露）
   const rcExec = roleCfg("executor");
   const execMaxSteps = resolveMaxSteps({
     explicit: maxSteps,
@@ -252,9 +273,10 @@ export async function runOrchestratedTask(opts: OrchestratedRunOptions): Promise
     fallbackModelConfigs: rcExec.fallbackModelConfigs,
     thinkingLevel: roleThink("executor"),
     initialMessages,
-    system: EXECUTOR_SYSTEM_PROMPT,
+    system: EXECUTOR_SYSTEM_PROMPT + (skillsPrompt ?? ""),
     prompt: execPrompt,
-    tools: TOOLS,
+    tools: executorTools ? withMcpTools(TOOLS, executorTools) : TOOLS,
+    hooks,
     root,
     emit,
     requestApproval,

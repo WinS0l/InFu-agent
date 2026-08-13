@@ -80,7 +80,111 @@ export async function saveRoles(body: Record<string, { model?: string; thinkingL
   return data;
 }
 
-/** 加载模板任务列表（小白引导） */
+// ── v2.3 MCP 服务器管理（MCP 客户端作为第一个插件类型：工具动态注入执行阶段）──
+
+export interface McpServerInfo {
+  id: string;
+  name: string;
+  type: "stdio" | "http";
+  command?: string;
+  args?: string[];
+  url?: string;
+  enabled: boolean;
+  /** 环境变量键名（脱敏：值不回传，防密钥泄漏） */
+  envKeys: string[];
+  riskOverrides?: Record<string, RiskLevel>;
+}
+
+export async function fetchMcpServers(): Promise<McpServerInfo[]> {
+  const res = await fetch("/api/mcp");
+  if (!res.ok) throw new Error(`MCP 服务器加载失败: ${res.status}`);
+  const data = await res.json();
+  return data.servers ?? [];
+}
+
+export interface McpToolProbe {
+  name: string;
+  description: string;
+  risk: RiskLevel;
+}
+
+export interface McpServerBody {
+  id?: string;
+  name?: string;
+  type?: "stdio" | "http";
+  command?: string;
+  args?: string[];
+  url?: string;
+  enabled?: boolean;
+  env?: Record<string, string>;
+  riskOverrides?: Record<string, RiskLevel>;
+}
+
+export const addMcpServer = (body: McpServerBody) => providerApi("/api/mcp", "POST", body);
+export const updateMcpServer = (id: string, body: McpServerBody) =>
+  providerApi(`/api/mcp/${encodeURIComponent(id)}`, "PUT", body);
+export const deleteMcpServer = (id: string) => providerApi(`/api/mcp/${encodeURIComponent(id)}`, "DELETE");
+
+/** 探测连接：拉取服务器工具列表（名称/描述/有效风险；15s 超时） */
+export async function probeMcpTools(id: string): Promise<McpToolProbe[]> {
+  const res = await fetch(`/api/mcp/${encodeURIComponent(id)}/tools`, { method: "POST" });
+  const data = await res.json();
+  if (!res.ok || data.ok === false) throw new Error(data.message || `探测失败: ${res.status}`);
+  return data.tools ?? [];
+}
+
+// ── v2.3 批 2 插件管理（JS 模块插件：工具/钩子/技能）──
+
+export interface PluginInfo {
+  id: string;
+  path: string;
+  enabled?: boolean;
+}
+
+export async function fetchPlugins(): Promise<PluginInfo[]> {
+  const res = await fetch("/api/plugins");
+  if (!res.ok) throw new Error(`插件加载失败: ${res.status}`);
+  const data = await res.json();
+  return data.plugins ?? [];
+}
+
+export interface PluginProbeResult {
+  tools: Array<{ name: string; risk: RiskLevel }>;
+  hooks: { preToolUse: number; postToolUse: number };
+}
+
+export async function probePlugin(id: string): Promise<PluginProbeResult> {
+  const res = await fetch(`/api/plugins/${encodeURIComponent(id)}/probe`, { method: "POST" });
+  const data = await res.json();
+  if (!res.ok || data.ok === false) throw new Error(data.message || `探测失败: ${res.status}`);
+  return data;
+}
+
+export const addPlugin = (body: { id: string; path: string }) => providerApi("/api/plugins", "POST", body);
+export const updatePlugin = (id: string, body: { path?: string; enabled?: boolean }) =>
+  providerApi(`/api/plugins/${encodeURIComponent(id)}`, "PUT", body);
+export const deletePlugin = (id: string) => providerApi(`/api/plugins/${encodeURIComponent(id)}`, "DELETE");
+
+// ── v2.3 批 2 技能管理（SKILL.md 社区标准）──
+
+export interface SkillInfo {
+  name: string;
+  description: string;
+  path: string;
+  level: "user" | "project" | "config";
+}
+
+export async function fetchSkills(): Promise<SkillInfo[]> {
+  const res = await fetch("/api/skills");
+  if (!res.ok) throw new Error(`技能加载失败: ${res.status}`);
+  const data = await res.json();
+  return data.skills ?? [];
+}
+
+export const addSkill = (body: { name: string; path?: string }) => providerApi("/api/skills", "POST", body);
+export const deleteSkill = (name: string) => providerApi(`/api/skills/${encodeURIComponent(name)}`, "DELETE");
+
+/** 模板任务列表（小白引导） */
 export async function fetchTemplates(): Promise<TaskTemplate[]> {
   const res = await fetch("/api/templates");
   if (!res.ok) throw new Error(`模板加载失败: ${res.status}`);

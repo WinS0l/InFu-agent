@@ -69,6 +69,123 @@ export interface ModelConfig {
 /** 角色模型引用：模型 id，或 {model, thinkingLevel}（角色独立思考级别） */
 export type RoleModelRef = string | { model: string; thinkingLevel?: number };
 
+// ── v2.3 MCP 服务器（扩展机制：MCP 客户端作为第一个插件类型）──
+
+/** MCP 服务器传输类型：stdio = 本地子进程；http = 远程 Streamable HTTP 端点 */
+export type McpServerType = "stdio" | "http";
+
+/**
+ * MCP 服务器配置（v2.3：工具动态注入 Agent 循环）。
+ * 安全：MCP 工具默认 medium 审批（防 prompt 注入投毒），riskOverrides 可按工具名/前缀覆盖。
+ */
+export interface McpServerConfig {
+  /** 唯一标识（如 "filesystem"） */
+  id: string;
+  /** 显示名称 */
+  name: string;
+  /** 传输类型：stdio（本地命令）/ http（远程端点） */
+  type: McpServerType;
+  /** stdio 模式：启动命令（如 "npx"；Windows 下 npx 需写 npx.cmd，或用完整 node 路径） */
+  command?: string;
+  /** stdio 模式：命令参数（如 ["-y", "@modelcontextprotocol/server-filesystem", "C:\\workspace"]） */
+  args?: string[];
+  /** http 模式：Streamable HTTP 端点 URL */
+  url?: string;
+  /** 传给 MCP 服务器进程的环境变量（可选；敏感值会随 config.json 存储，仅 0600 本地） */
+  env?: Record<string, string>;
+  /** 是否启用（默认 true；禁用时不连接不注入） */
+  enabled?: boolean;
+  /**
+   * 风险覆盖：工具名（精确）或前缀 + "*"（通配）→ 风险级别；未命中默认 medium。
+   * 示例：{"read*": "low", "write_file": "high"}
+   */
+  riskOverrides?: Record<string, RiskLevel>;
+}
+
+/** MCP 工具元信息（探测/展示用：Web 工具列表与风险徽标） */
+export interface McpToolMeta {
+  name: string;
+  description: string;
+  risk: RiskLevel;
+}
+
+// ── v2.3 批 2 插件系统架构 v1（从 MCP 适配器实例反推的插件协议）──
+
+/**
+ * 插件配置（config.plugins[]）：引用 JS/TS 插件模块（opencode 式）。
+ * 插件 = 可注册 工具/钩子/技能 的包；MCP 服务器是插件协议的另一个实例（独立通道）。
+ */
+export interface PluginConfig {
+  /** 唯一标识（如 "my-plugin"） */
+  id: string;
+  /** 插件模块路径（目录或文件；.ts/.mjs/.js；动态 import） */
+  path: string;
+  /** 是否启用（默认 true） */
+  enabled?: boolean;
+}
+
+/** 钩子输入（工具调用上下文；pre/postToolUse 通用） */
+export interface ToolHookInput {
+  tool: string;
+  args: Record<string, unknown>;
+  callId?: string;
+  risk: RiskLevel;
+  /** 编排阶段（直接模式无） */
+  phase?: PhaseId;
+}
+
+/** PreToolUse 钩子结果：allow 放行（可改 args）/ block 拦截（reason 给模型） */
+export interface PreToolUseResult {
+  decision: "allow" | "block";
+  reason?: string;
+  args?: Record<string, unknown>;
+}
+
+/** PostToolUse 钩子结果：可改写返回给模型的工具结果文本 */
+export interface PostToolUseResult {
+  result?: string;
+}
+
+/** 钩子函数（插件内注册；抛错不阻塞主流程——emit 错误事件后放行） */
+export type HookFn = (input: ToolHookInput) => Promise<PreToolUseResult | PostToolUseResult | void>;
+
+/**
+ * 插件定义（JS/TS 模块默认导出；opencode 式）。
+ * tools 可为数组或函数（动态生成，便于引用 MCP 连接等运行时资源）。
+ */
+export interface PluginDef {
+  id: string;
+  name: string;
+  description: string;
+  version?: string;
+  /** 注册的工具（ToolDef 数组或延迟生成函数）；工具 risk 缺失默认 medium */
+  tools?: ToolDef[] | (() => ToolDef[]);
+  /** 钩子（v2.3 批 2：preToolUse/postToolUse；插件级，对所有工具生效） */
+  hooks?: {
+    preToolUse?: HookFn;
+    postToolUse?: HookFn;
+  };
+  /** 附加的 skill 目录（SKILL.md 所在目录的绝对路径列表） */
+  skills?: string[];
+}
+
+/** SKILL.md 元信息（发现层：描述常驻 system；激活层：use_skill 读全文） */
+export interface SkillMeta {
+  name: string;
+  description: string;
+  /** SKILL.md 文件绝对路径 */
+  path: string;
+  /** 来源层级：用户级 > 项目级（同名首个胜出） */
+  level: "user" | "project" | "config";
+}
+
+/** skill 显式配置（config.skills[]：引用项目内或任意路径的 skill 目录） */
+export interface SkillConfig {
+  name: string;
+  /** skill 目录路径（含 SKILL.md；缺省 = 按 name 在用户/项目级目录查找） */
+  path?: string;
+}
+
 /** 全局配置（v2：providers[] 凭据 + models[] 引用；未知字段保留前向兼容） */
 export interface InfuConfig {
   /** 配置 schema 版本（v2 = 供应商凭据两级结构） */
@@ -83,6 +200,12 @@ export interface InfuConfig {
     executor?: RoleModelRef;
     reviewer?: RoleModelRef;
   };
+  /** v2.3：MCP 服务器列表（工具动态注入 Agent 循环；默认 medium 审批，riskOverrides 可覆盖） */
+  mcpServers?: McpServerConfig[];
+  /** v2.3 批 2：JS/TS 插件列表（可注册工具/钩子/技能；配置即信任） */
+  plugins?: PluginConfig[];
+  /** v2.3 批 2：skill 显式引用（缺省按 name 在 ~/.infu/skills 与项目 .infu/skills 查找） */
+  skills?: SkillConfig[];
 }
 
 /** 风险级别（审批挂钩） */
@@ -282,6 +405,38 @@ const roleModelRefSchema = z.union([
   z.object({ model: z.string().min(1), thinkingLevel: z.number().int().min(1).max(4).optional() }).passthrough(),
 ]);
 
+/** MCP 服务器配置 schema（v2.3：工具动态注入 Agent 循环；passthrough 保留未知字段） */
+const mcpServerSchema = z
+  .object({
+    id: z.string().min(1),
+    name: z.string().min(1),
+    type: z.enum(["stdio", "http"]).default("stdio"),
+    command: z.string().optional(),
+    args: z.array(z.string()).optional(),
+    url: z.string().optional(),
+    env: z.record(z.string(), z.string()).optional(),
+    enabled: z.boolean().optional(),
+    riskOverrides: z.record(z.string(), z.enum(["low", "medium", "high"])).optional(),
+  })
+  .passthrough();
+
+/** 插件配置 schema（v2.3 批 2：JS/TS 模块引用；配置即信任） */
+const pluginConfigSchema = z
+  .object({
+    id: z.string().min(1),
+    path: z.string().min(1),
+    enabled: z.boolean().optional(),
+  })
+  .passthrough();
+
+/** skill 显式引用 schema（v2.3 批 2） */
+const skillConfigSchema = z
+  .object({
+    name: z.string().min(1),
+    path: z.string().optional(),
+  })
+  .passthrough();
+
 /** InfuConfig 校验 schema（未知字段保留；version 缺省补 1） */
 export const infuConfigSchema = z
   .object({
@@ -296,6 +451,9 @@ export const infuConfigSchema = z
       })
       .passthrough()
       .optional(),
+    mcpServers: z.array(mcpServerSchema).optional(),
+    plugins: z.array(pluginConfigSchema).optional(),
+    skills: z.array(skillConfigSchema).optional(),
     version: z.number().int().positive().default(1),
   })
   .passthrough();

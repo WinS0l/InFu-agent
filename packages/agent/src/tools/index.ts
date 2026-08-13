@@ -17,6 +17,10 @@ import {
   winRestrictedAvailable, runRestricted, type RestrictedRunResult,
 } from "../sandbox/win-restricted.js";
 import { detectEgress, egressBlockedMessage } from "../sandbox/net-policy.js";
+import { registerMcpServer, type RegisterInput } from "../mcp/register.js";
+import { registerPlugin, type RegisterPluginInput } from "../plugin/register.js";
+import { listSkills, readSkillContent } from "../plugin/skills.js";
+import { loadConfig } from "../providers/registry.js";
 
 const execAsync = promisify(exec);
 const execFileAsync = promisify(execFile);
@@ -419,6 +423,82 @@ export const TOOLS: Record<string, ToolDef> = {
     },
   },
 
+  // ── v2.3 MCP 自注册（opencode config-hook 模式 → 受控工具 + 人工审批）──
+  // 只允许追加 mcpServers 节（models/providers/roles/apiKey 不可达）；high + requireExplicit
+  // 审批（-y 也不放行）；仅 Executor/直接模式注入（Planner/Reviewer 只读白名单不含）
+  mcp_register: {
+    name: "mcp_register",
+    description:
+      "注册一个 MCP 服务器到 InFu 全局配置（~/.infu/config.json 的 mcpServers 节，需人工审批）。" +
+      "注册后下一任务执行阶段自动注入该服务器的工具（默认 medium 审批，可用 riskOverrides 覆盖）。" +
+      "用途：给 InFu 自己扩展工具生态——按官方文档实现并自测一个 MCP server 后，用它注册启用。",
+    risk: "high",
+    schema: z.object({
+      name: z.string().describe("服务器显示名称（如 filesystem；id 由其自动生成）"),
+      type: z.enum(["stdio", "http"]).optional().describe("传输类型：stdio=本地命令；http=远程端点（默认 stdio）"),
+      command: z.string().optional().describe("stdio 模式启动命令（Windows 下 npx 需写 npx.cmd）"),
+      args: z.array(z.string()).optional().describe("stdio 模式命令参数"),
+      url: z.string().optional().describe("http 模式端点 URL"),
+      riskOverrides: z
+        .record(z.string(), z.enum(["low", "medium", "high"]))
+        .optional()
+        .describe("风险覆盖：工具名或前缀* → 级别；未覆盖的工具默认 medium 审批"),
+    }),
+    async execute(args, ctx) {
+      // 写配置 = 持久化副作用 + 影响后续任务工具面：high 级 + requireExplicit（-y 也不放行）
+      const desc = `注册 MCP 服务器「${args.name}」（${(args.type as string) ?? "stdio"}）到全局配置：\n${JSON.stringify(args, null, 2)}`;
+      if (!(await guard(ctx, "high", desc, true))) {
+        return "用户拒绝：未注册（MCP 服务器注册需人工确认）";
+      }
+      const r = registerMcpServer(args as unknown as RegisterInput);
+      return r.ok ? r.message : `错误：${r.message}`;
+    },
+  },
+
+  // ── v2.3 批 2 插件自注册（与 mcp_register 同模式：high + requireExplicit + 白名单写 plugins 节）──
+  plugin_add: {
+    name: "plugin_add",
+    description:
+      "注册一个 JS/TS 插件到 InFu 全局配置（~/.infu/config.json 的 plugins 节，需人工审批）。" +
+      "插件 = 可注册 工具/钩子（preToolUse/postToolUse）/技能目录 的模块（默认导出 {id, name, description, tools?, hooks?, skills?}）。" +
+      "注册后下一任务执行阶段自动加载其工具与钩子。用途：给 InFu 自己扩展能力（注意插件代码在 Agent 进程内运行，配置即信任）。",
+    risk: "high",
+    schema: z.object({
+      id: z.string().describe("插件标识（如 my-tools；自动规范化）"),
+      path: z.string().describe("插件模块的绝对路径（.ts/.mjs/.js，默认导出 PluginDef）"),
+    }),
+    async execute(args, ctx) {
+      const desc = `注册插件「${args.id}」（${args.path}）到全局配置：\n${JSON.stringify(args, null, 2)}`;
+      if (!(await guard(ctx, "high", desc, true))) {
+        return "用户拒绝：未注册（插件注册需人工确认）";
+      }
+      const r = registerPlugin(args as unknown as RegisterPluginInput);
+      return r.ok ? r.message : `错误：${r.message}`;
+    },
+  },
+
+  // ── v2.3 批 2 skill 激活层（SKILL.md 社区标准：描述常驻 system，此处读全文注入）──
+  use_skill: {
+    name: "use_skill",
+    description:
+      "读取一个技能（SKILL.md）的完整内容。任务与「可用技能」列表（system 中列出 name+description）匹配时调用本工具，获取该技能的完整工作说明后按其执行。",
+    risk: "low",
+    schema: z.object({
+      name: z.string().describe("技能名（与可用技能列表中的 name 一致）"),
+    }),
+    async execute(args, ctx) {
+      const name = String(args.name ?? "").trim();
+      if (!name) return "错误：name 不能为空";
+      const skills = listSkills(loadConfig(), ctx.root);
+      const meta = skills.find((s) => s.name === name);
+      if (!meta) {
+        const available = skills.map((s) => s.name).join("、");
+        return `错误：未找到技能 "${name}"（可用技能：${available || "无"}）`;
+      }
+      return readSkillContent(meta);
+    },
+  },
+
   git_status: {
     name: "git_status",
     description: "查看 Git 仓库状态（当前分支 + 变更文件）。",
@@ -564,7 +644,8 @@ export function getToolNames(): string[] {
   return Object.keys(TOOLS);
 }
 
-/** 只读工具子集（Planner 规划 / Reviewer 审查专用——写工具不进循环 = 架构级只读保证） */
+/** 只读工具子集（Planner 规划 / Reviewer 审查专用——写工具不进循环 = 架构级只读保证；
+ *  v2.3 批 2：use_skill 只读（读 SKILL.md 全文）→ 进白名单） */
 export function getReadOnlyTools(): Record<string, ToolDef> {
   return {
     read_file: TOOLS.read_file,
@@ -573,6 +654,7 @@ export function getReadOnlyTools(): Record<string, ToolDef> {
     project_scan: TOOLS.project_scan,
     git_status: TOOLS.git_status,
     git_diff: TOOLS.git_diff,
+    use_skill: TOOLS.use_skill,
   };
 }
 

@@ -13,7 +13,7 @@
  * 终态事件（report/done）由编排层统一汇总发出。
  */
 
-import type { AgentEvent, PhaseId, ProviderKind, ToolContext, ToolDef } from "@infu/shared";
+import type { AgentEvent, PhaseId, ProviderKind, ToolContext, ToolDef, HookFn, ToolHookInput } from "@infu/shared";
 import { randomUUID } from "node:crypto";
 import { streamChatWithFailover, ModelChain, type ModelCandidate } from "../providers/gateway.js";
 import { zodToJsonSchema, type ChatMessageLike } from "../providers/chat.js";
@@ -71,6 +71,13 @@ export interface AgentRunOptions {
   phase?: { id: PhaseId; label: string; model?: string };
   /** 抑制终态事件（report/done），由编排层汇总后统一发出（Planner/Reviewer 阶段用） */
   suppressFinal?: boolean;
+  /**
+   * 函数式钩子（v2.3 批 2，插件注册）：
+   *  - preToolUse：execute 前调用（tool-start 事件后）；block → 不执行直接返回拒绝文本；args 可改写
+   *  - postToolUse：execute 后调用；result 可改写（回填模型的工具结果文本）
+   * 钩子抛错不阻塞主流程（emit 错误事件后放行/原样返回）。
+   */
+  hooks?: { preToolUse?: HookFn[]; postToolUse?: HookFn[] };
 }
 
 /** runAgent 运行结果（供编排层汇总报告 / 调用方打印） */
@@ -81,6 +88,54 @@ export interface RunResult {
   toolCount: number;
   approvals: { required: number; approved: number; denied: number };
   toolLogs: Array<{ tool: string; args: Record<string, unknown>; ok: boolean; summary: string }>;
+}
+
+/**
+ * preToolUse 钩子链（v2.3 批 2）：逐个执行——block → 立即返回拒绝；args 可改写；抛错放行不阻塞。
+ * 返回 { args: 最终参数, blocked: 拦截原因或 null }。
+ */
+export async function applyPreToolUseHooks(
+  hooks: NonNullable<AgentRunOptions["hooks"]>["preToolUse"] | undefined,
+  input: ToolHookInput,
+  emit: (e: AgentEvent) => void
+): Promise<{ args: Record<string, unknown>; blocked: string | null }> {
+  let args = input.args;
+  for (const hook of hooks ?? []) {
+    try {
+      const r = (await hook(input)) as { decision?: string; reason?: string; args?: Record<string, unknown> } | void;
+      if (r && r.decision === "block") {
+        return { args, blocked: r.reason ?? `工具 ${input.tool} 被钩子拦截` };
+      }
+      if (r && r.args) {
+        args = r.args;
+        input = { ...input, args };
+      }
+    } catch (e) {
+      emit({ type: "error", message: `插件钩子 preToolUse 异常（已放行）：${(e as Error).message}` });
+    }
+  }
+  return { args, blocked: null };
+}
+
+/**
+ * postToolUse 钩子链：改写回填模型的工具结果文本；抛错放行（原样返回）。
+ */
+export async function applyPostToolUseHooks(
+  hooks: NonNullable<AgentRunOptions["hooks"]>["postToolUse"] | undefined,
+  input: ToolHookInput,
+  result: string,
+  emit: (e: AgentEvent) => void
+): Promise<string> {
+  let out = result;
+  for (const hook of hooks ?? []) {
+    try {
+      const r = (await hook(input)) as { result?: string } | void;
+      if (r && typeof r.result === "string") out = r.result;
+    } catch (e) {
+      emit({ type: "error", message: `插件钩子 postToolUse 异常（已放行）：${(e as Error).message}` });
+    }
+  }
+  return out;
 }
 
 export const DEFAULT_SYSTEM_PROMPT = `你是 InFu，一个软件工程智能体，负责在用户的代码仓库中完成开发任务。你的名字就是"Infu"，自我介绍时直接说"我是 Infu"，不要自称"InFu Agent"。
@@ -171,7 +226,7 @@ export async function runAgent(opts: AgentRunOptions): Promise<RunResult> {
   const {
     modelConfig, fallbackModelConfigs, system, prompt, tools, root,
     emit, requestApproval, maxSteps = 30, suggestOnly = false, abortSignal,
-    phase, suppressFinal = false, initialMessages, thinkingLevel = 2,
+    phase, suppressFinal = false, initialMessages, thinkingLevel = 2, hooks,
   } = opts;
 
   const ctx: ToolContext = {
@@ -369,7 +424,7 @@ export async function runAgent(opts: AgentRunOptions): Promise<RunResult> {
       return { text: finalText, report, steps: step + 1, toolCount, approvals, toolLogs };
     }
 
-    // 3) 执行工具（含审批）
+    // 3) 执行工具（含审批；v2.3 批 2 函数式钩子：preToolUse 拦截/改参，postToolUse 改结果）
     const toolResultParts: Array<{ role: "tool"; tool_call_id: string; content: string }> = [];
     for (const call of calls) {
       const execute = toolExecutors.get(call.toolName);
@@ -380,18 +435,39 @@ export async function runAgent(opts: AgentRunOptions): Promise<RunResult> {
         });
         continue;
       }
-      emit({ type: "tool-start", tool: call.toolName, args: call.input, risk: tools[call.toolName]?.risk ?? "low", callId: call.toolCallId });
+      const risk = tools[call.toolName]?.risk ?? "low";
+      emit({ type: "tool-start", tool: call.toolName, args: call.input, risk, callId: call.toolCallId });
       toolCount++;
+      // ── preToolUse 钩子（插件注册；block → 不执行返回拒绝文本；args 可改写；抛错放行不阻塞）──
+      const { args, blocked } = await applyPreToolUseHooks(
+        hooks?.preToolUse,
+        { tool: call.toolName, args: call.input, callId: call.toolCallId, risk, phase: phase?.id },
+        emit
+      );
+      if (blocked) {
+        const msg = `用户拒绝：${blocked}`;
+        emit({ type: "tool-result", tool: call.toolName, ok: false, summary: msg, callId: call.toolCallId });
+        toolLogs.push({ tool: call.toolName, args, ok: false, summary: msg });
+        toolResultParts.push({ role: "tool", tool_call_id: call.toolCallId, content: msg });
+        continue;
+      }
       try {
-        const out = await execute(call.input, ctx);
+        let out = await execute(args, ctx);
+        // ── postToolUse 钩子（改写回填模型的工具结果文本；抛错放行）──
+        out = await applyPostToolUseHooks(
+          hooks?.postToolUse,
+          { tool: call.toolName, args, callId: call.toolCallId, risk, phase: phase?.id },
+          out,
+          emit
+        );
         // summary 推完整输出（v2.1 会话落库与 Diff 面板需要完整内容；显示层自行截断）
         emit({ type: "tool-result", tool: call.toolName, ok: true, summary: out, callId: call.toolCallId });
-        toolLogs.push({ tool: call.toolName, args: call.input, ok: true, summary: out });
+        toolLogs.push({ tool: call.toolName, args, ok: true, summary: out });
         toolResultParts.push({ role: "tool", tool_call_id: call.toolCallId, content: out });
       } catch (e) {
         const msg = `工具执行异常: ${(e as Error).message}`;
         emit({ type: "tool-result", tool: call.toolName, ok: false, summary: msg, callId: call.toolCallId });
-        toolLogs.push({ tool: call.toolName, args: call.input, ok: false, summary: msg });
+        toolLogs.push({ tool: call.toolName, args, ok: false, summary: msg });
         toolResultParts.push({ role: "tool", tool_call_id: call.toolCallId, content: msg });
       }
     }

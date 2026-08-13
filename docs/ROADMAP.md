@@ -97,11 +97,25 @@
 - ✅ **子智能体（opencode 式，2026-08-13）**：`delegate_task`（第 14 个内置工具）——独立上下文 + 结果回收 + **同轮多工具调用并行执行**（loop 3.2 段 Promise.all，对齐 ZCode）+ `tasks[]` 并行批量（最多 6）；**agent 文件化定义**（`.infu/agents/<name>.md` frontmatter：description/tools/model/maxSteps/thinkingLevel/permission/sandbox）；**内置 agent 对齐 ZCode**（general-purpose=全工具 / explore=只读，调用时机经 ZCode 本机 33 次调用实证：explore 67% 只读探索调研 / general-purpose 33% 深度审计）；**审批对齐 ZCode**（只读委派免审批、写能力一次授权、内部继承授权、requireExplicit 红线逐条、agent 名不存在直接报错）；**展示对齐 opencode/Claude Code**（主对话流条目 + 右侧栏完整消息流弹窗，内部过程不进主对话流）；**摘要完整接收**（≤2000 字结构化约定 + 20K 兜底）；设置面板可编辑 agent（工具/权限/沙箱/模型/推理强度）；`npm test` 641 项全绿 + CLI/浏览器端到端
 - ✅ **best-of-n 按用户评审完全移除（2026-08-13）**：同任务 N 路竞速被判定多余（同模型同工具产出趋同；主流 Agent 并发全是「不同任务并行」）——删除 CLI `--best-of-n`、server 分支、Web 第 4 档模式 + TrialsPanel、tests/parallel.test.ts、docs/BEST-OF-N.md；真并发 = delegate tasks 不同任务并行（见上）
 
-### v2.6 记忆与任务
-- 记忆系统三层（项目记忆/任务总和记忆/全局记忆；形态实施前讨论）+ 项目级指令文件（INFU.md）+ 路径作用域规则
-- 项目任务看板（agent 可读写可规划）+ 可选 rubric 完成度自评
-- Git 优化（diff/暂存/提交/分支 UI）+ 工具调用优化（并行调用/工具选择/错误自适应）
-
+### v2.6 记忆与任务【✅ 批 1 + 批 2 完成 2026-08-13；✅ v2.6.1 会话中枢重构；收尾项视体量】
+- ✅ **v2.6.1 会话中枢重构（2026-08-13，用户纠正「任务=会话」误称后定稿）**：
+  - **概念修正**：会话（Session）是核心对象，项目是容器，任务看板是误称产物——**任务看板整体删除**（`.infu/tasks/` 模块/4 个 task 工具/`/api/tasks`/KanbanView/TaskModal/NewTaskModal/侧栏任务区/tasksPrompt 引导段/tasks.test.ts 59 项）
+  - **记忆系统修正（用户拍板逻辑）**：五层→四层——「发生的事」进会话历史（SQLite）、「总结」进项目历史（.infu/history/ 自动沉淀）、「下次该怎么干」进项目/全局记忆（memory_read/write）、「你必须遵守的」进 INFU.md；**任务记忆（L3）删除**；记忆读取按会话 root 解析路径（自由会话读全局记忆 + root 下 .infu/memory 若存在——对齐 Claude 每目录独立记忆 + 全局兜底）；生成时机 = 会话中 Agent 判断未来有用性主动写（Claude Auto Memory 模式）+ 会话结束自动归档（Codex 即时简化版）；**memory_write 敏感凭据检测**（Codex secret-redactor 轻量版：sk-/AKIA/私钥/Bearer/连接串/JWT 等模式命中拒绝写入）
+  - **会话管理**（sessions 表幂等迁移加 pinned/archived 列 + `PATCH /api/sessions/:id`：重命名/顶置/归档；listSessions 支持 archived 过滤）
+  - **项目注册表**（新 `src/projects.ts`：`~/.infu/projects.json`；GET/POST/DELETE /api/projects——会话按 root 命中注册表判断隶属，未命中 = 自由会话；创建校验目录存在、重复拒绝、损坏备份；**移除项目只删注册**，会话保留为自由会话、文件夹不删）
+  - **侧栏（用户定稿会话中枢）**：顶部 新建会话（CTA，选中项目 = 在项目下新建）/定时任务[规划中]/技能（位置不变）/搜索（Ctrl+K）；**Archive 归档入口 + 全部收起**（置顶区上方）；**已顶置区**（项目栏上方）；项目区（折叠全部项目 + 创建项目 + 项目行[移除两段式确认][新建会话] + 组内会话平铺[重命名行内编辑/顶置/归档 hover 按钮] + 显示更多）；自由会话区；Archive 弹窗（恢复/删除）；创建项目弹窗（Web 受限无法读文件夹绝对路径 → 路径输入 + 历史 root 选择）
+  - 验证：`npm test` 全绿（memory 85 + projects 21 新增 + session-store 30 扩展；tasks 59 已删）+ API 级端到端（创建项目→会话归属→顶置/重命名/归档→移除项目会话保留）+ 浏览器（侧栏结构渲染/创建项目弹窗/cua 点击链路；IAB broker 故障期间降级 cua + API 验证）
+  - ⏳ 遗留：记忆索引/剪枝（v2.7）、记忆生成的后台提炼管道（Codex 6h 模式，暂用即时归档替代）
+- ✅ **三档模式移除（2026-08-13，用户定稿）**：「编排/直接/方案」三档整体删除——用户判断权限维度已被设置页全局审批档位（auto/smart/confirm + 工具覆盖）覆盖、流程维度应交给 AI 自适应（v2.6.5 优化）；删除 Web 模式选择器（Shift+Tab）/CLI `--suggest`/`--no-orchestrate`/suggestOnly 方案模式（loop 只读白名单与输出拦截）/orchestrate 分支（server/CLI direct 直跑分支）；**唯一流程 = Planner 规划 → 计划确认（--no-plan-approval 可跳过）→ Executor 执行 → Reviewer 审查**；沉淀元数据删「模式」字段；测试更新（memory 85 全绿，全量 20 套件）
+- ✅ **批 1 记忆核心（2026-08-13，用户拍板五层设计）**：
+  - **分层（结合用户「任务/项目历史/会话历史拆分」意见 + 主流 agent 调研）**：L0 项目指令 INFU.md（用户权威规则，类似 CLAUDE.md/AGENTS.md——Codex 明确分工：团队规则进指令文件、历史决策进记忆）→ L1 全局记忆 ~/.infu/memory/（跨项目偏好）→ L2 项目记忆 .infu/memory/（项目约定/教训，主题文件 conventions/lessons/preferences）→ L3 任务记忆 .infu/tasks/（批 2，Claude Code Tasks 同款：任务≠会话，跨会话存活）→ L4 项目历史 .infu/history/（任务完成自动沉淀，只增不改）→ L5 会话历史 SQLite（已有，原始事件流）。**任务/项目历史/会话历史是三个独立维度**（Claude Code 2026-01 Tasks API 核心洞察：TodoWrite 会话内便签重启即失，Tasks 持久化跨会话）
+  - **项目指令文件**（新 `src/memory/infu.ts`）：`<root>/INFU.md` 优先、`<root>/AGENTS.md` 生态兜底；**全量注入所有阶段 system**（Planner/Reviewer 也须遵守规则）；32KiB 上限截断（Codex project_doc_max_bytes 同款）
+  - **路径作用域**（INFU.md 声明式）：`- 允许: X` / `- 禁止: Y`（`**` 跨段、`*` 单段、尾部 `/**` 匹配根本身）；语义对齐 Claude Code deny>ask>allow——命中禁止直接拒绝、有允许规则时未命中拒绝（白名单模式）；工具层接线 read_file/write_file/edit_file/list_directory（与 isProtectedPath 同模式）；ToolContext 新增 scopeRules
+  - **记忆读写**（新 `src/memory/store.ts`）：文件系统即记忆（生态共识：files are the truth，git 可版本化）；主题 = 目录下 *.md，首次访问自动创建默认模板；`memory_read`（low，进 Planner/Reviewer 白名单——规划时了解项目约定）/ `memory_write`（medium，append 带时间戳 / replace 覆盖）；**~/.infu 写保护精确化**：isProtectedPath 不变（write_file 依旧拦截），memory_write 是全局记忆唯一合法写入通道（topic 白名单 ^[a-zA-Z0-9_-]{1,64}$ 防路径穿越）
+  - **自动沉淀**（新 `src/memory/sediment.ts`）：任务完成（report 生成后）归档到 .infu/history/YYYY-MM-DD.md——标题/时间/模型/模式/步数/审批统计/改动概览（write/edit/test/command/memory_write）/执行摘要/交付报告全文/审查意见；**零额外模型调用**（用户拍板：报告归档+工具补充；稳定约定由 Agent 中途 memory_write 记录——Executor system 注入记忆引导段）；沉淀失败不影响交付；orchestrator 内部 + CLI/server 直接/方案模式三处挂点
+  - 验证：`npm test` 720 项全绿（新增 memory.test.ts 77 项：指令发现/作用域解析校验/glob 转换/主题读写/写保护精确化/工具接线/沉淀防爆）+ **CLI 端到端实测**（真实 agnes 模型三连：任务 1 创建 README + memory_write 约定 → 任务 2 memory_read 读回约定（跨任务记忆闭环）→ 任务 3 访问禁止路径被工具层拦截「命中禁止规则 secret/**」且 Agent 遵守）
+  - ⏳ **遗留（v2.7）**：记忆索引/剪枝机制（Codex memories 30 天剪枝 + 秘密脱敏、AutoMem 索引 200 行加载——渐进读取靠 Agent 自觉 + 主题分类，长期膨胀需机制兜底；已按用户评审标注）
+- ~~批 2 任务看板（2026-08-13）~~：**v2.6.1 按用户评审整体删除**（「任务=会话」误称产物；实现含 .infu/tasks/ 文件 + task 工具 + Kanban 视图 + rubric，均已移除，详见 v2.6.1 概念修正节）
 ### v2.7 生态与数据
 - 插件落地：browser-use、computer-use、文档技能（docx/pdf/pptx）、skill 创建器
 - skill 生态完善（导入/导出/模板库/市场雏形，SKILL.md 标准）

@@ -64,8 +64,6 @@ export interface AgentRunOptions {
     requireExplicit?: boolean
   ) => Promise<boolean>;
   maxSteps?: number;
-  /** 无工具调用能力的模型降级：只出方案不执行 */
-  suggestOnly?: boolean;
   /** 中止信号（Web 停止按钮 / 服务端连接断开） */
   abortSignal?: AbortSignal;
   /** 分层编排阶段标识（进入时 emit phase-start，前端按阶段分组）；model 为该阶段所用模型（角色路由后） */
@@ -81,6 +79,8 @@ export interface AgentRunOptions {
   hooks?: { preToolUse?: HookFn[]; postToolUse?: HookFn[] };
   /** 委派深度（v2.5 子智能体内部字段：0=顶层；子循环 +1；入 ToolContext 供 delegate_task 深度限制） */
   delegationDepth?: number;
+  /** v2.6 路径作用域规则（INFU.md「路径作用域」节；文件类工具校验；子智能体由委派方传入） */
+  scopeRules?: import("@infu/shared").ScopeRule[];
 }
 
 /** runAgent 运行结果（供编排层汇总报告 / 调用方打印） */
@@ -150,8 +150,7 @@ export const DEFAULT_SYSTEM_PROMPT = `你是 InFu，一个软件工程智能体�
 4. 高风险操作（删除、覆盖、外部命令）会触发用户审批，被拒绝时换一种方案。
 5. 任务完成时用中文输出简明总结：做了什么、改动了哪些文件、测试结果、遗留风险。
 6. 只做用户要求的事，不要擅自扩大范围。
-
-（若处于"方案模式"：你的任务是输出方案与建议，不执行任何修改。你可以使用只读工具分析项目——读取文件、搜索代码、查看目录与 git 状态、运行测试来验证现状，但**绝对不要修改任何文件、不要运行有副作用的命令**（如安装依赖、构建发布、删除文件）。基于工具事实给出具体可执行的方案。）`;
+`;
 
 /**
  * 交付报告生成 — 基于工具执行记录的结构化总结（PRD 验收标准第 6 条）
@@ -228,9 +227,9 @@ export function buildReport(opts: {
 export async function runAgent(opts: AgentRunOptions): Promise<RunResult> {
   const {
     modelConfig, fallbackModelConfigs, system, prompt, tools, root,
-    emit, requestApproval, maxSteps = 30, suggestOnly = false, abortSignal,
+    emit, requestApproval, maxSteps = 30, abortSignal,
     phase, suppressFinal = false, initialMessages, thinkingLevel = 2, hooks,
-    delegationDepth = 0,
+    delegationDepth = 0, scopeRules,
   } = opts;
 
   const ctx: ToolContext = {
@@ -244,6 +243,8 @@ export async function runAgent(opts: AgentRunOptions): Promise<RunResult> {
     thinkingLevel,
     delegationDepth,
     abortSignal,
+    // v2.6 路径作用域（INFU.md「路径作用域」节解析结果；文件类工具校验）
+    scopeRules,
   };
 
   // 模型降级链（v2.2）：主模型重试耗尽 → 依次切换备用模型；切换时发事件（审计/前端徽标）
@@ -269,16 +270,8 @@ export async function runAgent(opts: AgentRunOptions): Promise<RunResult> {
   // 阶段边界事件（前端按此分组展示；model = 本阶段模型，角色路由后由编排层传入）
   if (phase) emit({ type: "phase-start", phase: phase.id, label: phase.label, model: phase.model ?? chain.active.model });
 
-  // 方案模式（suggestOnly）允许的只读工具 + run_test（可读文件/搜索/查看/跑测试，
-  // 才能给出靠谱方案；但绝不注入任何写工具/命令工具——修改文件在架构上不可达）
-  const SUGGEST_READONLY_TOOLS = new Set([
-    "read_file", "search_code", "list_directory", "project_scan", "git_status", "git_diff", "run_test",
-  ]);
-
   // 组装 OpenAI tools 格式（zod schema → JSON Schema）
-  const allowed = suggestOnly
-    ? Object.entries(tools).filter(([name]) => SUGGEST_READONLY_TOOLS.has(name))
-    : Object.entries(tools);
+  const allowed = Object.entries(tools);
   const openaiTools = allowed.map(([name, t]) => ({
     type: "function" as const,
     function: {
@@ -423,13 +416,7 @@ export async function runAgent(opts: AgentRunOptions): Promise<RunResult> {
       });
 
     if (!calls.length) {
-      // 方案模式兜底：模型仍可能输出写操作工具调用格式文本（DeepSeek 实测会模仿 XML <invoke>），
-      // 明确提示未执行，避免用户误以为任务在跑
-      let finalText = text;
-      if (suggestOnly && /<tool_calls|<invoke\b|"tool_calls"/i.test(text)) {
-        finalText +=
-          "\n\n⚠ 当前为「方案」模式（只读分析 + 测试，绝不修改文件），以上工具调用格式仅为模型文本、未被执行。如需实际执行修改任务，请切换到「编排」或「直接」模式后重发。";
-      }
+      const finalText = text;
       const report = finishWithReport(step + 1);
       if (!suppressFinal) emit({ type: "done", text: finalText, toolCount, steps: step + 1 });
       return { text: finalText, report, steps: step + 1, toolCount, approvals, toolLogs };

@@ -267,9 +267,6 @@ export type RiskLevel = "low" | "medium" | "high";
 /** 分层编排的阶段 */
 export type PhaseId = "planner" | "executor" | "reviewer";
 
-/** 分层编排模式：off=单 Agent；plan=Planner→Executor；full=Planner→Executor→Reviewer */
-export type OrchestrateMode = "off" | "plan" | "full";
-
 /**
  * Agent 过程事件（CLI 打印 / SSE 推送前端；v2.1 起全量落库 ~/.infu/infu.db）。
  * v2.5：过程事件（text/step/tool/审批/降级/压缩）可携带可选 `subagentId`——
@@ -303,7 +300,10 @@ export type AgentEvent =
   /** SSE 首帧：回传新会话 id（Web 端绑定 activeSessionId） */
   | { type: "session"; id: string }
   /** 用户消息（服务端落库/重放历史用；模型不消费） */
-  | { type: "user-message"; text: string };
+  | { type: "user-message"; text: string }
+  // ── v2.6 记忆系统新增 ──
+  /** 任务结束自动沉淀（项目历史归档；path 为归档文件，summary 为条目摘要） */
+  | { type: "memory-sediment"; path: string; summary: string };
 
 /** 运行时模型信息（v2.5：ToolContext 携带，子智能体委派解析子模型用；结构同 registry toRuntimeModel 返回值） */
 export interface RuntimeModelInfo {
@@ -346,6 +346,16 @@ export interface ToolContext {
   abortSignal?: AbortSignal;
   /** v2.5：当前工具调用的 callId（loop 每次 execute 前填充；delegate_task 作 subagent-start 的 parentCallId） */
   callId?: string;
+  /** v2.6：路径作用域规则（来自项目指令 INFU.md「路径作用域」节；文件类工具校验用） */
+  scopeRules?: ScopeRule[];
+}
+
+/** v2.6：路径作用域规则（INFU.md 声明式；语义对齐 Claude Code：deny > allow，命中禁止直接拒绝） */
+export interface ScopeRule {
+  /** true=允许（白名单）；false=禁止（黑名单） */
+  allow: boolean;
+  /** 相对项目根的 glob（** 跨段、* 单段；如 packages/agent/src/**） */
+  pattern: string;
 }
 
 /** 工具定义（统一接口） */
@@ -413,6 +423,10 @@ export interface SessionMeta {
   eventCount: number;
   toolCount: number;
   promptCount: number;
+  /** v2.6.1：顶置（置顶区显示） */
+  pinned: boolean;
+  /** v2.6.1：归档（归档回收站；常规列表不显示） */
+  archived: boolean;
 }
 
 /** 事件流条目（seq 全局有序；ts 为事件时间戳） */
@@ -439,12 +453,8 @@ export interface TaskRequest {
     reviewer?: string;
   };
   maxSteps?: number;
-  /** 分层编排模式（默认 full） */
-  orchestrate?: OrchestrateMode;
-  /** Planner 计划是否需用户确认后执行（默认 true） */
+  /** Planner 计划是否需用户确认后执行（默认 true；-y 自动批准） */
   planApproval?: boolean;
-  /** 建议模式：模型只出方案，不执行任何工具 */
-  suggestOnly?: boolean;
 }
 
 // ── v2 配置 schema（供应商凭据两级结构；passthrough 保留未知字段）──

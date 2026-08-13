@@ -75,6 +75,10 @@ export class SessionStore {
       );
       CREATE INDEX IF NOT EXISTS idx_events_session ON events(session_id, seq);
     `);
+    // v2.6.1 幂等迁移：sessions 表加 pinned/archived 列（顶置/归档）
+    const cols = this.db.prepare(`PRAGMA table_info(sessions)`).all().map((r: any) => r.name);
+    if (!cols.includes("pinned")) this.db.exec(`ALTER TABLE sessions ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0`);
+    if (!cols.includes("archived")) this.db.exec(`ALTER TABLE sessions ADD COLUMN archived INTEGER NOT NULL DEFAULT 0`);
   }
 
   close() {
@@ -94,8 +98,11 @@ export class SessionStore {
     return id;
   }
 
-  /** 会话列表（按最近更新倒序，含统计） */
-  listSessions(limit = 50): SessionMeta[] {
+  /**
+   * 会话列表（按最近更新倒序，含统计）。
+   * v2.6.1：archived=false（默认）只返回未归档；archived=true 返回归档回收站；undefined = 全部。
+   */
+  listSessions(limit = 50, archived?: boolean): SessionMeta[] {
     const rows = this.db
       .prepare(
         `SELECT s.*,
@@ -105,6 +112,7 @@ export class SessionStore {
           (SELECT COUNT(*) FROM events e WHERE e.session_id = s.id
              AND json_extract(e.event_json, '$.type') = 'user-message') AS prompt_count
          FROM sessions s
+         ${archived === undefined ? "" : archived ? "WHERE s.archived = 1" : "WHERE s.archived = 0"}
          ORDER BY s.updated_at DESC
          LIMIT ?`
       )
@@ -160,6 +168,28 @@ export class SessionStore {
   /** 更新会话状态（done/error/stopped/running） */
   updateStatus(id: string, status: SessionStatus) {
     this.db.prepare(`UPDATE sessions SET status = ?, updated_at = ? WHERE id = ?`).run(status, Date.now(), id);
+  }
+
+  // ── v2.6.1 会话管理（重命名/顶置/归档）──
+
+  /** 重命名会话（返回是否成功；会话不存在返回 false） */
+  renameSession(id: string, title: string): boolean {
+    const t = title.trim().slice(0, 200);
+    if (!t) return false;
+    const r = this.db.prepare(`UPDATE sessions SET title = ?, updated_at = ? WHERE id = ?`).run(t, Date.now(), id);
+    return r.changes > 0;
+  }
+
+  /** 顶置/取消顶置（置顶区显示） */
+  setPinned(id: string, pinned: boolean): boolean {
+    const r = this.db.prepare(`UPDATE sessions SET pinned = ?, updated_at = ? WHERE id = ?`).run(pinned ? 1 : 0, Date.now(), id);
+    return r.changes > 0;
+  }
+
+  /** 归档/恢复（归档回收站） */
+  setArchived(id: string, archived: boolean): boolean {
+    const r = this.db.prepare(`UPDATE sessions SET archived = ?, updated_at = ? WHERE id = ?`).run(archived ? 1 : 0, Date.now(), id);
+    return r.changes > 0;
   }
 
   /**
@@ -221,5 +251,7 @@ function rowToMeta(row: Record<string, unknown>): SessionMeta {
     eventCount: Number(row.event_count ?? 0),
     toolCount: Number(row.tool_count ?? 0),
     promptCount: Number(row.prompt_count ?? 0),
+    pinned: Number(row.pinned ?? 0) === 1,
+    archived: Number(row.archived ?? 0) === 1,
   };
 }

@@ -22,6 +22,7 @@ import { registerPlugin, type RegisterPluginInput } from "../plugin/register.js"
 import { listSkills, readSkillContent } from "../plugin/skills.js";
 import { listAgents, readAgentFile } from "../agent/agents.js";
 import { delegateTasks, describeDelegation, isReadOnlyDelegation, type SubagentSpec } from "../agent/subagent.js";
+import { readMemory, writeMemory, validateTopic, checkPathScope } from "../memory/index.js";
 import { loadConfig } from "../providers/registry.js";
 import {
   currentApprovalPolicy, isToolDisabled, resolveToolRisk, shouldAutoApprove, isCommandAllowed,
@@ -295,6 +296,9 @@ export const TOOLS: Record<string, ToolDef> = {
       const rel = args.path as string;
       const abs = path.resolve(ctx.root, rel);
       if (!abs.startsWith(path.resolve(ctx.root))) return "错误：路径越界（不允许访问项目根之外）";
+      // v2.6 路径作用域（INFU.md「路径作用域」节声明式规则：禁止直接拒绝 / 白名单模式）
+      const scopeErr = checkPathScope(rel, ctx.scopeRules);
+      if (scopeErr) return `错误：路径超出作用域——${scopeErr}（项目指令「路径作用域」节；如需访问请更新规则或与用户确认）`;
       if (!fs.existsSync(abs) || !fs.statSync(abs).isFile()) return `错误：文件不存在 ${rel}`;
       if (fs.statSync(abs).size > MAX_FILE_READ) return `错误：文件过大（>${MAX_FILE_READ} 字节），请用 search_code 定位相关内容`;
       const all = fs.readFileSync(abs, "utf-8").split("\n");
@@ -321,6 +325,9 @@ export const TOOLS: Record<string, ToolDef> = {
       const rel = args.path as string;
       const abs = path.resolve(ctx.root, rel);
       if (!abs.startsWith(path.resolve(ctx.root))) return "错误：路径越界（不允许访问项目根之外）";
+      // v2.6 路径作用域（INFU.md「路径作用域」节）
+      const scopeErr = checkPathScope(rel, ctx.scopeRules);
+      if (scopeErr) return `错误：路径超出作用域——${scopeErr}（项目指令「路径作用域」节；如需写入请更新规则或与用户确认）`;
       // 敏感路径写保护（沙箱 L1）
       const protectedName = isProtectedPath(abs);
       if (protectedName) {
@@ -349,6 +356,8 @@ export const TOOLS: Record<string, ToolDef> = {
       const rel = args.path as string;
       const abs = path.resolve(ctx.root, rel);
       if (!abs.startsWith(path.resolve(ctx.root))) return "错误：路径越界";
+      const scopeErr = checkPathScope(rel, ctx.scopeRules);
+      if (scopeErr) return `错误：路径超出作用域——${scopeErr}（项目指令「路径作用域」节）`;
       const protectedName = isProtectedPath(abs);
       if (protectedName) {
         return `错误：目标路径位于受保护区域（${protectedName}），拒绝修改`;
@@ -417,6 +426,8 @@ export const TOOLS: Record<string, ToolDef> = {
       const rel = (args.path as string | undefined) || ".";
       const abs = path.resolve(ctx.root, rel);
       if (!abs.startsWith(path.resolve(ctx.root))) return "错误：路径越界";
+      const scopeErr = checkPathScope(rel, ctx.scopeRules);
+      if (scopeErr) return `错误：路径超出作用域——${scopeErr}（项目指令「路径作用域」节）`;
       if (!fs.existsSync(abs) || !fs.statSync(abs).isDirectory()) return `错误：目录不存在 ${rel}`;
       const entries = fs.readdirSync(abs, { withFileTypes: true });
       const lines = entries.map((e) => {
@@ -766,6 +777,54 @@ export const TOOLS: Record<string, ToolDef> = {
       return head + "\n\n顶层结构:\n" + tree;
     },
   },
+
+  // ── v2.6 记忆系统（渐进式加载：指令常驻 system，记忆按需读 / 稳定知识主动写）──
+  memory_read: {
+    name: "memory_read",
+    description:
+      "读取记忆主题文件（渐进式加载）。记忆分两层：项目记忆 .infu/memory/（当前项目约定/教训）与全局记忆 ~/.infu/memory/（跨项目偏好）。" +
+      "不传 topic 时列出可用主题。任务开始时如需要了解项目既有约定/踩坑教训，先读相关主题再动手。",
+    risk: "low",
+    schema: z.object({
+      scope: z.enum(["project", "global"]).optional().describe("记忆范围：project=当前项目（默认）；global=跨项目全局"),
+      topic: z.string().optional().describe("主题名（conventions 约定 / lessons 教训 / preferences 偏好，或自建主题；省略=列主题列表）"),
+    }),
+    async execute(args, ctx) {
+      const scope = (args.scope as "project" | "global" | undefined) ?? "project";
+      const topic = typeof args.topic === "string" ? args.topic : undefined;
+      const { text } = readMemory(scope, topic, ctx.root);
+      return clip(text, MAX_OUTPUT);
+    },
+  },
+
+  memory_write: {
+    name: "memory_write",
+    description:
+      "写入记忆主题文件：把**值得下次任务复用**的稳定知识记录到项目记忆 .infu/memory/ 或全局记忆 ~/.infu/memory/（全局记忆需 medium 审批）。" +
+      "用途：项目约定（conventions）/踩坑教训（lessons）/用户偏好（preferences），或自建主题。要求简短准确可复用；不要记录任务过程流水账（系统自动归档历史）；不要重复已有内容。",
+    risk: "medium",
+    schema: z.object({
+      scope: z.enum(["project", "global"]).optional().describe("记忆范围：project=当前项目（默认）；global=跨项目全局"),
+      topic: z.string().describe("主题名（conventions/lessons/preferences 或自建；只能含字母数字下划线连字符）"),
+      content: z.string().describe("要记录的知识内容（append 时作为一条新记录追加；replace 时整体覆盖）"),
+      mode: z.enum(["append", "replace"]).optional().describe("写入模式：append=追加一条记录（默认）；replace=整体覆盖主题（需谨慎，默认追加）"),
+    }),
+    async execute(args, ctx) {
+      const scope = (args.scope as "project" | "global" | undefined) ?? "project";
+      const topic = String(args.topic ?? "").trim();
+      const content = String(args.content ?? "");
+      const mode = (args.mode as "append" | "replace" | undefined) ?? "append";
+      // 写保护精确化：全局记忆位于 ~/.infu（受保护）——本工具是唯一合法写入通道；
+      // 非法 topic（路径穿越/后缀逃逸）直接拒绝
+      const err = validateTopic(topic);
+      if (err) return `错误：${err}`;
+      const desc = `${mode === "replace" ? "覆盖" : "追加到"}${scope === "global" ? "全局" : "项目"}记忆 ${topic}.md：\n${content.slice(0, 200)}`;
+      if (!(await guard(ctx, "memory_write", "medium", desc))) return "用户拒绝：未写入";
+      const r = writeMemory(scope, topic, content, mode, ctx.root);
+      return r.ok ? r.message : `错误：${r.message}`;
+    },
+  },
+
 };
 
 export function getToolNames(): string[] {
@@ -783,6 +842,8 @@ export function getReadOnlyTools(): Record<string, ToolDef> {
     git_status: TOOLS.git_status,
     git_diff: TOOLS.git_diff,
     use_skill: TOOLS.use_skill,
+    // v2.6：memory_read 只读（渐进式记忆加载）→ 进 Planner/Reviewer 白名单；memory_write 不注入
+    memory_read: TOOLS.memory_read,
   };
 }
 

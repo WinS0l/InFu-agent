@@ -6,7 +6,7 @@ import ChatPanel from "./components/ChatPanel";
 import DiffPanel from "./components/DiffPanel";
 import SubagentViewer from "./components/SubagentViewer";
 import ApprovalModal from "./components/ApprovalModal";
-import { RefreshCw, AlertTriangle, Cog } from "lucide-react";
+import { Cog } from "lucide-react";
 import SettingsModal from "./components/SettingsModal";
 import TerminalPanel, { TerminalToggleButton } from "./components/TerminalPanel";
 
@@ -19,12 +19,30 @@ const SVG_LOGO = (
 );
 
 export default function App() {
-  const { models, modelId, setModelId, root, setRoot, running, messages, fontSize, streamCursor, setAppearance } = useStore();
-  const [modelError, setModelError] = useState("");
+  const { running, messages, fontSize, streamCursor, setAppearance } = useStore();
   // v2.4 信息架构升级：扩展/MCP/模型管理全部并入设置弹窗（顶栏仅保留「设置」入口）
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [terminalOpen, setTerminalOpen] = useState(false);
   const loaded = useRef(false);
+  // ── v2.6.1 侧栏会话中枢（UI 状态）──
+  const { focusSearch, settingsTab, setSettingsTab } = useStore();
+
+  // v2.6 全局快捷键：Ctrl+N 新建会话 / Ctrl+K 聚焦搜索（输入框聚焦时不劫持）
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      const target = e.target as HTMLElement;
+      const typing = target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.isContentEditable;
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "n") {
+        e.preventDefault();
+        if (!typing) useStore.getState().newSession();
+      } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "k") {
+        e.preventDefault();
+        focusSearch();
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [focusSearch]);
 
   // v2.4 外观即时应用（html data 属性 → index.css 规则）
   useEffect(() => {
@@ -35,9 +53,8 @@ export default function App() {
   const loadModels = useCallback(async () => {
     try {
       await fetchModels();
-      setModelError("");
-    } catch (e) {
-      setModelError((e as Error).message);
+    } catch {
+      /* 模型加载失败静默（5 秒重试；输入区模型选择器与设置页可查） */
     }
   }, []);
 
@@ -53,7 +70,7 @@ export default function App() {
           fontSize: cfg.appearance.fontSize ?? "sm",
           streamCursor: cfg.appearance.streamCursor ?? true,
         });
-        if (cfg.general.defaultRoot && st.root === "E:\\InFu(test)") {
+        if (cfg.general.defaultRoot && !st.root) {
           st.setRoot(cfg.general.defaultRoot);
         }
       })
@@ -86,7 +103,7 @@ export default function App() {
 
   return (
     <div className="flex h-full flex-col bg-ink">
-      {/* 顶栏：Logo + 模型选择 + 项目根目录 */}
+      {/* 顶栏（v2.6.2 精简：仅 Logo/状态/设置；模型选择在输入区旁，项目切换在侧栏） */}
       <header className="flex h-12 shrink-0 items-center gap-3 border-b border-line bg-panel px-3">
         <div className="flex items-center gap-2 text-accent">
           {SVG_LOGO}
@@ -94,47 +111,6 @@ export default function App() {
         </div>
         <div className="text-xs text-sub">软件工程智能体</div>
         <div className="ml-auto flex items-center gap-2">
-          <label className="text-xs text-sub">模型</label>
-          {models.length > 0 ? (
-            <select
-              className="h-8 cursor-pointer rounded-md border border-line bg-muted px-2 text-xs text-text transition-colors hover:border-accent"
-              value={modelId}
-              onChange={(e) => setModelId(e.target.value)}
-              disabled={running}
-            >
-              {models.map((m) => (
-                <option key={m.id} value={m.id}>
-                  {m.name}
-                  {!m.apiKey && !m.baseURL ? "（未配 Key）" : ""}
-                </option>
-              ))}
-            </select>
-          ) : modelError ? (
-            <span className="flex items-center gap-1.5 text-xs text-danger">
-              <AlertTriangle className="h-3.5 w-3.5" />
-              模型加载失败
-              <button
-                className="flex cursor-pointer items-center gap-1 rounded border border-line px-1.5 py-0.5 text-[11px] text-text transition-colors hover:border-accent hover:text-accent"
-                onClick={() => { setModelError(""); loadModels(); }}
-                title={modelError}
-              >
-                <RefreshCw className="h-3 w-3" />
-                重试
-              </button>
-            </span>
-          ) : (
-            <span className="flex items-center gap-1.5 text-xs text-sub">
-              <RefreshCw className="h-3 w-3 animate-spin" />
-              模型加载中…
-            </span>
-          )}
-          <input
-            className="h-8 w-64 rounded-md border border-line bg-muted px-2 font-mono text-xs text-text placeholder:text-sub/60"
-            value={root}
-            onChange={(e) => setRoot(e.target.value)}
-            placeholder="项目根目录"
-            spellCheck={false}
-          />
           {running && (
             <span className="flex items-center gap-1 text-xs text-accent">
               <span className="h-2 w-2 animate-pulse rounded-full bg-accent" />
@@ -152,9 +128,11 @@ export default function App() {
         </div>
       </header>
 
-      {/* 三栏主体 */}
+      {/* 三栏主体（v2.6：看板视图时主面板切换为 Kanban） */}
       <div className="relative flex min-h-0 flex-1">
-        <Sidebar />
+        <Sidebar
+          onOpenSettings={(tab) => { setSettingsTab(tab); setSettingsOpen(true); }}
+        />
         <ChatPanel />
         <DiffPanel />
         {/* v2.5 子智能体详情弹窗（右侧滑出；点击对话流中的子智能体条目打开） */}
@@ -166,7 +144,7 @@ export default function App() {
       <TerminalToggleButton open={terminalOpen} onClick={() => setTerminalOpen(!terminalOpen)} />
 
       <ApprovalModal />
-      {settingsOpen && <SettingsModal onClose={() => setSettingsOpen(false)} />}
+      {settingsOpen && <SettingsModal onClose={() => setSettingsOpen(false)} initialTab={settingsTab as "general"} />}
     </div>
   );
 }

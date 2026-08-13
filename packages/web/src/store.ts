@@ -2,9 +2,6 @@ import { create } from "zustand";
 import { persist } from "zustand/middleware";
 import type { AgentEvent, ModelConfig, PhaseId, SessionMeta, StoredEvent } from "@infu/shared";
 
-/** 任务模式（三档选择器，对齐 Cursor/Copilot 的模式切换） */
-export type ChatMode = "orchestrate" | "direct" | "ask";
-
 /** 单条消息（含其触发的工具调用与交付报告） */
 export interface ChatMsg {
   id: string;
@@ -122,6 +119,13 @@ interface StoreState {
   activeSessionId: string | null;
   setSessions: (s: SessionMeta[]) => void;
   setActiveSessionId: (id: string | null) => void;
+  // ── v2.6.1 侧栏会话中枢（UI 状态）──
+  /** 搜索框聚焦信号（Ctrl+K 递增触发 Sidebar 聚焦） */
+  searchFocusTick: number;
+  focusSearch: () => void;
+  /** 设置弹窗初始 Tab（技能/定时任务按钮定位用） */
+  settingsTab: string;
+  setSettingsTab: (tab: string) => void;
   /** 新建会话：清空聊天区并脱离当前会话（下一轮任务由服务端新建） */
   newSession: () => void;
   /** 加载历史会话（事件流重放为消息；跳过 plan/审批交互事件） */
@@ -161,8 +165,6 @@ interface StoreState {
   orchestrate: boolean;
   setOrchestrate: (v: boolean) => void;
   /** 任务模式（三档：分层编排 / 直接执行 / 只出方案） */
-  mode: ChatMode;
-  setMode: (m: ChatMode) => void;
   /** 当前编排阶段（phase-start 事件更新，新消息按此打标） */
   currentPhase: PhaseId | null;
   setPhase: (ev: Extract<AgentEvent, { type: "phase-start" }>) => void;
@@ -310,7 +312,7 @@ export const useStore = create<StoreState>()(
     (set, get) => ({
   models: [],
   modelId: "",
-  root: "E:\\InFu(test)",
+  root: "", // v2.6.2：初始为空——由设置 defaultRoot 或侧栏项目选择填充（不再指向测试占位目录）
   messages: [],
   running: false,
   approvals: [],
@@ -350,6 +352,11 @@ export const useStore = create<StoreState>()(
   setThinkingLevel: (level) => set({ thinkingLevel: Math.max(1, Math.min(4, Math.round(level)))}),
   setRoot: (root) => set({ root }),
   setSessions: (sessions) => set({ sessions }),
+  // ── v2.6.1 UI 状态（侧栏会话中枢）──
+  searchFocusTick: 0,
+  focusSearch: () => set((s) => ({ searchFocusTick: s.searchFocusTick + 1 })),
+  settingsTab: "general",
+  setSettingsTab: (tab) => set({ settingsTab: tab }),
   setActiveSessionId: (id) => set({ activeSessionId: id }),
   setPendingRollback: (p) => set({ pendingRollback: p }),
   clearPendingRollback: () => set({ pendingRollback: null }),
@@ -675,7 +682,6 @@ export const useStore = create<StoreState>()(
 
   setUseWorktree: (v) => set({ useWorktree: v }),
   setOrchestrate: (v) => set({ orchestrate: v }),
-  setMode: (m) => set({ mode: m }),
   setPlan: (p) => set({ plan: p }),
   clearPlan: () => set({ plan: null }),
   setWorktree: (wt) => set({ worktree: wt, worktreeNote: "" }),
@@ -787,8 +793,6 @@ export const useStore = create<StoreState>()(
       root: s.root,
       modelId: s.modelId,
       useWorktree: s.useWorktree,
-      orchestrate: s.orchestrate,
-      mode: s.mode,
       activeSessionId: s.activeSessionId,
       fontSize: s.fontSize,
       streamCursor: s.streamCursor,

@@ -14,22 +14,25 @@ import { randomUUID } from "node:crypto";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { Readable } from "node:stream";
 import { appendFileSync, mkdirSync, writeFileSync, readFileSync, existsSync, statSync } from "node:fs";
+import * as fs from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import path from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import type { ModelConfig, AgentEvent, RiskLevel, InfuConfig, OrchestrateMode, PhaseId, ProviderConfig } from "@infu/shared";
+import type { ModelConfig, AgentEvent, RiskLevel, InfuConfig, PhaseId, ProviderConfig, SessionMeta } from "@infu/shared";
 import { loadConfig, saveConfig, resolveFallbackModels, resolveRoleModel, resolveRoleThinking, toRuntimeModel, resolveBaseURL, CONFIG_PATH } from "./providers/registry.js";
 import { parseInfuConfig, approvalPolicySchema, sandboxConfigSchema, generalConfigSchema, appearanceConfigSchema } from "@infu/shared";
 import { TOOLS } from "./tools/index.js";
-import { runAgent, DEFAULT_SYSTEM_PROMPT } from "./agent/loop.js";
+import { DEFAULT_SYSTEM_PROMPT } from "./agent/loop.js";
 import { runOrchestratedTask, type OrchestratedRunOptions } from "./agent/orchestrator.js";
 import { inferResumePhase } from "./agent/resume.js";
 import { loadMcpTools } from "./mcp/index.js";
 import { loadPlugins } from "./plugin/index.js";
 import { registerPlugin } from "./plugin/register.js";
 import { listSkills, buildSkillsPrompt } from "./plugin/skills.js";
+import { buildInfuPrompt, buildMemoryPrompt, findInstructionFile, parseScopeRules, sedimentTask } from "./memory/index.js";
+import { listProjects, createProject, removeProject, resolveProjectByName } from "./projects.js";
 import { listAgents, buildAgentsPrompt, writeAgentFile, deleteAgentFile } from "./agent/agents.js";
 import { TASK_TEMPLATES } from "./templates.js";
 import { getStore } from "./db/store.js";
@@ -604,14 +607,8 @@ export function createApp(opts: ServerOptions = {}) {
       // v2.2 动态步数：模板任务 id（启发式参考）
       const templateId: string | undefined =
         typeof body.templateId === "string" && body.templateId ? body.templateId : undefined;
-      // 分层编排（M4）：默认 full（Planner→Executor→Reviewer）；计划默认需用户确认
-      const orchestrate: OrchestrateMode =
-        body.orchestrate === "off" || body.orchestrate === "plan" || body.orchestrate === "full"
-          ? body.orchestrate
-          : "full";
+      // 计划默认需用户确认（-y / 设置档位可自动）
       const planApproval: boolean = body.planApproval !== false;
-      // 建议模式：模型只出方案不执行（Web 三档选择器的"只出方案"）
-      const suggestOnly: boolean = body.suggestOnly === true;
 
       // 停止支持：客户端断开连接时中止 Agent 循环
       const controller = new AbortController();
@@ -634,6 +631,15 @@ export function createApp(opts: ServerOptions = {}) {
       let sessionId: string | undefined =
         typeof body.sessionId === "string" && body.sessionId ? body.sessionId : undefined;
       let root: string = body.root || opts.defaultRoot || process.cwd();
+      // v2.6.2 修复：root 必须为已存在目录——不存在/为空直接报错，避免 Agent 在错误目录静默空转
+      if (!root.trim()) {
+        await stream.writeSSE({ event: "error", data: JSON.stringify({ message: "请先在侧栏选择/创建项目（root 为空）" }) });
+        return;
+      }
+      if (!fs.existsSync(root) || !fs.statSync(root).isDirectory()) {
+        await stream.writeSSE({ event: "error", data: JSON.stringify({ message: `项目根目录不存在：${root}——请先在侧栏选择/创建项目` }) });
+        return;
+      }
       let effectivePrompt = prompt;
       // v2.2 断点恢复：继续会话 = 从事件流重建完整 messages（工具结果直接来自 DB，不重放副作用）
       let initialMessages: ChatMessageLike[] | undefined;
@@ -652,7 +658,7 @@ export function createApp(opts: ServerOptions = {}) {
       } else {
         // 新会话：SSE 首帧回传会话 id（Web 绑定 activeSessionId）
         const title = prompt.slice(0, 40);
-        sessionId = store.createSession({ title, root, modelId, mode: suggestOnly ? "ask" : orchestrate === "off" ? "direct" : "orchestrate" });
+        sessionId = store.createSession({ title, root, modelId, mode: "orchestrate" });
         await stream.writeSSE({ event: "session", data: JSON.stringify({ type: "session", id: sessionId }) });
       }
       // 用户消息落库（检查点之一：Rewind 锚点）
@@ -742,14 +748,17 @@ export function createApp(opts: ServerOptions = {}) {
       };
 
       try {
-        // v2.3 动态扩展：MCP 服务器 + JS 插件（suggestOnly 不注入任何外部能力；
-        // 连接/加载失败的跳过不阻塞任务）。任务结束后统一 close/释放。
-        const mcp = suggestOnly ? null : await loadMcpTools(config?.mcpServers, emit);
-        const plugin = suggestOnly ? null : await loadPlugins(config?.plugins, emit);
+        // v2.3 动态扩展：MCP 服务器 + JS 插件（连接/加载失败的跳过不阻塞任务）。任务结束后统一 close/释放。
+        const mcp = await loadMcpTools(config?.mcpServers, emit);
+        const plugin = await loadPlugins(config?.plugins, emit);
         // skill 发现层：可用技能 name+description 追加到 Executor system（progressive disclosure）
         const skillsPrompt = buildSkillsPrompt(listSkills(config, root));
         // v2.5 子智能体发现层：可用 agent 角色 name+description（delegate_task 委派参考）
         const agentsPrompt = buildAgentsPrompt(listAgents(root));
+        // v2.6 记忆系统：项目指令（INFU.md 全量注入所有阶段）+ 记忆引导（Executor）+ 路径作用域
+        const infuPrompt = buildInfuPrompt(root);
+        const memoryPrompt = buildMemoryPrompt();
+        const scopeRules = parseScopeRules(findInstructionFile(root)?.content ?? "");
         try {
           // 阶段级续跑提示（emit 已就绪；跳过规划阶段直接续执行）
           if (resumePoint.startPhase) {
@@ -769,30 +778,25 @@ export function createApp(opts: ServerOptions = {}) {
             abortSignal: controller.signal,
             maxSteps,
           };
-          // 建议模式：单 Agent 直跑（不注入工具，模型只出方案）
-          const final = suggestOnly
-            ? await runAgent({
-                ...modelRun,
-                system: DEFAULT_SYSTEM_PROMPT,
-                tools: TOOLS,
-                suggestOnly: true,
-              })
-            : await runOrchestratedTask({
-                ...modelRun,
-                orchestrate,
-                planApproval,
-                confirmPlan,
-                templateId,
-                // v2.3：MCP 工具 + 插件工具只进 Executor（Planner/Reviewer 架构级只读不暴露）；
-                // 插件钩子随 Executor 生效；skill 描述注入 Executor system
-                executorTools: [...(mcp?.tools ?? []), ...(plugin?.tools ?? [])],
-                hooks: plugin?.hooks,
-                skillsPrompt,
-                agentsPrompt,
-                // 阶段级续跑：跳过已完成的规划阶段（计划沿用上次确认的）
-                startPhase: resumePoint.startPhase,
-                resumePlanText: resumePoint.planText,
-              });
+          const final = await runOrchestratedTask({
+            ...modelRun,
+            planApproval,
+            confirmPlan,
+            templateId,
+            // v2.3：MCP 工具 + 插件工具只进 Executor（Planner/Reviewer 架构级只读不暴露）；
+            // 插件钩子随 Executor 生效；skill 描述注入 Executor system
+            executorTools: [...(mcp?.tools ?? []), ...(plugin?.tools ?? [])],
+            hooks: plugin?.hooks,
+            skillsPrompt,
+            agentsPrompt,
+            // v2.6 记忆系统：指令注入 + 记忆引导 + 作用域（编排内部任务完成后自动沉淀）
+            infuPrompt,
+            memoryPrompt,
+            scopeRules,
+            // 阶段级续跑：跳过已完成的规划阶段（计划沿用上次确认的）
+            startPhase: resumePoint.startPhase,
+            resumePlanText: resumePoint.planText,
+          });
           await stream.writeSSE({ event: "done", data: JSON.stringify({ final: final.text }) });
           store.updateStatus(sessionId, "done");
         } finally {
@@ -932,10 +936,26 @@ export function createApp(opts: ServerOptions = {}) {
     return c.json({ ok: true, count: events.length });
   });
 
-  // 会话列表（多会话/历史浏览）
+  // 会话列表（多会话/历史浏览；v2.6.1 支持 archived 过滤）
   app.get("/api/sessions", (c) => {
     const limit = Math.min(parseInt(String(c.req.query("limit") ?? "50"), 10) || 50, 200);
-    return c.json({ sessions: getStore().listSessions(limit) });
+    const archived = c.req.query("archived");
+    const sessions = archived === "1" ? getStore().listSessions(limit, true) : getStore().listSessions(limit, false);
+    return c.json({ sessions });
+  });
+
+  // 会话管理（v2.6.1：重命名 / 顶置 / 归档）
+  app.patch("/api/sessions/:id", async (c) => {
+    const id = c.req.param("id");
+    const body = await c.req.json().catch(() => ({}));
+    const store = getStore();
+    if (!store.getSession(id)) return c.json({ ok: false, message: "会话不存在" }, 404);
+    if (typeof body.title === "string") {
+      if (!store.renameSession(id, body.title)) return c.json({ ok: false, message: "标题不能为空" }, 400);
+    }
+    if (typeof body.pinned === "boolean") store.setPinned(id, body.pinned);
+    if (typeof body.archived === "boolean") store.setArchived(id, body.archived);
+    return c.json({ ok: true });
   });
 
   // 会话详情（全量事件流 → Web 端重放历史）
@@ -964,6 +984,48 @@ export function createApp(opts: ServerOptions = {}) {
     if (!Number.isInteger(seq) || seq < 0) return c.json({ ok: false, message: "seq 必须是 >= 0 的整数" }, 400);
     if (!getStore().rewind(id, seq)) return c.json({ ok: false, message: "会话不存在" }, 404);
     return c.json({ ok: true });
+  });
+
+  // ── v2.6.1 项目注册表（~/.infu/projects.json：会话按 root 命中判断隶属；移除只删注册）──
+
+  // 项目列表（注册表 + 各项目会话统计）
+  app.get("/api/projects", (c) => {
+    const sessions = getStore().listSessions(200, false);
+    const projects = listProjects().map((p) => {
+      const ps = sessions.filter((s) => {
+        const norm = (x: string) => x.replace(/[\\/]+$/, "").toLowerCase();
+        return norm(s.root) === norm(p.root);
+      });
+      return {
+        id: p.id,
+        name: p.name,
+        root: p.root,
+        createdAt: p.createdAt,
+        sessionCount: ps.length,
+        recentSessions: ps.slice(0, 50),
+      };
+    });
+    return c.json({ projects });
+  });
+
+  // 创建项目（注册文件夹为项目）
+  app.post("/api/projects", async (c) => {
+    const body = await c.req.json().catch(() => ({}));
+    const root = String(body.root ?? "").trim();
+    const r = createProject(root, typeof body.name === "string" ? body.name : undefined);
+    return r.ok ? c.json({ ok: true, project: r.project, message: r.message }) : c.json({ ok: false, message: r.message }, 400);
+  });
+
+  // 浏览文件夹降级：按目录名解析候选路径（浏览器拿不到所选文件夹绝对路径 → 服务端扫描常见位置一层匹配）
+  app.get("/api/projects/resolve", (c) => {
+    const name = String(c.req.query("name") ?? "").trim();
+    return c.json({ candidates: resolveProjectByName(name) });
+  });
+
+  // 移除项目（只删注册；会话保留为自由会话，文件夹不删）
+  app.delete("/api/projects/:id", (c) => {
+    const r = removeProject(c.req.param("id"));
+    return r.ok ? c.json({ ok: true, message: r.message }) : c.json({ ok: false, message: r.message }, 404);
   });
 
   // ── v2.3 MCP 服务器管理（MCP 客户端作为第一个插件类型；工具动态注入 Agent 循环）──

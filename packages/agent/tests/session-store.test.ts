@@ -82,6 +82,34 @@ check("列表只剩一个", store.listSessions().length === 1);
 store.deleteSession(id);
 check("全部删除", store.listSessions().length === 0);
 
+// 7. v2.6.1 会话管理（重命名/顶置/归档）
+console.log("\n▶ 会话管理（重命名/顶置/归档）");
+const m1 = store.createSession({ title: "原始标题", root: "E:\\proj" });
+check("新会话默认未顶置未归档", store.getSession(m1)?.pinned === false && store.getSession(m1)?.archived === false);
+check("重命名成功", store.renameSession(m1, "新标题") && store.getSession(m1)?.title === "新标题");
+check("重命名空标题拒绝", store.renameSession(m1, "   ") === false);
+check("重命名不存在会话拒绝", store.renameSession("nope", "x") === false);
+check("顶置成功", store.setPinned(m1, true) && store.getSession(m1)?.pinned === true);
+check("取消顶置", store.setPinned(m1, false) && store.getSession(m1)?.pinned === false);
+check("归档成功", store.setArchived(m1, true) && store.getSession(m1)?.archived === true);
+// 归档过滤：默认列表不含归档，archived=true 列表含
+const listAll = store.listSessions(50, undefined);
+const listActive = store.listSessions(50, false);
+const listArchived = store.listSessions(50, true);
+check("默认列表不含归档会话", !listActive.some((s) => s.id === m1) && listActive.length === 0);
+check("归档列表含归档会话", listArchived.some((s) => s.id === m1));
+check("全量列表含归档会话", listAll.some((s) => s.id === m1));
+check("恢复归档", store.setArchived(m1, false) && store.getSession(m1)?.archived === false && store.listSessions().some((s) => s.id === m1));
+store.deleteSession(m1);
+
+// 8. v2.6.1 幂等迁移（已有库打开不报错 + 列存在）
+console.log("\n▶ 幂等迁移");
+const s2c = new SessionStore(join(dir, "test.db")); // 重复打开：ALTER 幂等
+const m2 = s2c.createSession({ title: "迁移后", root: "E:\\proj" });
+check("重复打开后仍可创建/读取（pinned/archived 列就位）", s2c.getSession(m2)?.pinned === false);
+s2c.deleteSession(m2);
+s2c.close();
+
 // 清理
 store.close();
 rmSync(dir, { recursive: true, force: true });

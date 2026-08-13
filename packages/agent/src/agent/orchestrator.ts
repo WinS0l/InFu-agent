@@ -12,12 +12,13 @@
  * 计划确认复用现有审批机制（用户确认后才开始改代码）。
  */
 
-import type { AgentEvent, OrchestrateMode, PhaseId, RiskLevel, ToolDef } from "@infu/shared";
+import type { AgentEvent, PhaseId, RiskLevel, ScopeRule, ToolDef } from "@infu/shared";
 import { runAgent, buildReport, DEFAULT_SYSTEM_PROMPT, type RunResult } from "./loop.js";
 import { TOOLS, getReadOnlyTools, getReviewerTools } from "../tools/index.js";
 import { withMcpTools } from "../mcp/index.js";
 import { resolveMaxSteps } from "./steps.js";
 import { interpretPlanFeedback } from "./plan-feedback.js";
+import { sedimentTask } from "../memory/index.js";
 import type { ModelCandidate } from "../providers/gateway.js";
 import type { ChatMessageLike } from "../providers/chat.js";
 
@@ -32,9 +33,11 @@ export interface ModelConfigRuntime {
 }
 
 /** Planner 角色提示词：只读分析 + 拆解步骤，绝不修改 */
+/** Planner 角色提示词：先判断消息类型（寒暄/闲聊直接简短回复，不扫描不规划）；开发任务才做只读分析 + 拆解步骤 */
 export const PLANNER_SYSTEM_PROMPT = `你是 InFu 的规划员（Planner），负责为开发任务制定执行计划。
 工作方式：
-1. 先用只读工具了解项目（project_scan / list_directory / read_file / search_code / git_status / git_diff）。不要修改任何文件、不要运行有副作用的命令。
+0. **消息类型判断（最先执行）**：用户消息不是开发任务（寒暄/问候/闲聊/日常问答）时——**不要扫描项目、不要调用任何工具、不要制定计划、不要输出【建议步数】**，直接给一句简短友好的中文回复。
+1. 若是开发任务，先用只读工具了解项目（project_scan / list_directory / read_file / search_code / git_status / git_diff）。不要修改任何文件、不要运行有副作用的命令。
 2. 把任务拆解为清晰的执行步骤，输出一份可执行的计划：
    - 任务理解（一句话）
    - 执行步骤（编号列表，每步说明要做什么、涉及哪些文件/命令）
@@ -82,8 +85,6 @@ export interface OrchestratedRunOptions {
   requestApproval: (description: string, risk: RiskLevel) => Promise<boolean>;
   maxSteps?: number;
   abortSignal?: AbortSignal;
-  /** 分层编排模式（默认 full） */
-  orchestrate?: OrchestrateMode;
   /** Planner 计划是否需用户确认后执行（默认 true） */
   planApproval?: boolean;
   /**
@@ -112,6 +113,13 @@ export interface OrchestratedRunOptions {
   skillsPrompt?: string;
   /** v2.5：子智能体发现层提示段（可用 agent 角色 name+description；追加到 Executor system） */
   agentsPrompt?: string;
+  // ── v2.6 记忆系统 ──
+  /** 项目指令段（INFU.md 全量；注入所有阶段 system——规则是权威约束，规划/审查也须遵守） */
+  infuPrompt?: string;
+  /** 记忆引导段（追加到 Executor system：memory_read/write 用法） */
+  memoryPrompt?: string;
+  /** 路径作用域规则（INFU.md「路径作用域」节；入 ToolContext 供文件工具校验） */
+  scopeRules?: ScopeRule[];
 }
 
 /** 编排运行结果（含各阶段产出） */
@@ -129,9 +137,9 @@ const ABORTED_MSG = "任务已停止（用户中止）";
 export async function runOrchestratedTask(opts: OrchestratedRunOptions): Promise<OrchestratedResult> {
   const {
     modelConfig, fallbackModelConfigs, roleModelConfigs, initialMessages, prompt, root, emit, requestApproval,
-    maxSteps, abortSignal, orchestrate = "full", planApproval = true,
+    maxSteps, abortSignal, planApproval = true,
     confirmPlan, templateId, thinkingLevel, roleThinking, executorTools, startPhase, resumePlanText,
-    hooks, skillsPrompt, agentsPrompt,
+    hooks, skillsPrompt, agentsPrompt, infuPrompt, memoryPrompt, scopeRules,
   } = opts;
 
   let planText = resumePlanText ?? "";
@@ -168,16 +176,17 @@ export async function runOrchestratedTask(opts: OrchestratedRunOptions): Promise
     ...(fallbackModelConfigs ?? []).map((f) => ({ provider: f.provider, model: f.model, baseURL: f.baseURL, apiKey: f.apiKey })),
   ];
 
-  // ① Planner：只读规划（orchestrate ≠ off；v2.2 按角色路由模型；
-  //    v2.3 阶段级续跑 startPhase=executor 时跳过——计划沿用上次确认的 resumePlanText）
-  if (orchestrate !== "off" && startPhase !== "executor") {
+  // ① Planner：只读规划（v2.2 按角色路由模型；v2.3 阶段级续跑 startPhase=executor
+  //    时跳过——计划沿用上次确认的 resumePlanText）
+  if (startPhase !== "executor") {
     const rc = roleCfg("planner");
     const plan = await runAgent({
       modelConfig: rc.modelConfig,
       fallbackModelConfigs: rc.fallbackModelConfigs,
       thinkingLevel: roleThink("planner"),
       initialMessages,
-      system: PLANNER_SYSTEM_PROMPT,
+      // v2.6：项目指令全量注入所有阶段（权威规则；规划也须遵守）
+      system: PLANNER_SYSTEM_PROMPT + (infuPrompt ?? ""),
       prompt: `${prompt}\n\n请先分析项目并制定执行计划，不要修改任何文件。`,
       tools: getReadOnlyTools(),
       root,
@@ -185,6 +194,7 @@ export async function runOrchestratedTask(opts: OrchestratedRunOptions): Promise
       requestApproval,
       maxSteps: 12,
       abortSignal,
+      scopeRules,
       phase: { id: "planner", label: "规划", model: rc.modelConfig.model },
       suppressFinal: true,
     });
@@ -192,6 +202,15 @@ export async function runOrchestratedTask(opts: OrchestratedRunOptions): Promise
       return { text: ABORTED_MSG, report: "", steps: 0, toolCount: 0, approvals: plan.approvals, toolLogs: plan.toolLogs, planText: "", reviewText: "" };
     }
     planText = plan.text.trim();
+
+    // v2.6.2 寒暄/闲聊短路：Planner 未调用任何工具且未产出计划（无【建议步数】）——
+    // 视为非开发任务，其流式文本已进对话流（无前缀标记），此处只收尾，不重发、不进确认/执行/审查。
+    // 判断依据：真开发任务 Planner 必然调用只读工具或输出带【建议步数】的计划。
+    if (plan.toolCount === 0 && !planText.includes("【建议步数】")) {
+      const reply = planText;
+      emit({ type: "done", text: reply, toolCount: 0, steps: 0 });
+      return { text: reply, report: "", steps: 0, toolCount: 0, approvals: plan.approvals, toolLogs: plan.toolLogs, planText: "", reviewText: "" };
+    }
 
     // ② 计划确认（v2.3 三态：用户自由文本回复 → 模型判断 execute/revise/abort）
     //    execute → 执行（回复中的指示注入执行阶段）；revise → 按意见重新规划再确认；abort → 中止任务
@@ -234,7 +253,7 @@ export async function runOrchestratedTask(opts: OrchestratedRunOptions): Promise
             fallbackModelConfigs: rc.fallbackModelConfigs,
             thinkingLevel: roleThink("planner"),
             initialMessages,
-            system: PLANNER_SYSTEM_PROMPT,
+            system: PLANNER_SYSTEM_PROMPT + (infuPrompt ?? ""),
             prompt: `${prompt}\n\n【原计划】（用户要求修改）\n${planText}\n\n【用户修改意见】\n${judged.instruction ?? "请调整计划"}\n\n请按修改意见重新制定执行计划，不要修改任何文件。`,
             tools: getReadOnlyTools(),
             root,
@@ -242,6 +261,7 @@ export async function runOrchestratedTask(opts: OrchestratedRunOptions): Promise
             requestApproval,
             maxSteps: 12,
             abortSignal,
+            scopeRules,
             phase: { id: "planner", label: "规划（修订）", model: rc.modelConfig.model },
             suppressFinal: true,
           });
@@ -275,7 +295,7 @@ export async function runOrchestratedTask(opts: OrchestratedRunOptions): Promise
     fallbackModelConfigs: rcExec.fallbackModelConfigs,
     thinkingLevel: roleThink("executor"),
     initialMessages,
-    system: EXECUTOR_SYSTEM_PROMPT + (skillsPrompt ?? "") + (agentsPrompt ?? ""),
+    system: EXECUTOR_SYSTEM_PROMPT + (skillsPrompt ?? "") + (agentsPrompt ?? "") + (infuPrompt ?? "") + (memoryPrompt ?? ""),
     prompt: execPrompt,
     tools: executorTools ? withMcpTools(TOOLS, executorTools) : TOOLS,
     hooks,
@@ -284,6 +304,7 @@ export async function runOrchestratedTask(opts: OrchestratedRunOptions): Promise
     requestApproval,
     maxSteps: execMaxSteps,
     abortSignal,
+    scopeRules,
     phase: { id: "executor", label: "执行", model: rcExec.modelConfig.model },
     suppressFinal: true,
   });
@@ -291,15 +312,15 @@ export async function runOrchestratedTask(opts: OrchestratedRunOptions): Promise
     return { text: ABORTED_MSG, report: "", steps: exec.steps, toolCount: exec.toolCount, approvals: exec.approvals, toolLogs: exec.toolLogs, planText, reviewText: "" };
   }
 
-  // ④ Reviewer：只读审查（orchestrate = full 且执行未中止；v2.2 按角色路由模型）
-  if (orchestrate === "full" && exec.text && exec.text !== ABORTED_MSG) {
+  // ④ Reviewer：只读审查（执行未中止；v2.2 按角色路由模型）
+  if (exec.text && exec.text !== ABORTED_MSG) {
     const rc = roleCfg("reviewer");
     const review = await runAgent({
       modelConfig: rc.modelConfig,
       fallbackModelConfigs: rc.fallbackModelConfigs,
       thinkingLevel: roleThink("reviewer"),
       initialMessages,
-      system: REVIEWER_SYSTEM_PROMPT,
+      system: REVIEWER_SYSTEM_PROMPT + (infuPrompt ?? ""),
       prompt: `请审查以下开发任务的执行结果：\n\n【任务】${prompt}\n\n【执行摘要】\n${exec.text.slice(0, 4000)}\n\n请用 git_diff / read_file / run_test 等工具核实改动与测试结果，然后输出审查意见。不要修改任何文件。`,
       tools: getReviewerTools(),
       root,
@@ -307,6 +328,7 @@ export async function runOrchestratedTask(opts: OrchestratedRunOptions): Promise
       requestApproval,
       maxSteps: 10,
       abortSignal,
+      scopeRules,
       phase: { id: "reviewer", label: "审查", model: rc.modelConfig.model },
       suppressFinal: true,
     });
@@ -321,6 +343,23 @@ export async function runOrchestratedTask(opts: OrchestratedRunOptions): Promise
   }
   emit({ type: "report", content: report });
   emit({ type: "done", text: exec.text, toolCount: exec.toolCount, steps: exec.steps });
+
+  // v2.6 任务自动沉淀（L4 项目历史）：报告原文 + 结构化元数据归档 .infu/history/YYYY-MM-DD.md。
+  // 零额外模型调用（用户拍板方案：报告归档 + 工具补充）；稳定约定/教训由 Agent 中途 memory_write 记录。
+  // 沉淀失败不影响交付（try/catch 放行）。
+  try {
+    const sed = sedimentTask({
+      root,
+      prompt,
+      result: exec,
+      report,
+      reviewText,
+      modelLabel: `${rcExec.modelConfig.provider}/${rcExec.modelConfig.model}`,
+    });
+    emit({ type: "memory-sediment", path: sed.path, summary: sed.entry });
+  } catch (e) {
+    emit({ type: "error", message: `任务沉淀失败（不影响交付）：${(e as Error).message}` });
+  }
 
   return { text: exec.text, report, steps: exec.steps, toolCount: exec.toolCount, approvals: exec.approvals, toolLogs: exec.toolLogs, planText, reviewText };
 }

@@ -7,19 +7,10 @@ import {
 import type { TaskTemplate, PhaseId } from "@infu/shared";
 import { renderTemplate } from "@infu/shared";
 import { useStore } from "../store";
-import type { ChatMode } from "../store";
 import { sendChat, mergeWorktree, discardWorktree, fetchTemplates, rewindSession } from "../api";
 import Timeline from "./Timeline";
 import ReasoningBlock from "./ReasoningBlock";
 import PlanCard from "./PlanCard";
-
-/** 任务模式三档（对齐 Cursor/Copilot 模式切换；Shift+Tab 循环） */
-const MODES: Array<{ id: ChatMode; label: string; icon: React.ElementType; title: string }> = [
-  { id: "orchestrate", label: "编排", icon: Workflow, title: "分层编排：Planner 规划（需确认）→ 执行 → Reviewer 审查" },
-  { id: "direct", label: "直接", icon: Zap, title: "直接执行：单 Agent 直跑，不做计划与审查" },
-  { id: "ask", label: "方案", icon: MessageSquareText, title: "只出方案：模型不执行任何工具，仅输出方案建议" },
-];
-const MODE_CYCLE: ChatMode[] = ["orchestrate", "direct", "ask"];
 
 /** 模板卡片图标（按模板 id） */
 const TEMPLATE_ICON: Record<string, React.ElementType> = {
@@ -90,7 +81,7 @@ function StructuredBlock({ content, tone }: { content: string; tone: "accent" | 
 
 /** 中间栏：对话 + 工具过程 + 输入框 */
 export default function ChatPanel() {
-  const { messages, running, abortRun, worktree, worktreeNote, root, clearWorktree, mode, setMode, plan, useWorktree, setUseWorktree, activeSessionId, models, modelId, setModelId, thinkingLevel, setThinkingLevel } = useStore();
+  const { messages, running, abortRun, worktree, worktreeNote, root, clearWorktree, plan, useWorktree, setUseWorktree, activeSessionId, models, modelId, setModelId, thinkingLevel, setThinkingLevel } = useStore();
   const [input, setInput] = useState("");
   const [wtBusy, setWtBusy] = useState(false);
   const [wtMsg, setWtMsg] = useState("");
@@ -479,47 +470,14 @@ export default function ChatPanel() {
 
       {/* 输入区 */}
       <div className="shrink-0 border-t border-line bg-panel p-3">
-        {/* 任务模式三档（Shift+Tab 循环切换） */}
-        <div className="mb-2 flex items-center gap-1">
-          {MODES.map((m) => {
-            const active = mode === m.id;
-            return (
-              <button
-                key={m.id}
-                className={`flex cursor-pointer items-center gap-1 rounded-md border px-2 py-1 text-[11px] transition-colors duration-150 ${
-                  active
-                    ? "border-accent/60 bg-accent/10 text-accent"
-                    : "border-transparent text-sub hover:border-line hover:text-text"
-                }`}
-                onClick={() => setMode(m.id)}
-                title={m.title}
-              >
-                <m.icon className="h-3 w-3" strokeWidth={2} />
-                {m.label}
-              </button>
-            );
-          })}
-          <span className="ml-auto text-[10px] text-sub/50">Shift+Tab 切换模式</span>
-        </div>
         <div className="flex items-end gap-2 rounded-lg border border-line bg-muted p-2 transition-colors focus-within:border-accent/60">
           <textarea
             ref={inputRef}
             className="max-h-40 min-h-[40px] flex-1 resize-none bg-transparent px-1 py-1 text-sm text-text placeholder:text-sub/60 focus:outline-none"
-            placeholder={
-              mode === "orchestrate"
-                ? "描述任务：Planner 先出计划，确认后执行并审查"
-                : mode === "direct"
-                  ? "描述任务：直接执行，不做计划与审查"
-                  : "描述问题：只输出方案建议，不执行任何工具"
-            }
+            placeholder="描述任务：InFu 会先规划方案、确认后执行并审查"
             value={input}
             onChange={(e) => setInput(e.target.value)}
             onKeyDown={(e) => {
-              if (e.key === "Tab" && e.shiftKey) {
-                e.preventDefault();
-                setMode(MODE_CYCLE[(MODE_CYCLE.indexOf(mode) + 1) % MODE_CYCLE.length]);
-                return;
-              }
               if (e.key === "Enter" && !e.shiftKey) {
                 e.preventDefault();
                 submit();

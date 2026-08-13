@@ -593,9 +593,6 @@ export async function sendChat(prompt: string) {
         thinkingLevel: st.thinkingLevel,
         // v2.2 动态步数启发式参考（模板任务）
         templateId: st.templateId ?? undefined,
-        // 三档模式：分层编排（full + 计划确认）/ 直接执行（off）/ 只出方案（suggestOnly）
-        orchestrate: st.mode === "orchestrate" ? "full" : "off",
-        suggestOnly: st.mode === "ask",
         planApproval: true,
         // v2.1：绑定当前会话（null = 服务端新建并回传 session 事件）
         sessionId: st.activeSessionId ?? undefined,
@@ -648,4 +645,55 @@ export async function sendChat(prompt: string) {
     // 会话列表刷新（新会话/状态更新）
     fetchSessions().catch(() => {});
   }
+}
+
+// ── v2.6.1 项目注册表 + 会话管理（侧栏会话中枢数据源）──
+
+export interface ProjectInfo {
+  id: string;
+  name: string;
+  root: string;
+  createdAt: number;
+  sessionCount: number;
+  recentSessions: SessionMeta[];
+}
+
+/** 项目列表（注册表 + 各项目未归档会话统计与最近会话） */
+export async function fetchProjects(): Promise<ProjectInfo[]> {
+  const res = await fetch("/api/projects");
+  if (!res.ok) throw new Error(`项目列表加载失败: ${res.status}`);
+  const data = await res.json();
+  return data.projects ?? [];
+}
+
+/** 创建项目（注册文件夹；root 必须为已存在目录） */
+export async function createProjectApi(root: string, name?: string): Promise<void> {
+  const res = await fetch("/api/projects", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ root, name }),
+  });
+  const data = await res.json();
+  if (!res.ok || data.ok === false) throw new Error(data.message || "创建项目失败");
+}
+
+/** 移除项目（只删注册；会话保留为自由会话，文件夹不删） */
+export async function removeProjectApi(id: string): Promise<void> {
+  const res = await fetch(`/api/projects/${encodeURIComponent(id)}`, { method: "DELETE" });
+  const data = await res.json();
+  if (!res.ok || data.ok === false) throw new Error(data.message || "移除项目失败");
+}
+
+/** 会话管理：重命名 / 顶置 / 归档（PATCH /api/sessions/:id） */
+export async function updateSessionApi(
+  id: string,
+  body: { title?: string; pinned?: boolean; archived?: boolean }
+): Promise<void> {
+  const res = await fetch(`/api/sessions/${encodeURIComponent(id)}`, {
+    method: "PATCH",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  const data = await res.json();
+  if (!res.ok || data.ok === false) throw new Error(data.message || "更新会话失败");
 }

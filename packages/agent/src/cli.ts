@@ -33,6 +33,7 @@ import { mcpCli } from "./mcp/cli.js";
 import { loadPlugins, withPlugins } from "./plugin/index.js";
 import { listSkills, buildSkillsPrompt } from "./plugin/skills.js";
 import { listAgents, buildAgentsPrompt } from "./agent/agents.js";
+import { buildInfuPrompt, buildMemoryPrompt, findInstructionFile, parseScopeRules, sedimentTask } from "./memory/index.js";
 import { pluginCli, skillCli } from "./plugin/cli.js";
 import { agentCli } from "./agent/agent-cli.js";
 import type { ChatMessageLike } from "./providers/chat.js";
@@ -374,7 +375,7 @@ async function main() {
   // 任务 prompt 提取：跳过全部参数（带值参数连同其值，开关单独跳过）——顺带修复参数值混入 prompt 的既有问题
   const VALUE_ARGS = new Set(["--root", "--model", "--fallback-model", "--max-steps", "--template", "--session", "--thinking",
     "--planner-model", "--executor-model", "--reviewer-model"]);
-  const FLAG_ONLY = new Set(["-y", "--yes", "--suggest", "--no-orchestrate", "--no-plan-approval"]);
+  const FLAG_ONLY = new Set(["-y", "--yes", "--no-plan-approval"]);
   let prompt = "";
   for (let i = 0; i < args.length; i++) {
     const a = args[i];
@@ -395,8 +396,7 @@ async function main() {
   const maxSteps = parseInt(getArg("--max-steps") || "", 10) || undefined;
   const thinkingLevel = parseInt(getArg("--thinking") || "", 10) || undefined;
   const autoApprove = args.includes("-y") || args.includes("--yes");
-  const suggestOnly = args.includes("--suggest");
-  const orchestrate = args.includes("--no-orchestrate") ? "off" : "full";
+
   const planApproval = !args.includes("--no-plan-approval");
   const templateId = getArg("--template");
 
@@ -424,19 +424,17 @@ async function main() {
   infu agent list                  子智能体列表（v2.5：.infu/agents/<name>.md 文件即注册）
   infu --session <id> "继续的指令"   继续之前的会话（消息级重建：完整恢复历史与进度）
   infu --setup   生成模型配置模板（JSON）
-  infu --suggest 建议模式（模型只出方案，不执行工具）
 
 模型可靠性（v2.2）：
   infu "任务" --fallback-model <id> [--fallback-model <id>...]  备用模型降级链（主模型失败自动切换）
   infu "任务" --planner-model <id> --executor-model <id> --reviewer-model <id>  按角色指定模型（规划/执行/审查）
   infu "任务" --thinking <1-4>  思考级别（按模型实际级别数自动映射；1 快速 ~ 4 极限）
 
-分层编排（M4，默认开启 Planner→Executor→Reviewer）：
+任务流程（Planner 规划 → 计划确认 → Executor 执行 → Reviewer 审查）：
   infu --template init-project  模板任务：初始化新项目
   infu --template fix-tests     模板任务：修复测试失败
   infu --template analyze       模板任务：分析项目
   infu --template add-feature   模板任务：添加新功能
-  infu "任务" --no-orchestrate  关闭分层编排（单 Agent 直跑）
   infu "任务" --no-plan-approval 不要求确认计划，直接执行
 
 示例：
@@ -496,7 +494,7 @@ async function main() {
       title: prompt.slice(0, 40),
       root,
       modelId,
-      mode: suggestOnly ? "ask" : orchestrate === "off" ? "direct" : "orchestrate",
+      mode: "orchestrate",
     });
   }
   store.appendEvent(sessionId, { type: "user-message", text: prompt });
@@ -506,14 +504,14 @@ async function main() {
     if (sessionId) store.appendEvent(sessionId, e);
   };
 
-  // v2.3 MCP 动态注入：仅非建议模式加载（suggestOnly 不注入外部工具）；任务结束后统一 close（防残留子进程）
-  const mcp = suggestOnly ? null : await loadMcpTools(config?.mcpServers, emit);
+  // v2.3 MCP 动态注入：任务结束后统一 close（防残留子进程）
+  const mcp = await loadMcpTools(config?.mcpServers, emit);
   if (mcp) {
     if (mcp.tools.length) console.error(C.green(`MCP 工具已注入：${mcp.tools.length} 个（仅执行阶段可用，默认 medium 审批）`));
     for (const f of mcp.failures) console.error(C.yellow(`⚠ MCP 服务器连接失败（已跳过）：${f.message.slice(0, 120)}`));
   }
   // v2.3 批 2 插件（JS 模块：工具/钩子/技能）+ skill 发现层描述注入
-  const plugin = suggestOnly ? null : await loadPlugins(config?.plugins, emit);
+  const plugin = await loadPlugins(config?.plugins, emit);
   if (plugin) {
     if (plugin.tools.length) console.error(C.green(`插件工具已注入：${plugin.tools.length} 个（仅执行阶段可用）`));
     if (plugin.hooks.preToolUse.length || plugin.hooks.postToolUse.length) {
@@ -524,6 +522,11 @@ async function main() {
   const skillsPrompt = buildSkillsPrompt(listSkills(config, root));
   // v2.5 子智能体发现层：可用 agent 角色 name+description（delegate_task 委派参考）
   const agentsPrompt = buildAgentsPrompt(listAgents(root));
+  // v2.6 记忆系统：项目指令（INFU.md 全量注入所有阶段）+ 记忆引导（Executor）+ 路径作用域
+  const infuPrompt = buildInfuPrompt(root);
+  const memoryPrompt = buildMemoryPrompt();
+  const scopeRules = parseScopeRules(findInstructionFile(root)?.content ?? "");
+  if (infuPrompt) console.error(C.dim("📄 项目指令已加载（INFU.md/AGENTS.md，全量注入）"));
   if (resumePoint.startPhase) {
     console.error(C.dim("↻ 阶段级续跑：历史中已有确认过的计划，跳过规划阶段，直接从执行阶段继续"));
   }
@@ -552,7 +555,7 @@ async function main() {
     .map((p) => `${p}=${roleModelConfigs[p].modelConfig.model}`);
   if (roleHints.length) console.error(C.dim(`角色模型: ${roleHints.join(" · ")}`));
   console.error(C.dim(`项目: ${root}`));
-  console.error(C.dim(`审批: ${autoApprove ? "自动批准" : "交互确认"}${suggestOnly ? " | 建议模式" : ""}${orchestrate === "off" ? "" : " | 分层编排 " + (orchestrate === "full" ? "(Planner→Executor→Reviewer)" : "(Planner→Executor)")}${orchestrate === "off" || suggestOnly ? "" : planApproval ? " | 计划需确认" : " | 计划不确认"}${sessionId ? " | 会话已记录" : ""}`));
+  console.error(C.dim(`审批: ${autoApprove ? "自动批准" : "交互确认"}${planApproval ? " | 计划需确认" : " | 计划不确认"}${sessionId ? " | 会话已记录" : ""}`));
   console.error(C.dim(`工具: ${Object.keys(TOOLS).length} 个\n`));
 
   const common = {
@@ -568,29 +571,6 @@ async function main() {
     maxSteps,
   };
 
-  // 建议模式 / 关闭编排：直跑单 Agent（保持一期行为；suggestOnly 不注入 MCP/插件工具）
-  if (suggestOnly || orchestrate === "off") {
-    runAgent({
-      ...common,
-      system: DEFAULT_SYSTEM_PROMPT + skillsPrompt + agentsPrompt,
-      tools: mcp || plugin ? withPlugins(withMcpTools(TOOLS, mcp?.tools ?? []), plugin?.tools ?? []) : TOOLS,
-      hooks: plugin?.hooks,
-      suggestOnly,
-      abortSignal: abortController.signal,
-    })
-      .then((r) => {
-        process.stdout.write("\n" + r.text + "\n");
-        finishSession("done");
-      })
-      .catch((e) => {
-        finishSession("error");
-        console.error(C.red(`\n✗ Agent 运行失败: ${e.message}`));
-        process.exit(1);
-      })
-      .finally(() => mcp?.close());
-    return;
-  }
-
   // v2.3 计划确认：交互输入回复文本（直接回车 = 批准执行；输入内容由 AI 判断 execute/revise/abort）
   // -y 自动批准时直接通过；要取消输入"取消/先不做"（判为 abort）
   const cliConfirmPlan = async (planText: string) => {
@@ -603,7 +583,6 @@ async function main() {
 
   runOrchestratedTask({
     ...common,
-    orchestrate,
     planApproval,
     templateId,
     confirmPlan: cliConfirmPlan,
@@ -615,6 +594,10 @@ async function main() {
     hooks: plugin?.hooks,
     skillsPrompt,
     agentsPrompt,
+    // v2.6 记忆系统：指令注入 + 记忆引导 + 作用域（编排内部任务完成后自动沉淀）
+    infuPrompt,
+    memoryPrompt,
+    scopeRules,
     startPhase: resumePoint.startPhase,
     resumePlanText: resumePoint.planText,
   })

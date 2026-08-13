@@ -19,6 +19,10 @@ export interface ChatMsg {
   phase?: PhaseId;
   /** 审查意见（Reviewer 最终输出，独立渲染块） */
   review?: string;
+  /** v2.2 模型降级记录（主模型失败 → 备用模型；Timeline 上方徽标） */
+  fallbacks?: Array<{ from: string; to: string; reason: string }>;
+  /** v2.2 上下文压缩记录（历史超预算自动摘要；DB 无损） */
+  compressed?: Array<{ before: number; after: number; summary: string }>;
   /** v2.1：该轮第一条事件的 seq（Rewind 回滚锚点；历史重放时标记） */
   seqStart?: number;
 }
@@ -62,10 +66,18 @@ interface StoreState {
   diffContent: string;
   /** 右侧面板：本次任务的文件修改摘要 */
   fileChanges: string[];
+  /** 当前任务来源模板 id（v2.2 动态步数启发式参考；null = 普通任务） */
+  templateId: string | null;
+  /** 各编排阶段使用的模型（v2.2 角色路由可视化：Timeline 阶段头展示） */
+  phaseModels: Partial<Record<PhaseId, string>>;
+  /** v2 思考级别（4 档 UI，按模型实际级别数自动映射；1-4，默认 2） */
+  thinkingLevel: number;
 
   setModels: (models: ModelConfig[]) => void;
   setModelId: (id: string) => void;
   setRoot: (root: string) => void;
+  setTemplateId: (id: string | null) => void;
+  setThinkingLevel: (level: number) => void;
   /** v2.1 会话：列表 + 当前会话 */
   sessions: SessionMeta[];
   activeSessionId: string | null;
@@ -86,6 +98,10 @@ interface StoreState {
   ensureAssistant: () => ChatMsg;
   appendText: (text: string) => void;
   appendReasoning: (text: string) => void;
+  /** v2.2 模型降级记录（徽标展示） */
+  appendFallback: (from: string, to: string, reason: string) => void;
+  /** v2.2 上下文压缩记录（提示条展示） */
+  appendCompressed: (before: number, after: number, summary: string) => void;
   /** 阶段开始：若当前 assistant 消息已有内容则开新消息（每轮 = 一条消息，对齐主流 Agent turn 语义） */
   beginStep: (n: number) => void;
   startTool: (ev: Extract<AgentEvent, { type: "tool-start" }>) => void;
@@ -155,6 +171,9 @@ export const useStore = create<StoreState>()(
   stepStartTimes: {},
   diffContent: "",
   fileChanges: [],
+  templateId: null,
+  phaseModels: {},
+  thinkingLevel: 2,
 
   setModels: (models) => {
     const cur = get().modelId;
@@ -164,6 +183,8 @@ export const useStore = create<StoreState>()(
     });
   },
   setModelId: (id) => set({ modelId: id }),
+  setTemplateId: (id) => set({ templateId: id }),
+  setThinkingLevel: (level) => set({ thinkingLevel: Math.max(1, Math.min(4, Math.round(level)))}),
   setRoot: (root) => set({ root }),
   setSessions: (sessions) => set({ sessions }),
   setActiveSessionId: (id) => set({ activeSessionId: id }),
@@ -181,6 +202,7 @@ export const useStore = create<StoreState>()(
       currentStep: 1,
       stepStartTimes: {},
       currentPhase: null,
+      phaseModels: {},
       plan: null,
     }),
 
@@ -191,6 +213,7 @@ export const useStore = create<StoreState>()(
     let diffContent = "";
     let cur: ChatMsg | null = null; // 当前 assistant 轮次（每个 step-start 一条）
     let phase: PhaseId | undefined;
+    const phaseModels: Partial<Record<PhaseId, string>> = {}; // v2.2 阶段模型记录
     let currentStep = 1;
     for (const { seq, ts, event } of events) {
       switch (event.type) {
@@ -201,6 +224,7 @@ export const useStore = create<StoreState>()(
           break;
         case "phase-start":
           phase = event.phase;
+          if (event.model) phaseModels[event.phase] = event.model;
           cur = null;
           break;
         case "step-start": {
@@ -251,6 +275,18 @@ export const useStore = create<StoreState>()(
         case "done":
           if (cur) { cur.streaming = false; cur.seqStart = cur.seqStart ?? seq; }
           break;
+        case "model-fallback":
+          // 降级记录附加到当前轮次（徽标展示）；无当前轮则忽略
+          if (cur) {
+            cur.fallbacks = [...(cur.fallbacks ?? []), { from: event.from, to: event.to, reason: event.reason }];
+          }
+          break;
+        case "context-compressed":
+          // 压缩记录附加到当前轮次（提示条展示）；无当前轮则忽略
+          if (cur) {
+            cur.compressed = [...(cur.compressed ?? []), { before: event.before, after: event.after, summary: event.summary }];
+          }
+          break;
         case "error":
           msgs.push({ id: nextId(), role: "assistant", text: `⚠️ ${event.message}`, tools: [] });
           cur = null;
@@ -270,6 +306,7 @@ export const useStore = create<StoreState>()(
       currentStep,
       stepStartTimes: {},
       currentPhase: null,
+      phaseModels,
       plan: null,
       pendingRollback: null,
       running: false,
@@ -316,6 +353,30 @@ export const useStore = create<StoreState>()(
       ),
     })),
 
+  /** v2.2 模型降级记录：附加到当前 assistant 轮次（徽标展示与审计） */
+  appendFallback: (from, to, reason) => {
+    const msg = get().ensureAssistant();
+    set((s) => ({
+      messages: s.messages.map((m) =>
+        m.id === msg.id
+          ? { ...m, fallbacks: [...(m.fallbacks ?? []), { from, to, reason }] }
+          : m
+      ),
+    }));
+  },
+
+  /** v2.2 上下文压缩记录：附加到当前 assistant 轮次（提示条展示） */
+  appendCompressed: (before, after, summary) => {
+    const msg = get().ensureAssistant();
+    set((s) => ({
+      messages: s.messages.map((m) =>
+        m.id === msg.id
+          ? { ...m, compressed: [...(m.compressed ?? []), { before, after, summary }] }
+          : m
+      ),
+    }));
+  },
+
   beginStep: (n) =>
     set((s) => {
       const msgs = [...s.messages];
@@ -346,7 +407,12 @@ export const useStore = create<StoreState>()(
         (!!last.text || !!last.reasoning || last.tools.length > 0);
       if (hasContent) msgs[msgs.length - 1] = { ...last, streaming: false };
       msgs.push({ id: nextId(), role: "assistant", text: "", streaming: true, tools: [], phase: ev.phase });
-      return { messages: msgs, currentPhase: ev.phase };
+      return {
+        messages: msgs,
+        currentPhase: ev.phase,
+        // v2.2 角色路由可视化：记录该阶段使用的模型（旧会话无 model 字段则忽略）
+        phaseModels: ev.model ? { ...s.phaseModels, [ev.phase]: ev.model } : s.phaseModels,
+      };
     }),
 
   setReview: (content) =>

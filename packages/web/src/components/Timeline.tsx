@@ -163,6 +163,8 @@ function StepCard({ step, tools }: { step: number; tools: ToolEventState[] }) {
 
 /** Timeline 执行记录（按阶段分组展示工具过程） */
 export default function Timeline({ tools }: { tools: ToolEventState[] }) {
+  // v2.2 角色路由可视化：各阶段实际使用的模型（phase-start 事件记录）
+  const phaseModels = useStore((s) => s.phaseModels);
   // 按 阶段+step 复合键分组（各阶段 step 独立编号）
   const groups = new Map<string, ToolEventState[]>();
   const order: string[] = [];
@@ -194,6 +196,12 @@ export default function Timeline({ tools }: { tools: ToolEventState[] }) {
             {showHeader && phase && (
               <div className={`mb-1 mt-2 flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-wider ${PHASE_LABEL[phase]?.cls ?? "text-sub"}`}>
                 {PHASE_LABEL[phase]?.label ?? phase}
+                {/* v2.2 阶段模型（角色路由后） */}
+                {phaseModels[phase] && (
+                  <span className="rounded bg-muted px-1.5 py-0.5 font-mono text-[9px] normal-case tracking-normal text-sub">
+                    {phaseModels[phase]}
+                  </span>
+                )}
                 <span className="h-px flex-1 bg-line/50" />
               </div>
             )}

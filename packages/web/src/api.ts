@@ -10,6 +10,76 @@ export async function fetchModels() {
   return data;
 }
 
+// ── v2 供应商凭据（模型管理重构）──
+
+export interface ProviderInfo {
+  id: string;
+  name: string;
+  kind: string;
+  baseURL?: string;
+  hasKey: boolean;
+  modelCount: number;
+}
+
+/** 供应商列表 */
+export async function fetchProviders(): Promise<ProviderInfo[]> {
+  const res = await fetch("/api/providers");
+  if (!res.ok) throw new Error(`供应商加载失败: ${res.status}`);
+  const data = await res.json();
+  return data.providers ?? [];
+}
+
+async function providerApi<T>(url: string, method: string, body?: unknown): Promise<T> {
+  const res = await fetch(url, {
+    method,
+    headers: { "content-type": "application/json" },
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  const data = await res.json();
+  if (!res.ok || data.ok === false) throw new Error(data.message || `请求失败: ${res.status}`);
+  return data as T;
+}
+
+export const addProvider = (body: { id: string; name: string; kind: string; baseURL?: string; apiKey?: string }) =>
+  providerApi("/api/providers", "POST", body);
+export const updateProvider = (id: string, body: { name?: string; kind?: string; baseURL?: string; apiKey?: string }) =>
+  providerApi(`/api/providers/${encodeURIComponent(id)}`, "PUT", body);
+export const deleteProvider = (id: string) => providerApi(`/api/providers/${encodeURIComponent(id)}`, "DELETE");
+
+/** 从上游获取模型列表（OpenAI 兼容 /models） */
+export async function fetchProviderModels(id: string): Promise<Array<{ id: string; name: string }>> {
+  const res = await fetch(`/api/providers/${encodeURIComponent(id)}/models`, { method: "POST" });
+  const data = await res.json();
+  if (!res.ok || data.ok === false) throw new Error(data.message || `获取模型失败: ${res.status}`);
+  return data.models ?? [];
+}
+
+// ── v2.3 角色路由（面板：每角色 模型 + 独立思考级别）──
+
+export interface RoleConfig {
+  role: "planner" | "executor" | "reviewer";
+  modelId?: string;
+  thinkingLevel?: number;
+}
+
+export async function fetchRoles(): Promise<RoleConfig[]> {
+  const res = await fetch("/api/roles");
+  if (!res.ok) throw new Error(`角色配置加载失败: ${res.status}`);
+  const data = await res.json();
+  return data.roles ?? [];
+}
+
+export async function saveRoles(body: Record<string, { model?: string; thinkingLevel?: number } | undefined>) {
+  const res = await fetch("/api/roles", {
+    method: "PUT",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  const data = await res.json();
+  if (!res.ok || data.ok === false) throw new Error(data.message || `保存角色配置失败: ${res.status}`);
+  return data;
+}
+
 /** 加载模板任务列表（小白引导） */
 export async function fetchTemplates(): Promise<TaskTemplate[]> {
   const res = await fetch("/api/templates");
@@ -63,6 +133,12 @@ function handleEvent(ev: AgentEvent) {
     case "done":
       st.finishAssistant();
       break;
+    case "model-fallback":
+      st.appendFallback(ev.from, ev.to, ev.reason);
+      break;
+    case "context-compressed":
+      st.appendCompressed(ev.before, ev.after, ev.summary);
+      break;
     case "error":
       st.addError(ev.message);
       break;
@@ -109,12 +185,12 @@ export async function discardWorktree(root: string, name: string) {
   return data;
 }
 
-/** 计划确认（Web 计划卡片：批准/拒绝，plan 为编辑后的计划文本） */
-export async function postPlanDecision(id: string, approved: boolean, plan?: string) {
+/** 计划确认（v2.3 计划卡片：提交 = {plan 编辑后文本, feedback 用户回复}；取消 = cancelled） */
+export async function postPlanDecision(id: string, body: { plan?: string; feedback?: string } | { cancelled: true }) {
   const res = await fetch(`/api/plan/${encodeURIComponent(id)}`, {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ approved, plan }),
+    body: JSON.stringify(body),
   });
   const data = await res.json();
   if (!res.ok || data.ok === false) throw new Error(data.message || "计划确认失败");
@@ -254,6 +330,10 @@ export async function sendChat(prompt: string) {
         prompt,
         root: effectiveRoot,
         modelId: st.modelId,
+        // v2 思考级别（4 档，按模型实际级别数自动映射）
+        thinkingLevel: st.thinkingLevel,
+        // v2.2 动态步数启发式参考（模板任务）
+        templateId: st.templateId ?? undefined,
         // 三档模式：分层编排（full + 计划确认）/ 直接执行（off）/ 只出方案（suggestOnly）
         orchestrate: st.mode === "orchestrate" ? "full" : "off",
         suggestOnly: st.mode === "ask",

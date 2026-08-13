@@ -18,14 +18,16 @@ import { randomUUID } from "node:crypto";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AgentEvent, InfuConfig, ModelConfig, ProviderKind } from "@infu/shared";
-import { loadConfig, resolveModel, resolveApiKey, CONFIG_PATH } from "./providers/registry.js";
+import { loadConfig, resolveModel, resolveFallbackModels, resolveRoleModel, toRuntimeModel, CONFIG_PATH } from "./providers/registry.js";
 import { TOOLS } from "./tools/index.js";
 import { runAgent, makeApprovalHandler, DEFAULT_SYSTEM_PROMPT } from "./agent/loop.js";
 import { sanitizeEnv } from "./sandbox/index.js";
 import { runOrchestratedTask } from "./agent/orchestrator.js";
 import { runBestOfN, formatComparison } from "./best-of-n.js";
 import { findTemplate, renderTemplate } from "./templates.js";
-import { getStore, buildContinuationPrompt } from "./db/store.js";
+import { getStore } from "./db/store.js";
+import { rebuildMessages } from "./db/rebuild.js";
+import type { ChatMessageLike } from "./providers/chat.js";
 
 const require = createRequire(import.meta.url);
 
@@ -42,7 +44,7 @@ function printEvent(e: AgentEvent, prefix = "") {
   const P = prefix ? `${prefix} ` : "";
   switch (e.type) {
     case "phase-start":
-      console.error(C.green(`\n${P}◆ 阶段：${e.label}（${e.phase}）`));
+      console.error(C.green(`\n${P}◆ 阶段：${e.label}（${e.phase}）${e.model ? C.dim(`模型=${e.model}`) : ""}`));
       break;
     case "tool-start":
       console.error(C.cyan(`\n${P}⚙ [${e.tool}]`) + C.dim(` risk=${e.risk} args=${JSON.stringify(e.args).slice(0, 120)}`));
@@ -59,13 +61,20 @@ function printEvent(e: AgentEvent, prefix = "") {
     case "review":
       console.error(C.green(`\n${P}◆ 审查意见：\n${e.content}`));
       break;
+    case "model-fallback":
+      console.error(C.yellow(`\n${P}⚠ 模型降级：${e.from} → ${e.to}（${e.reason}）`));
+      break;
+    case "context-compressed":
+      console.error(C.dim(`\n${P}↻ 上下文压缩：${e.before} → ${e.after} tokens（历史已摘要，原内容在会话记录中）`));
+      break;
     case "error":
       console.error(C.red(`\n${P}✗ ${e.message}`));
       break;
   }
 }
 
-/** 默认审批：CLI 交互（-y 自动批准；联网放行等 requireExplicit 场景 -y 也不自动放行，一律拒绝） */
+/** 默认审批：CLI 交互（-y 自动批准；联网放行等 requireExplicit 场景 -y 也不自动放行，一律拒绝）
+ *  统一走 getLines() 单一 readline——避免与 ask() 双实例抢 stdin（v2.3 附加指示被吞的根因） */
 function makeDecider(autoApprove: boolean) {
   return async (
     description: string,
@@ -77,15 +86,9 @@ function makeDecider(autoApprove: boolean) {
     } else if (autoApprove) {
       return true;
     }
-    const rl = await import("node:readline").then((m) =>
-      m.createInterface({ input: process.stdin, output: process.stderr })
-    );
-    return new Promise<boolean>((resolve_) => {
-      rl.question(C.yellow(`  是否允许（y/n，默认 n）？`), (ans) => {
-        rl.close();
-        resolve_(/^y/i.test(ans.trim()));
-      });
-    });
+    process.stderr.write(C.yellow(`  是否允许（y/n，默认 n）？`));
+    const ans = await getLines().next().then((r) => r.value ?? "");
+    return /^y/i.test(ans.trim());
   };
 }
 
@@ -183,37 +186,43 @@ function saveConfig(cfg: InfuConfig) {
 }
 
 async function configWizard() {
-  const cfg = loadConfig() ?? { models: [] };
+  const cfg = loadConfig() ?? { models: [], providers: [] };
   let exit = false;
 
   while (!exit) {
-    console.log(C.cyan(`\n═══ InFu 模型配置 ═══`));
-    if (!cfg.models.length) {
-      console.log(C.dim("  当前没有配置任何模型"));
+    console.log(C.cyan(`\n═══ InFu 模型配置（v2：供应商凭据 + 模型）═══`));
+    const providers = cfg.providers ?? [];
+    if (providers.length) {
+      console.log(C.dim("  供应商："));
+      providers.forEach((p, i) => {
+        console.log(C.dim(`  ${i + 1}.`), `${p.name}（${p.kind}${p.baseURL ? " · " + p.baseURL : ""}）${p.apiKey ? C.green(" 已配Key") : C.yellow(" 无Key")}`);
+      });
     } else {
+      console.log(C.dim("  暂无供应商（先 [p] 添加供应商）"));
+    }
+    if (cfg.models.length) {
+      console.log(C.dim("  模型："));
       cfg.models.forEach((m, i) => {
         const isDefault = m.id === cfg.defaultModelId ? C.green(" ★默认") : "";
-        console.log(C.dim(`  ${i + 1}.`), `${m.name}（${m.provider}/${m.model}）${isDefault}`);
+        console.log(C.dim(`  · ${i + 1}.`), `${m.name}（${m.model} → ${m.providerId ?? m.provider ?? "?"}）${isDefault}`);
       });
     }
-    console.log(C.dim("\n  [a] 添加模型   [s] 设置默认   [d] 删除模型   [k] 修改 API Key   [q] 退出"));
+    console.log(C.dim("\n  [p] 添加供应商   [a] 添加模型   [s] 设置默认   [d] 删除   [k] 修改 API Key   [q] 退出"));
     const choice = (await ask("请选择")).toLowerCase();
 
     if (choice === "q") { exit = true; break; }
 
-    if (choice === "a") {
-      console.log(C.dim("\n  选择供应商："));
+    if (choice === "p") {
+      console.log(C.dim("\n  选择供应商类型："));
       PROVIDER_MENU.forEach((p, i) => console.log(C.dim(`  ${i + 1}.`), p.label));
       const pi = parseInt(await ask("供应商编号"), 10) - 1;
       const p = PROVIDER_MENU[pi];
       if (!p) { console.log(C.red("  无效编号")); continue; }
 
       const name = await ask("显示名称", p.label.split("（")[0]);
-      const model = await ask("模型 ID", p.defaultModel);
       let baseURL = p.defaultBaseURL ?? "";
       if (p.kind === "custom" || !baseURL) {
         baseURL = await ask("API 地址（baseURL，OpenAI 兼容端点，通常以 /v1 结尾）", baseURL);
-        // 自动补全 /v1：没以 /v1 或 /v\d+ 结尾时询问是否补全
         if (baseURL && !/\/v\d+$/.test(baseURL)) {
           const fixed = (baseURL.endsWith("/") ? baseURL : baseURL + "/") + "v1";
           const ok = await ask(`地址未以 /v1 结尾，自动补全为 "${fixed}"？`, "y");
@@ -221,13 +230,30 @@ async function configWizard() {
         }
       }
       const apiKey = await ask("API Key（没有可留空，用环境变量）");
-      const id = (await ask("模型标识（英文，用于 --model 指定）", model.split(":")[0])).replace(/\s+/g, "-");
+      const pid = (await ask("供应商标识（英文，如 deepseek）", p.kind)).replace(/\s+/g, "-");
+      if (providers.some((x) => x.id === pid)) { console.log(C.red(`  供应商 "${pid}" 已存在`)); continue; }
+      providers.push({ id: pid, name, kind: p.kind, ...(baseURL ? { baseURL } : {}), ...(apiKey ? { apiKey } : {}) });
+      cfg.providers = providers;
+      saveConfig(cfg);
+      console.log(C.green(`  ✅ 已添加供应商 ${name}（${pid}）`));
+    } else if (choice === "a") {
+      if (!providers.length) { console.log(C.red("  请先 [p] 添加供应商")); continue; }
+      console.log(C.dim("\n  选择供应商："));
+      providers.forEach((p, i) => console.log(C.dim(`  ${i + 1}.`), `${p.name}（${p.id}）`));
+      const pi = parseInt(await ask("供应商编号"), 10) - 1;
+      const p = providers[pi];
+      if (!p) { console.log(C.red("  无效编号")); continue; }
 
-      const m: ModelConfig = { id, name, provider: p.kind, model, ...(baseURL ? { baseURL } : {}), ...(apiKey ? { apiKey } : {}) };
+      const name = await ask("显示名称");
+      const model = await ask("模型 ID（上游模型名，如 deepseek-v4-flash）");
+      const id = (await ask("模型标识（英文，用于 --model 指定）", model.split(":")[0])).replace(/\s+/g, "-");
+      if (cfg.models.some((x) => x.id === id)) { console.log(C.red(`  模型 "${id}" 已存在`)); continue; }
+
+      const m: ModelConfig = { id, name, providerId: p.id, model };
       cfg.models.push(m);
       if (!cfg.defaultModelId) cfg.defaultModelId = m.id;
       saveConfig(cfg);
-      console.log(C.green(`  ✅ 已添加 ${name}，并设为默认`));
+      console.log(C.green(`  ✅ 已添加模型 ${name}（${model} → ${p.id}）`));
     } else if (choice === "s") {
       if (!cfg.models.length) { console.log(C.red("  请先添加模型")); continue; }
       cfg.models.forEach((m, i) => console.log(C.dim(`  ${i + 1}.`), `${m.name}（${m.id}）`));
@@ -249,13 +275,14 @@ async function configWizard() {
       saveConfig(cfg);
       console.log(C.green(`  ✅ 已删除 ${m.name}`));
     } else if (choice === "k") {
-      if (!cfg.models.length) { console.log(C.red("  请先添加模型")); continue; }
-      cfg.models.forEach((m, i) => console.log(C.dim(`  ${i + 1}.`), `${m.name}（${m.id}）`));
-      const ki = parseInt(await ask("要修改 Key 的编号"), 10) - 1;
-      const m = cfg.models[ki];
-      if (!m) { console.log(C.red("  无效编号")); continue; }
-      const key = await ask(`输入 ${m.name} 的新 API Key`);
-      if (key) { m.apiKey = key; saveConfig(cfg); console.log(C.green("  ✅ API Key 已更新")); }
+      const providers = cfg.providers ?? [];
+      if (!providers.length) { console.log(C.red("  请先添加供应商")); continue; }
+      providers.forEach((p, i) => console.log(C.dim(`  ${i + 1}.`), `${p.name}（${p.id}）${p.apiKey ? " 已配Key" : " 无Key"}`));
+      const ki = parseInt(await ask("要修改 Key 的供应商编号"), 10) - 1;
+      const p = providers[ki];
+      if (!p) { console.log(C.red("  无效编号")); continue; }
+      const key = await ask(`输入 ${p.name} 的新 API Key`);
+      if (key) { p.apiKey = key; cfg.providers = providers; saveConfig(cfg); console.log(C.green("  ✅ API Key 已更新")); }
       else console.log(C.red("  Key 不能为空"));
     } else {
       console.log(C.red("  无效输入"));
@@ -310,11 +337,32 @@ function main() {
     const i = args.indexOf(name);
     return i >= 0 ? args[i + 1] : undefined;
   };
-  let prompt = args.filter((a) => !a.startsWith("--")).join(" ") || "";
+  // --fallback-model 可重复指定（主模型失败时依次切换）
+  const getRepeatedArgs = (name: string): string[] =>
+    args.flatMap((a, i) => (a === name && args[i + 1] ? [args[i + 1]] : []));
+  // 任务 prompt 提取：跳过全部参数（带值参数连同其值，开关单独跳过）——顺带修复参数值混入 prompt 的既有问题
+  const VALUE_ARGS = new Set(["--root", "--model", "--fallback-model", "--max-steps", "--template", "--best-of-n", "--session", "--thinking",
+    "--planner-model", "--executor-model", "--reviewer-model"]);
+  const FLAG_ONLY = new Set(["-y", "--yes", "--suggest", "--no-orchestrate", "--no-plan-approval"]);
+  let prompt = "";
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i];
+    if (VALUE_ARGS.has(a)) { i++; continue; }
+    if (a.startsWith("--") || FLAG_ONLY.has(a)) continue;
+    prompt += (prompt ? " " : "") + a;
+  }
   const rootArg = getArg("--root");
   let root = resolve(rootArg || process.cwd());
   const modelId = getArg("--model");
+  const fallbackModelIds = getRepeatedArgs("--fallback-model");
+  // v2.2 轻量模型选择：按角色指定模型（--planner-model / --executor-model / --reviewer-model）
+  const roleModelIds = {
+    planner: getArg("--planner-model"),
+    executor: getArg("--executor-model"),
+    reviewer: getArg("--reviewer-model"),
+  };
   const maxSteps = parseInt(getArg("--max-steps") || "", 10) || undefined;
+  const thinkingLevel = parseInt(getArg("--thinking") || "", 10) || undefined;
   const autoApprove = args.includes("-y") || args.includes("--yes");
   const suggestOnly = args.includes("--suggest");
   const orchestrate = args.includes("--no-orchestrate") ? "off" : "full";
@@ -340,9 +388,14 @@ function main() {
   infu config   ★ 交互式配置模型与 API Key（推荐）
   infu "任务描述" [--root <项目路径>] [--model <模型id>] [-y]
   infu sessions 会话历史（每次任务自动保存，可继续）
-  infu --session <id> "继续的指令"   继续之前的会话
+  infu --session <id> "继续的指令"   继续之前的会话（消息级重建：完整恢复历史与进度）
   infu --setup   生成模型配置模板（JSON）
   infu --suggest 建议模式（模型只出方案，不执行工具）
+
+模型可靠性（v2.2）：
+  infu "任务" --fallback-model <id> [--fallback-model <id>...]  备用模型降级链（主模型失败自动切换）
+  infu "任务" --planner-model <id> --executor-model <id> --reviewer-model <id>  按角色指定模型（规划/执行/审查）
+  infu "任务" --thinking <1-4>  思考级别（按模型实际级别数自动映射；1 快速 ~ 4 极限）
 
 分层编排（M4，默认开启 Planner→Executor→Reviewer）：
   infu --template init-project  模板任务：初始化新项目
@@ -362,11 +415,33 @@ function main() {
 
   const config = loadConfig();
   const modelCfg = resolveModel(config, modelId);
+  // v2.2 降级链：显式 --fallback-model 优先，否则用模型自身 fallbackModelIds（未知 id 警告）
+  const fallbackModels = resolveFallbackModels(config, modelCfg, fallbackModelIds);
+  for (const id of fallbackModelIds) {
+    if (!fallbackModels.some((m) => m.id === id)) {
+      console.error(C.yellow(`⚠ 备用模型 "${id}" 未找到或无效（忽略），可用: ${config?.models.map((m) => m.id).join(", ")}`));
+    }
+  }
+  // v2.2 角色路由：各角色独立模型 + 各自降级链（未指定角色 → 默认模型）
+  const roleModelConfigs = {} as Record<string, { modelConfig: ReturnType<typeof toRuntimeModel>; fallbackModelConfigs: ReturnType<typeof toRuntimeModel>[] }>;
+  for (const phase of ["planner", "executor", "reviewer"] as const) {
+    const explicitId = roleModelIds[phase];
+    const rm = resolveRoleModel(config, modelCfg, phase, explicitId);
+    if (explicitId && rm.id !== explicitId) {
+      console.error(C.yellow(`⚠ 角色模型 "${explicitId}"（${phase}）未找到，回退默认模型`));
+    }
+    roleModelConfigs[phase] = {
+      modelConfig: toRuntimeModel(config, rm),
+      fallbackModelConfigs: resolveFallbackModels(config, rm).map((m) => toRuntimeModel(config, m)),
+    };
+  }
   const decide = makeDecider(autoApprove);
 
   // ── v2.1 会话（自动落库；--session 继续会话）──
   const store = getStore();
   let sessionId: string | undefined;
+  // v2.2 断点恢复：继续会话 = 从事件流重建完整 messages（工具结果直接来自 DB，不重放副作用）
+  let initialMessages: ChatMessageLike[] | undefined;
   let effectivePrompt = prompt;
   if (bestOfN) {
     console.error(C.dim("（/best-of-n 并行模式不写入会话历史）"));
@@ -380,8 +455,8 @@ function main() {
       }
       sessionId = sessionArg;
       if (!rootArg) root = s.root; // 继续会话：沿用历史项目目录
-      effectivePrompt = buildContinuationPrompt(store.summarizeSession(sessionId), prompt);
-      console.error(C.dim(`继续会话：${s.title}（上次状态 ${s.status}）`));
+      initialMessages = rebuildMessages(store.getEvents(sessionId));
+      console.error(C.dim(`继续会话（消息级重建）：${s.title}（上次状态 ${s.status}，历史已完整恢复）`));
     } else {
       sessionId = store.createSession({
         title: prompt.slice(0, 40),
@@ -416,17 +491,21 @@ function main() {
   };
 
   console.error(C.dim(`模型: ${modelCfg.name} (${modelCfg.provider}/${modelCfg.model})`));
+  // v2.2 角色路由：任一角色与默认模型不同时提示
+  const roleHints = (["planner", "executor", "reviewer"] as const)
+    .filter((p) => roleModelConfigs[p].modelConfig.model !== toRuntimeModel(config, modelCfg).model)
+    .map((p) => `${p}=${roleModelConfigs[p].modelConfig.model}`);
+  if (roleHints.length) console.error(C.dim(`角色模型: ${roleHints.join(" · ")}`));
   console.error(C.dim(`项目: ${root}`));
   console.error(C.dim(`审批: ${autoApprove ? "自动批准" : "交互确认"}${suggestOnly ? " | 建议模式" : ""}${orchestrate === "off" ? "" : " | 分层编排 " + (orchestrate === "full" ? "(Planner→Executor→Reviewer)" : "(Planner→Executor)")}${orchestrate === "off" || suggestOnly ? "" : planApproval ? " | 计划需确认" : " | 计划不确认"}${bestOfN ? ` | /best-of-n ×${bestOfN}` : ""}${sessionId ? " | 会话已记录" : ""}`));
   console.error(C.dim(`工具: ${Object.keys(TOOLS).length} 个\n`));
 
   const common = {
-    modelConfig: {
-      provider: modelCfg.provider,
-      model: modelCfg.model,
-      baseURL: modelCfg.baseURL,
-      apiKey: resolveApiKey(modelCfg),
-    },
+    modelConfig: toRuntimeModel(config, modelCfg),
+    fallbackModelConfigs: fallbackModels.map((m) => toRuntimeModel(config, m)),
+    roleModelConfigs,
+    initialMessages,
+    thinkingLevel,
     prompt: effectivePrompt,
     root,
     emit,
@@ -476,7 +555,17 @@ function main() {
     return;
   }
 
-  runOrchestratedTask({ ...common, orchestrate, planApproval, abortSignal: abortController.signal })
+  // v2.3 计划确认：交互输入回复文本（直接回车 = 批准执行；输入内容由 AI 判断 execute/revise/abort）
+  // -y 自动批准时直接通过；要取消输入"取消/先不做"（判为 abort）
+  const cliConfirmPlan = async (planText: string) => {
+    if (autoApprove) return { plan: undefined, feedback: "批准执行" };
+    console.error(C.cyan("\n【执行计划】请确认："));
+    console.error(planText.slice(0, 2000));
+    const feedback = await ask("你的回复（直接回车=批准执行；或输入意见/先不做/修改计划…）");
+    return { plan: undefined, feedback: feedback.trim() || "批准执行" };
+  };
+
+  runOrchestratedTask({ ...common, orchestrate, planApproval, templateId, confirmPlan: cliConfirmPlan, abortSignal: abortController.signal })
     .then((r) => {
       process.stdout.write("\n" + r.text + "\n");
       finishSession("done");

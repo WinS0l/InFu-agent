@@ -20,6 +20,8 @@ export interface BestOfNOptions {
   /** 并行路数（默认 3） */
   n: number;
   modelConfig: OrchestratedRunOptions["modelConfig"];
+  /** v2.2 降级链（备用模型，各 worktree 共享） */
+  fallbackModelConfigs?: OrchestratedRunOptions["fallbackModelConfigs"];
   prompt: string;
   root: string;
   emit: (e: AgentEvent) => void;
@@ -105,6 +107,7 @@ export async function runBestOfN(opts: BestOfNOptions): Promise<BestOfNResult> {
 
       const result = await runOrchestratedTask({
         modelConfig: opts.modelConfig,
+        fallbackModelConfigs: opts.fallbackModelConfigs,
         prompt: opts.prompt,
         root: wtPath,
         // 并行模式下计划确认关闭（无法逐个交互）；审批仍可逐条询问

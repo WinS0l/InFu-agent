@@ -45,13 +45,22 @@
 - 多会话、历史浏览、继续会话；断点恢复 + Rewind（会话回滚到检查点）
 - 配置 schema 基础
 
-### v2.2 模型适配与可靠性
-- provider 兼容矩阵实测（GLM/通义/Kimi/Ollama 未实测；reasoning/工具调用/流式差异）
-- API 失败自动重试 / 降级备用模型
-- 模型选择流程（codex 式，按任务类型路由；细节实施前讨论）
-- **消息级上下文重建**（v2.1 遗留边界：从 DB 事件流重建完整 OpenAI messages——v2.1 已存全量事件 + callId，地基就绪；先重建、再压缩）
-- 上下文压缩（长会话自动摘要，超长历史才触发）+ 动态步数（任务复杂度评估）
-- **断点恢复（工具级）**（v2.1 遗留边界：中断任务从检查点精确续跑 = 重建 messages + 续跑入口，不重放工具副作用；与失败重试同属"可靠性"；若 v2.2 体量超预期可顺延，勿拖过 v2.3）
+### v2.2 模型适配与可靠性【批 1 ✅ 2026-08-13，批 2 ✅ 2026-08-13】
+- ✅ **批 1 可靠性核心（2026-08-13）**：
+  - API 失败自动重试（chat.ts 重构：`requestOnce` + `ModelApiError` 结构化错误；可重试 = 429（尊重 Retry-After）/5xx/408/网络/超时/首帧前断流，指数退避 1s/2s/4s+jitter；已产出 delta 后断流不重试——内容已 emit 无法撤回）
+  - 降级备用模型链（新 `providers/gateway.ts`：`ModelChain` + `streamChatWithFailover`，重试耗尽依次切换，降级后本任务内保持；配置 `ModelConfig.fallbackModelIds` + CLI `--fallback-model`（可重复）+ Web 模型管理弹窗「备用模型」多选 + `model-fallback` 事件（Timeline 徽标/CLI 打印/落库））
+  - 消息级上下文重建（新 `db/rebuild.ts`：事件流 → OpenAI wire messages，工具结果按 callId 消费式配对、缺失补占位、孤儿丢弃、reasoning_content 保留）
+  - 断点恢复（继续会话 CLI `--session` / Web 带 sessionId 从「摘要注入」升级为「消息级重建续跑」，不重放工具副作用）
+  - 顺手修复：loop.ts baseURL 硬编码 deepseek 兜底 bug（zhipu/qwen/ollama 未配 baseURL 打错端点）→ 统一 `resolveBaseURL`；CLI 参数值混入 prompt 的既有 bug
+- ✅ **批 2（2026-08-13）**：
+  - **上下文压缩按模型因地制宜**（新 `agent/context.ts`：`resolveContextWindow` 显式配置 > 模型名匹配表 > provider 默认 > 128k 兜底；估算超「当前活动模型窗口×80%」触发、压到×60%（预留摘要开销），降级切模型预算自动跟随；摘要失败降级为直接丢弃最老；**DB 事件流始终无损**；`context-compressed` 事件）
+  - **动态步数**（新 `agent/steps.ts`：显式 `--max-steps` > Planner 建议（计划文本【建议步数】N，计划卡片可编辑）> 启发式 `estimateComplexity`（模板/长度/关键词）> 默认 30；Planner 12 / Reviewer 10 保持）
+  - **轻量模型选择（按角色路由）**：`InfuConfig.roles` / `ModelConfig.roles`（模型声明适配角色）/ CLI `--planner-model|--executor-model|--reviewer-model` / API body `roleModelIds`；`phase-start` 事件带 `model` 字段（Timeline 显示当前阶段模型）；各角色独立降级链
+  - **provider 兼容矩阵实测**（`npm run probe -- <modelId>` 探针脚本：流式/思考字段/单双轮工具调用/中文长输出，deepseek 5/5 实测通过；`docs/PROVIDER-MATRIX.md` 模板 + 差异处理约定；**GLM/通义/Kimi/Ollama 等 key 就绪后逐个实测回填**）
+  - 验证：`npm test` 179 项全绿（新增 compress 24 / steps 17）+ 真实模型端到端（编排任务动态步数 Planner 建议 5 生效 / phase-start 模型字段 / 角色路由打到 glm-5.2 端点 401 正确失败）+ probe 实测
+- ✅ **模型管理重构（v2 供应商凭据，2026-08-13）**：见 AGENTS.md 已完成区（config v2 迁移/供应商模板表 8 家/上游模型获取/思考级别 4 档/Web 双 Tab + 输入框旁选择器；`npm test` 226 项全绿 + 真实 DeepSeek 上游实测）。供应商模板数据 2026-08 联网调研校准（DeepSeek/GLM-5.2/GPT-5.6/Claude 5/Gemini/Kimi 均 1M 窗口）
+- ✅ **角色路由面板（2026-08-13）**：Web 模型管理「角色路由」面板（三行模型+思考级别，PUT/GET /api/roles，config roles 支持对象形态，orchestrator 角色级 thinkingLevel 优先）——Web 角色 UI 讨论项已落地
+- ⏳ **遗留**：阶段级精确续跑（跳过已完成阶段的编排续跑；勿拖过 v2.3）；完整 codex 式模型选择流程（细节实施前讨论）
 
 ### v2.3 扩展机制与 MCP
 - 插件系统架构 v1（插件 = 可注册工具/命令/技能/钩子的包）
@@ -97,3 +106,4 @@
 - ✅ M4：模板任务引导（一键初始化项目/修复测试失败/分析项目/添加功能，Web 空态欢迎面板 + CLI --template）+ Planner/Reviewer 分层编排（Planner 只读规划→计划确认→Executor 执行→Reviewer 只读审查→汇总报告；Web 三档模式选择器 编排/直接/方案 + 可编辑计划卡片，CLI --no-orchestrate/--no-plan-approval）
 - ✅ M5：沙箱中期升级（L1.5 Windows 硬沙箱：restricted tokens + job objects，Rust 原生模块 + 降级阶梯 + 自测）+ /best-of-n 并行尝试（CLI `--best-of-n <N>`：N 路独立 worktree 并行完整编排 + 评分择优）
 - ✅ **v2.1 持久化与会话（2026-08-12）**：SQLite 会话库 `~/.infu/infu.db`（node:sqlite 零依赖，Node ≥22.5）+ 全量事件流落库（tool-result 存完整输出，Diff 面板升级为完整 diff）+ 会话 API（列表/详情/删除/Rewind）+ Web 左侧栏会话列表（新建/切换/删除/状态徽标）+ 继续会话（历史回顾注入，消息级重建留 v2.2）+ 消息轮次内嵌「回滚到此」（两段式确认，检查点 = user-message/step-start）+ CLI `infu sessions`/`--session <id>` + v1 localStorage 数据一次性迁移 + 配置 zod schema 基础（version 字段/损坏备份/未知字段保留，v2.4 权限/沙箱设置的地基）。验证：`npm test` 86 项全绿 + CLI/Web 端到端实测（真实模型建会话/继续/回滚）
+- ✅ **v2.2 批 1 可靠性核心（2026-08-13）**：见上「v2.2 模型适配与可靠性」节（自动重试/降级链/消息级重建/断点恢复，`npm test` 138 项全绿 + CLI 端到端实测）

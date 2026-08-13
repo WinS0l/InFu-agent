@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import {
   Send, Bot, User, Sparkles, Square, GitBranch, GitMerge, Trash2, Loader2,
   FolderPlus, FlaskConical, SearchCode, Puzzle, ArrowLeft, Check,
-  Workflow, Zap, MessageSquareText, RotateCcw,
+  Workflow, Zap, MessageSquareText, RotateCcw, AlertTriangle, Files,
 } from "lucide-react";import { Streamdown } from "streamdown";
 import type { TaskTemplate, PhaseId } from "@infu/shared";
 import { renderTemplate } from "@infu/shared";
@@ -28,6 +28,12 @@ const TEMPLATE_ICON: Record<string, React.ElementType> = {
   analyze: SearchCode,
   "add-feature": Puzzle,
 };
+
+/** token 数格式化（128k / 12.5k） */
+function fmtTokens(n: number): string {
+  if (n >= 1000) return `${(n / 1000).toFixed(n >= 10000 ? 0 : 1)}k`;
+  return String(n);
+}
 
 /** 编排阶段徽标 */
 const PHASE_BADGE: Record<PhaseId, { label: string; cls: string }> = {
@@ -84,7 +90,7 @@ function StructuredBlock({ content, tone }: { content: string; tone: "accent" | 
 
 /** 中间栏：对话 + 工具过程 + 输入框 */
 export default function ChatPanel() {
-  const { messages, running, abortRun, worktree, worktreeNote, root, clearWorktree, mode, setMode, plan, useWorktree, setUseWorktree, activeSessionId } = useStore();
+  const { messages, running, abortRun, worktree, worktreeNote, root, clearWorktree, mode, setMode, plan, useWorktree, setUseWorktree, activeSessionId, models, modelId, setModelId, thinkingLevel, setThinkingLevel } = useStore();
   const [input, setInput] = useState("");
   const [wtBusy, setWtBusy] = useState(false);
   const [wtMsg, setWtMsg] = useState("");
@@ -97,6 +103,26 @@ export default function ChatPanel() {
   // 编辑后发送 = 提交回滚（截断+重发），点「取消回滚」= 恢复原样
   const { pendingRollback, setPendingRollback, clearPendingRollback } = useStore();
   const inputRef = useRef<HTMLTextAreaElement>(null);
+
+  // v2 模型选择器：按供应商分组 + 思考级别映射提示
+  const PROVIDER_GROUPS = (() => {
+    const groups = new Map<string, { name: string; models: typeof models }>();
+    for (const m of models) {
+      const key = m.providerId ?? m.provider ?? "其他";
+      if (!groups.has(key)) groups.set(key, { name: key, models: [] });
+      groups.get(key)!.models.push(m);
+    }
+    return [...groups.values()];
+  })();
+  /** 思考级别映射提示（按当前模型实际级别数：1→最弱，2-4→按比例） */
+  const thinkingHint = (lv: number): string => {
+    const cur = models.find((m) => m.id === modelId);
+    const levels = cur?.thinkingLevels ?? 1;
+    const mapped = lv === 1 ? 1 : Math.min(levels, Math.ceil(((lv - 1) / 3) * (levels - 1)) + 1);
+    if (levels <= 1) return "该模型无思考级别";
+    const labels = ["快速", "标准", "深度", "极限"];
+    return `${cur?.name ?? ""}：第 ${lv} 级 → 模型级 ${mapped}（${labels[lv - 1]}）`;
+  };
 
   /** 进入回滚待定态：锚点 = 被点轮次对应的最后一条用户消息（编辑重发 = 替换它），
    *  该用户消息及之后全部进入待回滚；输入框填充该消息原文 */
@@ -143,6 +169,7 @@ export default function ChatPanel() {
       }
     }
     setInput("");
+    useStore.getState().setTemplateId(null); // 普通输入：清模板标记
     sendChat(text);
   };
 
@@ -157,6 +184,7 @@ export default function ChatPanel() {
 
   /** 模板一键开跑：无字段直接发；有字段先进内联表单 */
   const pickTemplate = (tpl: TaskTemplate) => {
+    useStore.getState().setTemplateId(tpl.id); // v2.2 动态步数启发式参考
     if (tpl.fields?.length) {
       setSelectedTpl(tpl);
       setFieldValues(Object.fromEntries(tpl.fields.map((f) => [f.name, f.default ?? ""])));
@@ -319,6 +347,17 @@ export default function ChatPanel() {
                 <>
                   <User className="h-4 w-4 text-sub" />
                   <span className="text-xs font-semibold text-text">你</span>
+                  {/* v2.3 Rewind：回滚按钮只放用户消息——回滚语义 = 撤销这条指令及其后的所有内容（微信撤回式） */}
+                  {m.seqStart != null && !running && !pendingRollback && (
+                    <button
+                      className="ml-auto hidden items-center gap-1 rounded-md border border-line px-1.5 py-0.5 text-[10px] text-sub transition-colors duration-150 hover:border-warn/60 hover:text-warn group-hover:flex"
+                      onClick={() => askRewind(m.seqStart!)}
+                      title="回滚到这条指令：撤销它及其后的所有内容，编辑发送后替换，可取消"
+                    >
+                      <RotateCcw className="h-2.5 w-2.5" />
+                      回滚到此
+                    </button>
+                  )}
                 </>
               ) : (
                 <>
@@ -328,17 +367,6 @@ export default function ChatPanel() {
                     <span className={`rounded-full border px-1.5 py-px text-[10px] font-medium ${PHASE_BADGE[m.phase].cls}`}>
                       {PHASE_BADGE[m.phase].label}
                     </span>
-                  )}
-                  {/* v2.1 Rewind：回滚到该轮检查点（悬停出现；进入待定态，编辑发送后替换） */}
-                  {m.seqStart != null && !running && !pendingRollback && (
-                    <button
-                      className="ml-auto hidden items-center gap-1 rounded-md border border-line px-1.5 py-0.5 text-[10px] text-sub transition-colors duration-150 hover:border-warn/60 hover:text-warn group-hover:flex"
-                      onClick={() => askRewind(m.seqStart!)}
-                      title="回滚到该轮：消息进入待回滚状态，编辑发送后替换，可取消"
-                    >
-                      <RotateCcw className="h-2.5 w-2.5" />
-                      回滚到此
-                    </button>
                   )}
                 </>
               )}
@@ -350,6 +378,32 @@ export default function ChatPanel() {
               <>
                 {/* 思考过程（折叠） */}
                 {m.reasoning && <ReasoningBlock text={m.reasoning} />}
+                {/* v2.2 模型降级徽标（主模型失败 → 备用模型） */}
+                {m.fallbacks && m.fallbacks.length > 0 && (
+                  <div className="mb-2 space-y-1">
+                    {m.fallbacks.map((f, i) => (
+                      <div key={i} className="flex items-center gap-1.5 rounded-md border border-warn/30 bg-warn/10 px-2 py-1 text-[10px] text-warn">
+                        <AlertTriangle className="h-3 w-3 shrink-0" />
+                        <span className="min-w-0 flex-1 truncate">
+                          模型降级：{f.from} → {f.to}（{f.reason}）
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+                {/* v2.2 上下文压缩提示（历史超预算自动摘要；DB 无损） */}
+                {m.compressed && m.compressed.length > 0 && (
+                  <div className="mb-2 space-y-1">
+                    {m.compressed.map((c, i) => (
+                      <div key={i} className="flex items-center gap-1.5 rounded-md border border-accent/25 bg-accent/10 px-2 py-1 text-[10px] text-accent">
+                        <Files className="h-3 w-3 shrink-0" />
+                        <span className="min-w-0 flex-1 truncate">
+                          上下文已压缩：{fmtTokens(c.before)} → {fmtTokens(c.after)}（历史已摘要，会话记录无损）
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                )}
                 {/* Timeline 执行记录（阶段分组） */}
                 {m.tools.length > 0 && <Timeline tools={m.tools} />}
                 {/* 回答文本（流式 Markdown 块渲染：代码骨架→完整块） */}
@@ -482,8 +536,47 @@ export default function ChatPanel() {
             {running ? <Square className="h-4 w-4" /> : <Send className="h-4 w-4" />}
           </button>
         </div>
-        {/* 底部：快捷键提示（左） + 任务工作树开关（右，每任务独立 git worktree 副本） */}
+        {/* 底部：模型选择（v2 供应商/模型 + 思考级别） · 快捷键提示 · 工作树开关 */}
         <div className="mt-1 flex items-center gap-2 px-1">
+          {/* 模型选择器（输入框左下方；供应商分组） */}
+          <div className="flex items-center gap-1.5">
+            <select
+              className="max-w-[180px] cursor-pointer rounded-md border border-line bg-muted px-1.5 py-0.5 text-[10px] text-text transition-colors hover:border-accent/50"
+              value={modelId}
+              onChange={(e) => setModelId(e.target.value)}
+              title="当前任务使用的模型"
+            >
+              {PROVIDER_GROUPS.map((g) => (
+                <optgroup key={g.name} label={g.name}>
+                  {g.models.map((m) => (
+                    <option key={m.id} value={m.id}>
+                      {m.name}（{m.model}）
+                    </option>
+                  ))}
+                </optgroup>
+              ))}
+            </select>
+            {/* 思考级别 4 档（按模型实际级别数自动映射） */}
+            <div className="flex items-center gap-0.5 rounded-md border border-line bg-muted px-1 py-0.5">
+              {[1, 2, 3, 4].map((lv) => (
+                <button
+                  key={lv}
+                  className={`h-5 w-5 cursor-pointer rounded text-[10px] font-medium transition-colors ${
+                    thinkingLevel === lv ? "bg-accent/25 text-accent" : "text-sub/60 hover:text-text"
+                  }`}
+                  onClick={() => setThinkingLevel(lv)}
+                  title={`思考级别 ${lv}（${thinkingHint(lv)}）`}
+                >
+                  {lv}
+                </button>
+              ))}
+            </div>
+            {thinkingHint !== undefined && (
+              <span className="hidden max-w-[140px] truncate text-[9px] text-sub/60 xl:inline" title={thinkingHint(thinkingLevel)}>
+                {thinkingHint(thinkingLevel)}
+              </span>
+            )}
+          </div>
           <span className="text-[10px] text-sub/60">
             Enter 发送 · Shift+Enter 换行 · 运行中点击方块停止任务
           </span>

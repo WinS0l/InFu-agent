@@ -13,9 +13,15 @@
  * 终态事件（report/done）由编排层统一汇总发出。
  */
 
-import type { AgentEvent, PhaseId, ToolContext, ToolDef } from "@infu/shared";
+import type { AgentEvent, PhaseId, ProviderKind, ToolContext, ToolDef } from "@infu/shared";
 import { randomUUID } from "node:crypto";
-import { streamChat, zodToJsonSchema, type ChatMessageLike } from "../providers/chat.js";
+import { streamChatWithFailover, ModelChain, type ModelCandidate } from "../providers/gateway.js";
+import { zodToJsonSchema, type ChatMessageLike } from "../providers/chat.js";
+import { resolveContextWindow, buildThinkingParamsForModel, mapThinkingLevel } from "../providers/registry.js";
+import {
+  compressMessages, estimateTokens, serializeHistory, SUMMARIZE_PROMPT,
+  COMPRESS_TRIGGER_RATIO,
+} from "./context.js";
 
 export interface AgentRunOptions {
   /** 模型配置（provider/model/baseURL/apiKey） */
@@ -24,9 +30,26 @@ export interface AgentRunOptions {
     model: string;
     baseURL?: string;
     apiKey: string;
+    contextWindow?: number;
+    thinkingLevels?: number;
+    thinkingOverride?: Array<Record<string, unknown> | null>;
   };
+  /** 备用模型链（v2.2 降级：主模型重试耗尽后依次切换；本任务内保持不自动回主模型） */
+  fallbackModelConfigs?: Array<{
+    provider: string;
+    model: string;
+    baseURL?: string;
+    apiKey: string;
+    contextWindow?: number;
+    thinkingLevels?: number;
+    thinkingOverride?: Array<Record<string, unknown> | null>;
+  }>;
+  /** 思考级别（v2 模型管理：4 档 UI，按模型实际级别数自动映射；1-4，缺省 2） */
+  thinkingLevel?: number;
   system: string;
   prompt: string;
+  /** 初始对话消息（v2.2 断点恢复/继续会话的消息级重建；提供时追加在 system 之后，prompt 作为新 user 消息在最后） */
+  initialMessages?: ChatMessageLike[];
   tools: Record<string, ToolDef>;
   /** 项目根目录（工具操作边界） */
   root: string;
@@ -44,8 +67,8 @@ export interface AgentRunOptions {
   suggestOnly?: boolean;
   /** 中止信号（Web 停止按钮 / 服务端连接断开） */
   abortSignal?: AbortSignal;
-  /** 分层编排阶段标识（进入时 emit phase-start，前端按阶段分组） */
-  phase?: { id: PhaseId; label: string };
+  /** 分层编排阶段标识（进入时 emit phase-start，前端按阶段分组）；model 为该阶段所用模型（角色路由后） */
+  phase?: { id: PhaseId; label: string; model?: string };
   /** 抑制终态事件（report/done），由编排层汇总后统一发出（Planner/Reviewer 阶段用） */
   suppressFinal?: boolean;
 }
@@ -70,7 +93,7 @@ export const DEFAULT_SYSTEM_PROMPT = `你是 InFu，一个软件工程智能体�
 5. 任务完成时用中文输出简明总结：做了什么、改动了哪些文件、测试结果、遗留风险。
 6. 只做用户要求的事，不要擅自扩大范围。
 
-（若处于"建议模式"：你只输出方案与命令建议，不执行任何工具——**不要输出任何工具调用格式**（如 XML <invoke> / JSON tool_calls），直接用中文给出方案文本。）`;
+（若处于"方案模式"：你的任务是输出方案与建议，不执行任何修改。你可以使用只读工具分析项目——读取文件、搜索代码、查看目录与 git 状态、运行测试来验证现状，但**绝对不要修改任何文件、不要运行有副作用的命令**（如安装依赖、构建发布、删除文件）。基于工具事实给出具体可执行的方案。）`;
 
 /**
  * 交付报告生成 — 基于工具执行记录的结构化总结（PRD 验收标准第 6 条）
@@ -146,9 +169,9 @@ export function buildReport(opts: {
 
 export async function runAgent(opts: AgentRunOptions): Promise<RunResult> {
   const {
-    modelConfig, system, prompt, tools, root,
+    modelConfig, fallbackModelConfigs, system, prompt, tools, root,
     emit, requestApproval, maxSteps = 30, suggestOnly = false, abortSignal,
-    phase, suppressFinal = false,
+    phase, suppressFinal = false, initialMessages, thinkingLevel = 2,
   } = opts;
 
   const ctx: ToolContext = {
@@ -158,27 +181,87 @@ export async function runAgent(opts: AgentRunOptions): Promise<RunResult> {
     emit,
   };
 
-  // 阶段边界事件（前端按此分组展示）
-  if (phase) emit({ type: "phase-start", phase: phase.id, label: phase.label });
+  // 模型降级链（v2.2）：主模型重试耗尽 → 依次切换备用模型；切换时发事件（审计/前端徽标）
+  const chain = new ModelChain(
+    [{ provider: modelConfig.provider, model: modelConfig.model, baseURL: modelConfig.baseURL, apiKey: modelConfig.apiKey, contextWindow: modelConfig.contextWindow, thinkingLevels: modelConfig.thinkingLevels, thinkingOverride: modelConfig.thinkingOverride },
+     ...(fallbackModelConfigs ?? []).map((f) => ({
+       provider: f.provider, model: f.model, baseURL: f.baseURL, apiKey: f.apiKey, contextWindow: f.contextWindow, thinkingLevels: f.thinkingLevels, thinkingOverride: f.thinkingOverride,
+     }))],
+    { onFallback: (from, to, reason) => emit({ type: "model-fallback", from, to, reason }) }
+  );
+
+  /**
+   * v2 思考级别参数：4 档 UI → 按「当前活动模型」实际级别数映射 → 供应商协议参数。
+   * 降级切模型后参数跟随新模型；无思考能力（levels=1）不注入。
+   */
+  const thinkingParamsFor = (c: ModelCandidate): Record<string, unknown> | undefined => {
+    const levels = c.thinkingLevels ?? 1;
+    if (levels <= 1) return undefined;
+    // 小众模型：配置了 thinkingOverride 时按其每档参数注入；否则走供应商协议映射
+    return buildThinkingParamsForModel(c.provider as ProviderKind, mapThinkingLevel(thinkingLevel, levels), levels, c.thinkingOverride);
+  };
+
+  // 阶段边界事件（前端按此分组展示；model = 本阶段模型，角色路由后由编排层传入）
+  if (phase) emit({ type: "phase-start", phase: phase.id, label: phase.label, model: phase.model ?? chain.active.model });
+
+  // 方案模式（suggestOnly）允许的只读工具 + run_test（可读文件/搜索/查看/跑测试，
+  // 才能给出靠谱方案；但绝不注入任何写工具/命令工具——修改文件在架构上不可达）
+  const SUGGEST_READONLY_TOOLS = new Set([
+    "read_file", "search_code", "list_directory", "project_scan", "git_status", "git_diff", "run_test",
+  ]);
 
   // 组装 OpenAI tools 格式（zod schema → JSON Schema）
-  const openaiTools = suggestOnly
-    ? undefined
-    : Object.entries(tools).map(([name, t]) => ({
-        type: "function" as const,
-        function: {
-          name,
-          description: t.description,
-          parameters: zodToJsonSchema(t.schema),
-        },
-      }));
-  const toolExecutors = new Map(Object.entries(tools).map(([name, t]) => [name, t.execute]));
+  const allowed = suggestOnly
+    ? Object.entries(tools).filter(([name]) => SUGGEST_READONLY_TOOLS.has(name))
+    : Object.entries(tools);
+  const openaiTools = allowed.map(([name, t]) => ({
+    type: "function" as const,
+    function: {
+      name,
+      description: t.description,
+      parameters: zodToJsonSchema(t.schema),
+    },
+  }));
+  const toolExecutors = new Map(allowed.map(([name, t]) => [name, t.execute]));
 
-  // 会话消息（OpenAI 兼容格式）
-  const messages: ChatMessageLike[] = [
+  // 会话消息（OpenAI 兼容格式）：system + 重建历史（断点恢复/继续会话时注入）+ 本次 prompt
+  let messages: ChatMessageLike[] = [
     { role: "system", content: system },
+    ...(initialMessages ?? []),
     { role: "user", content: prompt },
   ];
+
+  /**
+   * v2.2 上下文压缩：估算超「当前活动模型窗口 ×80%」→ 摘要化最早部分（DB 事件流无损，
+   * 只作用于运行时 messages）。预算跟当前活动模型走——降级切模型后自动跟随。
+   */
+  const ensureContextBudget = async () => {
+    const window = resolveContextWindow({
+      provider: chain.active.provider as any,
+      model: chain.active.model,
+      contextWindow: chain.active.contextWindow, // 显式配置优先（模型弹窗可配）
+    });
+    if (estimateTokens(messages) <= window * COMPRESS_TRIGGER_RATIO) return;
+    const summarize = async (history: ChatMessageLike[]): Promise<string> => {
+      const out: string[] = [];
+      for await (const delta of streamChatWithFailover({
+        chain,
+        messages: [
+          { role: "system", content: "你是 InFu 的上下文摘要器：把历史对话压缩为简洁中文摘要，保留任务目标、关键决策、文件改动、测试结果、未完成事项；不要编造内容。" },
+          { role: "user", content: SUMMARIZE_PROMPT + serializeHistory(history) },
+        ],
+        signal: abortSignal,
+      })) {
+        if (delta.text) out.push(delta.text);
+      }
+      return out.join("").trim() || "（空摘要）";
+    };
+    const r = await compressMessages(messages, window, summarize);
+    if (r.summary) {
+      messages = r.messages;
+      emit({ type: "context-compressed", before: r.before, after: r.after, summary: r.summary });
+    }
+  };
   let toolCount = 0;
   const toolLogs: Array<{ tool: string; args: Record<string, unknown>; ok: boolean; summary: string }> = [];
   const approvals = { required: 0, approved: 0, denied: 0 };
@@ -213,6 +296,9 @@ export async function runAgent(opts: AgentRunOptions): Promise<RunResult> {
     // 阶段边界事件（前端 Timeline 按此分组）
     emit({ type: "step-start", step: step + 1 });
 
+    // v2.2 上下文压缩：超当前模型窗口预算 → 摘要化最老部分（DB 无损；预算跟当前活动模型走）
+    await ensureContextBudget();
+
     // 1) 调用模型（流式：reasoning / text / toolCalls）
     let text = "";
     let reasoningText = "";
@@ -220,13 +306,12 @@ export async function runAgent(opts: AgentRunOptions): Promise<RunResult> {
     let callError: string | null = null;
 
     try {
-      for await (const delta of streamChat({
-        baseURL: modelConfig.baseURL || "https://api.deepseek.com/v1",
-        apiKey: modelConfig.apiKey,
-        model: modelConfig.model,
+      for await (const delta of streamChatWithFailover({
+        chain,
         messages,
         tools: openaiTools,
         signal: abortSignal,
+        extraBody: thinkingParamsFor,
       })) {
         if (delta.reasoning) {
           reasoningText += delta.reasoning;
@@ -272,12 +357,12 @@ export async function runAgent(opts: AgentRunOptions): Promise<RunResult> {
       });
 
     if (!calls.length) {
-      // 建议模式兜底：模型仍可能输出工具调用格式文本（DeepSeek 实测会模仿 XML <invoke>），
+      // 方案模式兜底：模型仍可能输出写操作工具调用格式文本（DeepSeek 实测会模仿 XML <invoke>），
       // 明确提示未执行，避免用户误以为任务在跑
       let finalText = text;
       if (suggestOnly && /<tool_calls|<invoke\b|"tool_calls"/i.test(text)) {
         finalText +=
-          "\n\n⚠ 当前为「方案」模式（只出方案，不执行工具），以上工具调用格式仅为模型文本、未被执行。如需实际执行任务，请切换到「编排」或「直接」模式后重发。";
+          "\n\n⚠ 当前为「方案」模式（只读分析 + 测试，绝不修改文件），以上工具调用格式仅为模型文本、未被执行。如需实际执行修改任务，请切换到「编排」或「直接」模式后重发。";
       }
       const report = finishWithReport(step + 1);
       if (!suppressFinal) emit({ type: "done", text: finalText, toolCount, steps: step + 1 });
@@ -333,12 +418,11 @@ export async function runAgent(opts: AgentRunOptions): Promise<RunResult> {
   messages.push({ role: "user", content: finalMsg });
   try {
     let summary = "";
-    for await (const delta of streamChat({
-      baseURL: modelConfig.baseURL || "https://api.deepseek.com/v1",
-      apiKey: modelConfig.apiKey,
-      model: modelConfig.model,
+    for await (const delta of streamChatWithFailover({
+      chain,
       messages,
       signal: abortSignal,
+      extraBody: thinkingParamsFor,
     })) {
       if (delta.reasoning) emit({ type: "reasoning", text: delta.reasoning });
       if (delta.text) {

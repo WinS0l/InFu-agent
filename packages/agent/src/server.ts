@@ -18,14 +18,16 @@ import { join } from "node:path";
 import path from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import type { ModelConfig, AgentEvent, RiskLevel, InfuConfig, OrchestrateMode } from "@infu/shared";
-import { loadConfig, resolveApiKey, CONFIG_PATH } from "./providers/registry.js";
+import type { ModelConfig, AgentEvent, RiskLevel, InfuConfig, OrchestrateMode, PhaseId, ProviderConfig } from "@infu/shared";
+import { loadConfig, resolveFallbackModels, resolveRoleModel, resolveRoleThinking, toRuntimeModel, resolveBaseURL, CONFIG_PATH } from "./providers/registry.js";
 import { parseInfuConfig } from "@infu/shared";
 import { TOOLS } from "./tools/index.js";
 import { runAgent, DEFAULT_SYSTEM_PROMPT } from "./agent/loop.js";
-import { runOrchestratedTask } from "./agent/orchestrator.js";
+import { runOrchestratedTask, type OrchestratedRunOptions } from "./agent/orchestrator.js";
 import { TASK_TEMPLATES } from "./templates.js";
-import { getStore, buildContinuationPrompt, type SessionSummary } from "./db/store.js";
+import { getStore } from "./db/store.js";
+import { rebuildMessages } from "./db/rebuild.js";
+import type { ChatMessageLike } from "./providers/chat.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -102,20 +104,128 @@ export function createApp(opts: ServerOptions = {}) {
   const app = new Hono();
   const pendingApprovals = new Map<string, (approved: boolean) => void>();
   // 计划确认挂起队列（M4 计划卡片：POST /api/plan/:id 决策）
-  const pendingPlans = new Map<string, (d: { approved: boolean; plan?: string }) => void>();
+  const pendingPlans = new Map<string, (d: { plan?: string; feedback?: string; cancelled?: boolean }) => void>();
 
-  // 模型列表（脱敏）
+  // ── v2 供应商凭据（模型管理重构：一份 key 挂多个模型）──
+
+  // 供应商列表（脱敏）
+  app.get("/api/providers", (c) => {
+    const cfg = loadConfig();
+    const providers = (cfg?.providers ?? []).map((p: ProviderConfig) => ({
+      id: p.id,
+      name: p.name,
+      kind: p.kind,
+      baseURL: p.baseURL,
+      hasKey: !!(p.apiKey || process.env[`INFU_${p.kind.toUpperCase()}_API_KEY`]),
+      modelCount: cfg?.models.filter((m) => m.providerId === p.id).length ?? 0,
+    }));
+    return c.json({ providers });
+  });
+
+  // 新增供应商（模板机制：kind → baseURL 前端自动填；id 可自定义）
+  app.post("/api/providers", async (c) => {
+    const body = await c.req.json().catch(() => ({}));
+    const cfg = readConfigRaw();
+    const p: ProviderConfig = {
+      id: String(body.id || "").trim(),
+      name: String(body.name || "").trim(),
+      kind: String(body.kind || "custom") as ProviderConfig["kind"],
+    };
+    if (!p.id || !p.name) return c.json({ ok: false, message: "id/name 不能为空" }, 400);
+    if ((cfg.providers ?? []).some((x) => x.id === p.id)) {
+      return c.json({ ok: false, message: `供应商 id "${p.id}" 已存在` }, 409);
+    }
+    if (body.baseURL) p.baseURL = String(body.baseURL);
+    if (body.apiKey) p.apiKey = String(body.apiKey);
+    cfg.providers = [...(cfg.providers ?? []), p];
+    saveConfig(cfg);
+    return c.json({ ok: true, provider: p.id });
+  });
+
+  // 更新供应商（Key 只增不改，防误清）
+  app.put("/api/providers/:id", async (c) => {
+    const id = c.req.param("id");
+    const body = await c.req.json().catch(() => ({}));
+    const cfg = readConfigRaw();
+    const p = (cfg.providers ?? []).find((x) => x.id === id);
+    if (!p) return c.json({ ok: false, message: "供应商不存在" }, 404);
+    if (body.name) p.name = String(body.name);
+    if (body.kind) p.kind = body.kind as ProviderConfig["kind"];
+    if (typeof body.baseURL === "string") p.baseURL = body.baseURL || undefined;
+    if (typeof body.apiKey === "string" && body.apiKey.trim()) p.apiKey = body.apiKey.trim();
+    saveConfig(cfg);
+    return c.json({ ok: true });
+  });
+
+  // 删除供应商（连带删除引用它的模型；默认模型迁移到剩余第一个）
+  app.delete("/api/providers/:id", async (c) => {
+    const id = c.req.param("id");
+    const cfg = readConfigRaw();
+    if (!(cfg.providers ?? []).some((x) => x.id === id)) {
+      return c.json({ ok: false, message: "供应商不存在" }, 404);
+    }
+    cfg.providers = (cfg.providers ?? []).filter((x) => x.id !== id);
+    cfg.models = cfg.models.filter((m) => m.providerId !== id);
+    if (cfg.defaultModelId && !cfg.models.some((m) => m.id === cfg.defaultModelId)) {
+      cfg.defaultModelId = cfg.models[0]?.id;
+    }
+    saveConfig(cfg);
+    return c.json({ ok: true });
+  });
+
+  // 从上游获取模型列表（OpenAI 兼容 GET {baseURL}/models；v2 勾选启用）
+  app.post("/api/providers/:id/models", async (c) => {
+    const id = c.req.param("id");
+    const cfg = readConfigRaw();
+    const p = (cfg.providers ?? []).find((x) => x.id === id);
+    if (!p) return c.json({ ok: false, message: "供应商不存在" }, 404);
+    const key = p.apiKey || process.env[`INFU_${p.kind.toUpperCase()}_API_KEY`];
+    const base = resolveBaseURL(p.kind, p.baseURL);
+    if (!base) return c.json({ ok: false, message: "供应商缺少 API 地址（baseURL）" }, 400);
+    try {
+      const res = await fetch(`${base.replace(/\/+$/, "")}/models`, {
+        headers: key ? { authorization: `Bearer ${key}` } : {},
+        signal: AbortSignal.timeout(15000),
+      });
+      if (!res.ok) {
+        return c.json({ ok: false, message: `上游返回 ${res.status}：${(await res.text()).slice(0, 200)}` }, 502);
+      }
+      const data = (await res.json()) as { data?: Array<{ id?: string; name?: string }> };
+      const list = Array.isArray(data.data)
+        ? data.data.map((m) => ({
+            id: String(m.id ?? ""),
+            name: String(m.name ?? m.id ?? ""),
+          }))
+        : [];
+      return c.json({ ok: true, models: list.filter((m: { id: string }) => m.id) });
+    } catch (e) {
+      return c.json(
+        { ok: false, message: `获取模型列表失败：${(e as Error).message.slice(0, 150)}（部分端点不支持 /models）` },
+        502
+      );
+    }
+  });
+
+  // 模型列表（脱敏；v2：kind/端点/key 状态经供应商凭据解析）
   app.get("/api/models", (c) => {
     const cfg = loadConfig();
-    const models = (cfg?.models ?? []).map((m: ModelConfig) => ({
-      id: m.id,
-      name: m.name,
-      provider: m.provider,
-      model: m.model,
-      baseURL: m.baseURL,
-      hasKey: !!(m.apiKey || process.env[`INFU_${m.provider.toUpperCase()}_API_KEY`]),
-      isDefault: m.id === cfg?.defaultModelId,
-    }));
+    const models = (cfg?.models ?? []).map((m: ModelConfig) => {
+      const p = cfg?.providers?.find((x) => x.id === m.providerId);
+      const kind = p?.kind ?? m.provider ?? "custom";
+      return {
+        id: m.id,
+        name: m.name,
+        provider: kind,
+        providerId: m.providerId,
+        model: m.model,
+        baseURL: p?.baseURL ?? m.baseURL,
+        hasKey: !!((p?.apiKey ?? m.apiKey) || process.env[`INFU_${kind.toUpperCase()}_API_KEY`]),
+        isDefault: m.id === cfg?.defaultModelId,
+        fallbackModelIds: m.fallbackModelIds,
+        contextWindow: m.contextWindow,
+        thinkingLevels: m.thinkingLevels,
+      };
+    });
     return c.json({ models, configPath: CONFIG_PATH });
   });
 
@@ -126,13 +236,20 @@ export function createApp(opts: ServerOptions = {}) {
     const m: ModelConfig = {
       id: String(body.id || "").trim(),
       name: String(body.name || "").trim(),
-      provider: String(body.provider || "custom") as ModelConfig["provider"],
       model: String(body.model || "").trim(),
+      // v2：providerId 引用供应商凭据；v1 遗留字段兼容
+      ...(typeof body.provider === "string" && body.provider ? { provider: body.provider as ModelConfig["provider"] } : {}),
+      ...(typeof body.providerId === "string" && body.providerId ? { providerId: body.providerId } : {}),
     };
     if (!m.id || !m.name || !m.model) return c.json({ ok: false, message: "id/name/model 不能为空" }, 400);
     if (cfg.models.some((x) => x.id === m.id)) return c.json({ ok: false, message: `模型 id "${m.id}" 已存在` }, 409);
     if (body.baseURL) m.baseURL = String(body.baseURL);
     if (body.apiKey) m.apiKey = String(body.apiKey);
+    if (Array.isArray(body.fallbackModelIds)) m.fallbackModelIds = body.fallbackModelIds.map(String);
+    // v2 上下文窗口/思考级别（缺省自动推断；0 = 清除）
+    if (typeof body.contextWindow === "number") m.contextWindow = body.contextWindow > 0 ? body.contextWindow : undefined;
+    if (typeof body.thinkingLevels === "number") m.thinkingLevels = body.thinkingLevels > 0 ? body.thinkingLevels : undefined;
+    if (Array.isArray(body.thinkingOverride)) m.thinkingOverride = body.thinkingOverride;
     cfg.models.push(m);
     if (!cfg.defaultModelId) cfg.defaultModelId = m.id;
     saveConfig(cfg);
@@ -149,7 +266,21 @@ export function createApp(opts: ServerOptions = {}) {
     if (body.name) m.name = String(body.name);
     if (body.model) m.model = String(body.model);
     if (body.provider) m.provider = body.provider as ModelConfig["provider"];
+    if (body.providerId) m.providerId = String(body.providerId);
     if (typeof body.baseURL === "string") m.baseURL = body.baseURL || undefined;
+    // 备用模型（v2.2 降级链）
+    if (Array.isArray(body.fallbackModelIds)) {
+      const ids = body.fallbackModelIds.map(String).filter(Boolean);
+      m.fallbackModelIds = ids.length ? ids : undefined;
+    }
+    // 上下文窗口/思考级别（v2 压缩预算与思考映射；0/空 = 清除恢复自动）
+    if (typeof body.contextWindow === "number") {
+      m.contextWindow = body.contextWindow > 0 ? body.contextWindow : undefined;
+    }
+    if (typeof body.thinkingLevels === "number") {
+      m.thinkingLevels = body.thinkingLevels > 0 ? body.thinkingLevels : undefined;
+    }
+    if (Array.isArray(body.thinkingOverride)) m.thinkingOverride = body.thinkingOverride;
     // ⚠️ Key 只增不改：空字符串/缺省时保持原 Key 不变（防止编辑表单误清 Key）
     if (typeof body.apiKey === "string" && body.apiKey.trim()) {
       m.apiKey = String(body.apiKey).trim();
@@ -178,6 +309,46 @@ export function createApp(opts: ServerOptions = {}) {
     return c.json({ ok: true });
   });
 
+  // ── v2.3 角色路由（Web 面板：每角色 模型 + 独立思考级别）──
+
+  // 当前角色配置（脱敏：模型 id + 思考级别；面板初始化）
+  app.get("/api/roles", (c) => {
+    const cfg = loadConfig();
+    const roles = (["planner", "executor", "reviewer"] as const).map((role) => {
+      const ref = cfg?.roles?.[role];
+      const modelId = typeof ref === "string" ? ref : ref?.model;
+      return {
+        role,
+        modelId: cfg?.models.some((m) => m.id === modelId) ? modelId : undefined,
+        thinkingLevel: typeof ref === "object" && ref.thinkingLevel ? ref.thinkingLevel : undefined,
+      };
+    });
+    return c.json({ roles });
+  });
+
+  // 保存角色配置（body: { planner?: { model?: string; thinkingLevel?: number }, ... }；缺省清除该角色）
+  app.put("/api/roles", async (c) => {
+    const body = await c.req.json().catch(() => ({}));
+    const cfg = readConfigRaw();
+    const roles: NonNullable<InfuConfig["roles"]> = {};
+    for (const role of ["planner", "executor", "reviewer"] as const) {
+      const r = body[role];
+      if (!r || typeof r !== "object") continue; // 缺省 = 清除
+      const modelId = typeof r.model === "string" && r.model ? r.model : undefined;
+      const thinkingLevel = typeof r.thinkingLevel === "number" && r.thinkingLevel >= 1 && r.thinkingLevel <= 4
+        ? Math.round(r.thinkingLevel)
+        : undefined;
+      if (!modelId && thinkingLevel == null) continue;
+      if (modelId && !cfg.models.some((m) => m.id === modelId)) {
+        return c.json({ ok: false, message: `角色 ${role} 指定了不存在的模型 "${modelId}"` }, 400);
+      }
+      roles[role] = thinkingLevel != null ? { model: modelId ?? cfg.defaultModelId ?? "", thinkingLevel } : modelId!;
+    }
+    cfg.roles = Object.keys(roles).length ? roles : undefined;
+    saveConfig(cfg);
+    return c.json({ ok: true, roles: cfg.roles });
+  });
+
   // Agent 任务（SSE）
   app.post("/api/chat", (c) => {
     return streamSSE(c, async (stream) => {
@@ -190,7 +361,21 @@ export function createApp(opts: ServerOptions = {}) {
       const body = await c.req.json().catch(() => ({}));
       const prompt: string = body.prompt || "";
       const modelId: string | undefined = body.modelId;
+      const fallbackModelIds: string[] | undefined = Array.isArray(body.fallbackModelIds)
+        ? body.fallbackModelIds.map(String)
+        : undefined;
+      // v2.2 轻量模型选择：按角色指定模型（planner/executor/reviewer）
+      const roleModelIds: { planner?: string; executor?: string; reviewer?: string } =
+        body.roleModelIds && typeof body.roleModelIds === "object" ? body.roleModelIds : {};
       const maxSteps: number | undefined = typeof body.maxSteps === "number" ? body.maxSteps : undefined;
+      // v2 思考级别（4 档 UI，按模型实际级别数自动映射；缺省 2）
+      const thinkingLevel: number | undefined =
+        typeof body.thinkingLevel === "number" && body.thinkingLevel >= 1 && body.thinkingLevel <= 4
+          ? Math.round(body.thinkingLevel)
+          : undefined;
+      // v2.2 动态步数：模板任务 id（启发式参考）
+      const templateId: string | undefined =
+        typeof body.templateId === "string" && body.templateId ? body.templateId : undefined;
       // 分层编排（M4）：默认 full（Planner→Executor→Reviewer）；计划默认需用户确认
       const orchestrate: OrchestrateMode =
         body.orchestrate === "off" || body.orchestrate === "plan" || body.orchestrate === "full"
@@ -222,15 +407,17 @@ export function createApp(opts: ServerOptions = {}) {
         typeof body.sessionId === "string" && body.sessionId ? body.sessionId : undefined;
       let root: string = body.root || opts.defaultRoot || process.cwd();
       let effectivePrompt = prompt;
+      // v2.2 断点恢复：继续会话 = 从事件流重建完整 messages（工具结果直接来自 DB，不重放副作用）
+      let initialMessages: ChatMessageLike[] | undefined;
       if (sessionId) {
-        // 继续会话：校验存在 + 历史回顾注入 + 沿用历史 root/model
+        // 继续会话：校验存在 + 消息级重建 + 沿用历史 root/model
         const s = store.getSession(sessionId);
         if (!s) {
           await stream.writeSSE({ event: "error", data: JSON.stringify({ message: `会话不存在: ${sessionId}` }) });
           return;
         }
         if (!body.root && s.root) root = s.root;
-        effectivePrompt = buildContinuationPrompt(store.summarizeSession(sessionId), prompt);
+        initialMessages = rebuildMessages(store.getEvents(sessionId));
       } else {
         // 新会话：SSE 首帧回传会话 id（Web 绑定 activeSessionId）
         const title = prompt.slice(0, 40);
@@ -261,6 +448,21 @@ export function createApp(opts: ServerOptions = {}) {
         (modelId ? models.find((m) => m.id === modelId && m.apiKey) ?? models.find((m) => m.id === modelId) : undefined) ||
         models.find((m) => m.apiKey) ||
         models[0];
+      // v2.2 降级链：显式指定优先，否则用模型自身 fallbackModelIds（去重/跳过自身/未知 id）
+      const fallbackModels = resolveFallbackModels(config, modelCfg, fallbackModelIds);
+      // v2.2 角色路由：各角色独立模型 + 各自降级链（未指定角色 → 默认模型）
+      const roleModelConfigs: OrchestratedRunOptions["roleModelConfigs"] = {};
+      // v2.3 角色独立思考级别：角色级优先于全局 thinkingLevel
+      const roleThinking: Partial<Record<PhaseId, number>> = {};
+      for (const phase of ["planner", "executor", "reviewer"] as const) {
+        const rm = resolveRoleModel(config, modelCfg, phase, roleModelIds[phase]);
+        roleModelConfigs[phase] = {
+          modelConfig: toRuntimeModel(config, rm),
+          fallbackModelConfigs: resolveFallbackModels(config, rm).map((m) => toRuntimeModel(config, m)),
+        };
+        const rt = resolveRoleThinking(config, phase);
+        if (rt != null) roleThinking[phase] = rt;
+      }
 
       const emit = (e: AgentEvent) => {
         logEvent(e); // 后台日志（窗口 + 文件）
@@ -285,17 +487,20 @@ export function createApp(opts: ServerOptions = {}) {
         });
       };
 
-      // 计划确认（Web 计划卡片）：emit plan 事件 → 挂 pending → 等 POST /api/plan/:id
-      // 连接中断（停止）时自动视为拒绝并释放
+      // 计划确认（Web 计划卡片 v2.3）：emit plan 事件 → 挂 pending → 等 POST /api/plan/:id
+      // 返回 { plan?, feedback } 或 null（用户取消 = 中止任务）；连接中断（停止）时视为取消
       const confirmPlan = async (planText: string) => {
         const id = randomUUID();
         emit({ type: "plan", id, content: planText });
-        return new Promise<{ approved: boolean; editedPlan?: string }>((resolve) => {
-          pendingPlans.set(id, (d) => resolve({ approved: d.approved, editedPlan: d.plan }));
+        return new Promise<{ plan?: string; feedback: string } | null>((resolve) => {
+          pendingPlans.set(id, (d) => {
+            if (d.cancelled) resolve(null);
+            else resolve({ plan: d.plan, feedback: d.feedback ?? "批准执行" });
+          });
           controller.signal.addEventListener(
             "abort",
             () => {
-              if (pendingPlans.delete(id)) resolve({ approved: false });
+              if (pendingPlans.delete(id)) resolve(null);
             },
             { once: true }
           );
@@ -304,12 +509,12 @@ export function createApp(opts: ServerOptions = {}) {
 
       try {
         const modelRun = {
-          modelConfig: {
-            provider: modelCfg.provider,
-            model: modelCfg.model,
-            baseURL: modelCfg.baseURL,
-            apiKey: resolveApiKey(modelCfg),
-          },
+          modelConfig: toRuntimeModel(config, modelCfg),
+          fallbackModelConfigs: fallbackModels.map((m) => toRuntimeModel(config, m)),
+          roleModelConfigs,
+          roleThinking,
+          initialMessages,
+          thinkingLevel,
           prompt,
           root,
           emit,
@@ -330,6 +535,7 @@ export function createApp(opts: ServerOptions = {}) {
               orchestrate,
               planApproval,
               confirmPlan,
+              templateId,
             });
         await stream.writeSSE({ event: "done", data: JSON.stringify({ final: final.text }) });
         store.updateStatus(sessionId, "done");
@@ -415,17 +621,21 @@ export function createApp(opts: ServerOptions = {}) {
     return c.json({ ok: true });
   });
 
-  // 计划确认入口（Web 计划卡片：批准/拒绝，plan 为编辑后的计划文本）
+  // 计划确认入口（v2.3 计划卡片：提交 = {plan?, feedback}；取消 = {cancelled: true}）
   app.post("/api/plan/:id", async (c) => {
     const id = c.req.param("id");
     const body = await c.req.json().catch(() => ({}));
     const resolve = pendingPlans.get(id);
     if (!resolve) return c.json({ ok: false, message: "计划不存在或已过期" });
     pendingPlans.delete(id);
-    resolve({
-      approved: !!body.approved,
-      plan: typeof body.plan === "string" ? body.plan : undefined,
-    });
+    if (body.cancelled === true) {
+      resolve({ cancelled: true });
+    } else {
+      resolve({
+        plan: typeof body.plan === "string" && body.plan.trim() ? body.plan : undefined,
+        feedback: typeof body.feedback === "string" && body.feedback.trim() ? body.feedback.trim() : "批准执行",
+      });
+    }
     return c.json({ ok: true });
   });
 
@@ -511,16 +721,23 @@ function checkConfigHealth() {
     console.log(`[infu-agent]    配置方法：运行 npm run config（交互式向导）`);
     return;
   }
-  const withKey = models.filter(
-    (m) => m.apiKey || process.env[`INFU_${m.provider.toUpperCase()}_API_KEY`]
-  );
-  const withBaseURL = models.filter((m) => m.baseURL || m.provider !== "custom");
-  const usable = withKey.filter((m) => m.baseURL || m.provider !== "custom");
+  // v2：key/端点经供应商凭据解析（v1 遗留模型兼容内嵌字段）
+  const keyOf = (m: ModelConfig) =>
+    cfg?.providers?.find((p) => p.id === m.providerId)?.apiKey ||
+    m.apiKey ||
+    process.env[`INFU_${(m.provider ?? "custom").toUpperCase()}_API_KEY`];
+  const kindOf = (m: ModelConfig) =>
+    cfg?.providers?.find((p) => p.id === m.providerId)?.kind ?? m.provider ?? "custom";
+  const baseOf = (m: ModelConfig) =>
+    cfg?.providers?.find((p) => p.id === m.providerId)?.baseURL ?? m.baseURL;
+  const withKey = models.filter((m) => keyOf(m));
+  const withBaseURL = models.filter((m) => baseOf(m) || kindOf(m) !== "custom");
+  const usable = withKey.filter((m) => baseOf(m) || kindOf(m) !== "custom");
   if (usable.length) {
-    console.log(`[infu-agent] ✅ 模型就绪：${usable.map((m) => `${m.name}（${m.provider}/${m.model}）`).join("、")}`);
+    console.log(`[infu-agent] ✅ 模型就绪：${usable.map((m) => `${m.name}（${kindOf(m)}/${m.model}）`).join("、")}`);
   } else {
     console.log(`[infu-agent] ⚠️ 已配置 ${models.length} 个模型，但均未设置 API Key！`);
-    console.log(`[infu-agent]    配置方法：npm run config → 选 [k] 修改 API Key`);
+    console.log(`[infu-agent]    配置方法：模型管理 → 供应商 → 编辑 API Key`);
     console.log(`[infu-agent]    或编辑 ${CONFIG_PATH} 填入 apiKey（或用环境变量 INFU_<供应商>_API_KEY）`);
   }
   if (!withBaseURL.length) {

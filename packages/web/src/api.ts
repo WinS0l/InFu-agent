@@ -165,6 +165,11 @@ export const updatePlugin = (id: string, body: { path?: string; enabled?: boolea
   providerApi(`/api/plugins/${encodeURIComponent(id)}`, "PUT", body);
 export const deletePlugin = (id: string) => providerApi(`/api/plugins/${encodeURIComponent(id)}`, "DELETE");
 
+/** 生成带钩子的插件（v2.4：设置界面「新建钩子」——钩子是插件属性；写入 ~/.infu/plugins/<id>.mjs 并注册） */
+export async function generatePlugin(body: { id: string; code: string; path?: string }): Promise<{ plugin: string; path: string }> {
+  return providerApi("/api/plugins/generate", "POST", body);
+}
+
 // ── v2.3 批 2 技能管理（SKILL.md 社区标准）──
 
 export interface SkillInfo {
@@ -183,6 +188,114 @@ export async function fetchSkills(): Promise<SkillInfo[]> {
 
 export const addSkill = (body: { name: string; path?: string }) => providerApi("/api/skills", "POST", body);
 export const deleteSkill = (name: string) => providerApi(`/api/skills/${encodeURIComponent(name)}`, "DELETE");
+
+// ── v2.4 设置界面（配置系统 UI 化：权限等级 / 沙箱等级 / 常规 / 外观）──
+
+export type ApprovalMode = "auto" | "smart" | "confirm";
+export type SandboxModeValue = "auto" | "off" | "soft" | "restricted" | "docker";
+
+export interface ToolRiskOverrideInput {
+  tool: string;
+  risk?: RiskLevel;
+  disabled?: boolean;
+}
+
+export interface SettingsConfig {
+  approvalPolicy: {
+    mode?: ApprovalMode;
+    toolOverrides?: ToolRiskOverrideInput[];
+    commandAllowlist?: string[];
+  };
+  sandbox: {
+    mode?: SandboxModeValue;
+    /** 沙箱可用性（服务端检测；UI 标注「当前机器不可用」） */
+    dockerAvailable?: boolean;
+    winRestrictedOk?: boolean;
+  };
+  general: { defaultRoot?: string };
+  appearance: { fontSize?: "xs" | "sm" | "base"; streamCursor?: boolean };
+  defaultModelId: string | null;
+}
+
+/** 读取设置四节（权限/沙箱/常规/外观 + 默认模型） */
+export async function fetchConfig(): Promise<SettingsConfig> {
+  const res = await fetch("/api/config");
+  if (!res.ok) throw new Error(`设置加载失败: ${res.status}`);
+  return res.json();
+}
+
+/** 保存设置（服务端白名单：只接受四节 + defaultModelId；写入后落盘 ~/.infu/config.json） */
+export async function updateConfig(
+  body: Partial<Pick<SettingsConfig, "approvalPolicy" | "sandbox" | "general" | "appearance">> & { defaultModelId?: string | null }
+) {
+  const res = await fetch("/api/config", {
+    method: "PUT",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  const data = await res.json();
+  if (!res.ok || data.ok === false) throw new Error(data.message || `保存设置失败: ${res.status}`);
+  return data;
+}
+
+// ── v2.4 批 2 Web 交互式终端（node-pty；高危命令审批 + 全量审计）──
+
+export interface TerminalSessionInfo {
+  id: string;
+  cwd: string;
+  shell: string;
+  pid: number;
+}
+
+/** 创建终端会话（cwd = 项目根；shell 可选 cmd/powershell/bash） */
+export async function terminalStart(cwd?: string, shell?: string): Promise<TerminalSessionInfo> {
+  const res = await fetch("/api/terminal", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ cwd, shell }),
+  });
+  const data = await res.json();
+  if (!res.ok || data.ok === false) throw new Error(data.message || `终端创建失败: ${res.status}`);
+  return data;
+}
+
+export interface TerminalInputResult {
+  ok: boolean;
+  /** 高危命令拦截：true 表示需人工确认后带 confirmed 重发 */
+  requireApproval?: boolean;
+  risk?: RiskLevel;
+  description?: string;
+  message?: string;
+}
+
+/** 写入输入（命令级：command 字段供服务端高危检测与审计） */
+export async function terminalInput(
+  id: string,
+  body: { data: string; command?: string; confirmed?: boolean }
+): Promise<TerminalInputResult> {
+  const res = await fetch(`/api/terminal/${encodeURIComponent(id)}/input`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  const data = await res.json();
+  if (res.status === 404) throw new Error(data.message || "终端会话不存在");
+  return data;
+}
+
+/** 同步 PTY 尺寸（xterm fit 后调用） */
+export async function terminalResize(id: string, cols: number, rows: number) {
+  await fetch(`/api/terminal/${encodeURIComponent(id)}/resize`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ cols, rows }),
+  });
+}
+
+/** 终止会话（kill 进程树） */
+export async function terminalKill(id: string) {
+  await fetch(`/api/terminal/${encodeURIComponent(id)}`, { method: "DELETE" });
+}
 
 /** 模板任务列表（小白引导） */
 export async function fetchTemplates(): Promise<TaskTemplate[]> {

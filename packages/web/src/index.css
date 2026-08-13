@@ -45,6 +45,13 @@ body {
 }
 @keyframes blink { 50% { opacity: 0; } }
 
+/* v2.4 外观设置（html data 属性由 App 按 store.appearance 应用）：
+   字号 = root rem 缩放（Tailwind rem 基准 16px，sm 为默认 15px 微缩）；流式光标可关 */
+html[data-font-size="xs"] { font-size: 14px; }
+html[data-font-size="sm"] { font-size: 15px; }
+html[data-font-size="base"] { font-size: 16px; }
+html[data-stream-cursor="off"] .stream-cursor::after { display: none; }
+
 /* 工具卡片闪烁 */
 @keyframes pulse-glow {
   0%, 100% { box-shadow: 0 0 0 0 rgba(34, 197, 94, 0); }

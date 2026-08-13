@@ -10,12 +10,10 @@
  *  - 校验与 CLI（infu mcp add）/ API 完全一致：id 生成/command 或 url 非空/重名拒绝
  */
 
-import { mkdirSync, writeFileSync, readFileSync, existsSync } from "node:fs";
-import { homedir } from "node:os";
-import { join } from "node:path";
+import { readFileSync, existsSync } from "node:fs";
 import type { InfuConfig, McpServerConfig, RiskLevel } from "@infu/shared";
 import { parseInfuConfig } from "@infu/shared";
-import { CONFIG_PATH } from "../providers/registry.js";
+import { CONFIG_PATH, saveConfig } from "../providers/registry.js";
 
 export interface RegisterInput {
   name: string;
@@ -86,9 +84,4 @@ export function readConfig(): InfuConfig {
   } catch {
     return { models: [] };
   }
-}
-
-function saveConfig(cfg: InfuConfig) {
-  mkdirSync(join(homedir(), ".infu"), { recursive: true });
-  writeFileSync(CONFIG_PATH, JSON.stringify({ ...cfg, version: cfg.version ?? 1 }, null, 2), "utf-8");
 }

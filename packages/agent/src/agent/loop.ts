@@ -22,6 +22,7 @@ import {
   compressMessages, estimateTokens, serializeHistory, SUMMARIZE_PROMPT,
   COMPRESS_TRIGGER_RATIO,
 } from "./context.js";
+import { currentApprovalPolicy, isToolDisabled, resolveToolRisk } from "../approval/policy.js";
 
 export interface AgentRunOptions {
   /** 模型配置（provider/model/baseURL/apiKey） */
@@ -435,7 +436,16 @@ export async function runAgent(opts: AgentRunOptions): Promise<RunResult> {
         });
         continue;
       }
-      const risk = tools[call.toolName]?.risk ?? "low";
+      // v2.4 审批策略：工具级覆盖统一生效（禁用拦截 + 风险覆盖；对全部工具含 MCP/插件）
+      const policy = currentApprovalPolicy();
+      if (isToolDisabled(call.toolName, policy.toolOverrides)) {
+        const msg = `错误：工具 ${call.toolName} 已被审批策略禁用`;
+        emit({ type: "tool-result", tool: call.toolName, ok: false, summary: msg, callId: call.toolCallId });
+        toolLogs.push({ tool: call.toolName, args: call.input, ok: false, summary: msg });
+        toolResultParts.push({ role: "tool", tool_call_id: call.toolCallId, content: msg });
+        continue;
+      }
+      const risk = resolveToolRisk(call.toolName, tools[call.toolName]?.risk ?? "low", policy.toolOverrides);
       emit({ type: "tool-start", tool: call.toolName, args: call.input, risk, callId: call.toolCallId });
       toolCount++;
       // ── preToolUse 钩子（插件注册；block → 不执行返回拒绝文本；args 可改写；抛错放行不阻塞）──

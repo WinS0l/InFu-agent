@@ -1,11 +1,12 @@
 /**
- * InFu 沙箱模块 — L1 软沙箱（默认，零依赖）+ L2 Docker 沙箱
+ * InFu 沙箱模块 — L1 软沙箱（默认，零依赖）+ L1.5 Windows 受限（Rust N-API）+ L2 Docker 沙箱
  *
  * 依据 docs/SANDBOX.md 调研结论实现：
  *  - L1：环境变量消毒 / 敏感路径写保护 / 命令审计 / 工作区约束
+ *  - L1.5：Windows 受限令牌 + Job Object（packages/sandbox-rs，win32 可用时优先）
  *  - L2：Docker 容器（默认断网、只读挂载、资源限制、任务后销毁、凭据不进容器）
  *
- * 模式：INFU_SANDBOX=auto（默认，有 Docker 用 L2）| soft | docker | off
+ * 模式（v2.4：配置优先于环境变量）：auto（默认，按可用性自动选择）| off | soft(L1) | restricted(L1.5) | docker(L2)
  */
 
 import { execFile } from "node:child_process";
@@ -14,10 +15,13 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { appendFileSync, mkdirSync } from "node:fs";
+import type { InfuConfig } from "@infu/shared";
 
 const execFileAsync = promisify(execFile);
 
-export type SandboxMode = "auto" | "soft" | "docker" | "off";
+export type SandboxMode = "auto" | "off" | "soft" | "restricted" | "docker";
+
+export const SANDBOX_MODES: SandboxMode[] = ["auto", "off", "soft", "restricted", "docker"];
 
 /** 环境变量消毒：剔除敏感凭据（防沙箱/子进程读取宿主密钥） */
 export function sanitizeEnv(env: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
@@ -59,12 +63,12 @@ export function isProtectedPath(abs: string): string | null {
 
 /** 命令审计日志 */
 export const COMMAND_LOG = path.join(os.homedir(), ".infu", "logs", "commands.log");
-export function auditCommand(cwd: string, command: string, ok: boolean, detail: string, sandbox = "") {
+export function auditCommand(cwd: string, command: string, ok: boolean, detail: string, sandbox = "", logPath = COMMAND_LOG) {
   try {
-    mkdirSync(path.dirname(COMMAND_LOG), { recursive: true });
+    mkdirSync(path.dirname(logPath), { recursive: true });
     const tag = sandbox ? ` | sandbox=${sandbox}` : "";
     const line = `[${new Date().toISOString()}] ${ok ? "OK " : "ERR"} | cwd=${cwd} | ${command.slice(0, 200)} | ${detail.slice(0, 120)}${tag}`;
-    appendFileSync(COMMAND_LOG, line + "\n", "utf-8");
+    appendFileSync(logPath, line + "\n", "utf-8");
   } catch {
     /* 审计失败不影响主流程 */
   }
@@ -118,8 +122,38 @@ export function buildDockerArgs(
   ];
 }
 
-/** 解析沙箱模式 */
-export function resolveSandboxMode(env: NodeJS.ProcessEnv = process.env): SandboxMode {
-  const v = (env.INFU_SANDBOX || "auto").toLowerCase() as SandboxMode;
-  return ["auto", "soft", "docker", "off"].includes(v) ? v : "auto";
+/**
+ * 解析沙箱模式（v2.4）：环境变量 INFU_SANDBOX 显式设置时优先（运行时临时覆盖，
+ * 兼容既有脚本/测试），否则 config.sandbox.mode，否则 auto。
+ */
+export function resolveSandboxMode(
+  env: NodeJS.ProcessEnv = process.env,
+  config?: Pick<InfuConfig, "sandbox"> | null
+): SandboxMode {
+  const envVal = (env.INFU_SANDBOX || "").toLowerCase() as SandboxMode;
+  if (SANDBOX_MODES.includes(envVal)) return envVal;
+  const cfgVal = config?.sandbox?.mode;
+  if (cfgVal && SANDBOX_MODES.includes(cfgVal)) return cfgVal;
+  return "auto";
+}
+
+/**
+ * 档位 → 实际执行档（纯函数，便于测试）：
+ * - auto：docker 可用 → docker；否则 win32 且受限可用 → restricted；否则 soft
+ * - restricted：win32 且受限可用 → restricted；否则降级 soft（显式选择但本机不支持）
+ * - docker / soft / off：原样（显式 docker 不可用时由执行层报错，不静默降级）
+ */
+export function resolveEffectiveMode(
+  mode: SandboxMode,
+  opts: { dockerOk: boolean; winRestrictedOk: boolean; platform: NodeJS.Platform }
+): SandboxMode {
+  if (mode === "auto") {
+    if (opts.dockerOk) return "docker";
+    if (opts.platform === "win32" && opts.winRestrictedOk) return "restricted";
+    return "soft";
+  }
+  if (mode === "restricted") {
+    return opts.platform === "win32" && opts.winRestrictedOk ? "restricted" : "soft";
+  }
+  return mode;
 }

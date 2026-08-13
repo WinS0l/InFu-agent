@@ -162,12 +162,18 @@ export function inferCapabilities(cfg: ModelConfig): NonNullable<ModelConfig["ca
 }
 
 /** 读取用户配置（~/.infu/config.json；zod schema 校验 + v1 在线迁移 + 损坏备份） */
-import { readFileSync, existsSync, copyFileSync } from "node:fs";
+import { readFileSync, existsSync, copyFileSync, mkdirSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { parseInfuConfig } from "@infu/shared";
 
 export const CONFIG_PATH = join(homedir(), ".infu", "config.json");
+
+/** 安全写入配置（v2.1 起带 schema 版本号；v2.4 统一收敛：server/cli/mcp-register/plugin-register 共用本实现） */
+export function saveConfig(cfg: InfuConfig): void {
+  mkdirSync(join(homedir(), ".infu"), { recursive: true });
+  writeFileSync(CONFIG_PATH, JSON.stringify({ ...cfg, version: cfg.version ?? 1 }, null, 2), "utf-8");
+}
 
 export function loadConfig(): InfuConfig | null {
   if (!existsSync(CONFIG_PATH)) return null;

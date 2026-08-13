@@ -5,12 +5,11 @@
  * 审批由调用方（plugin_add 工具）负责 high + requireExplicit。
  */
 
-import { mkdirSync, writeFileSync, readFileSync, existsSync } from "node:fs";
-import { homedir } from "node:os";
-import { join, resolve } from "node:path";
+import { readFileSync, existsSync } from "node:fs";
+import { resolve } from "node:path";
 import type { InfuConfig, PluginConfig } from "@infu/shared";
 import { parseInfuConfig } from "@infu/shared";
-import { CONFIG_PATH } from "../providers/registry.js";
+import { CONFIG_PATH, saveConfig } from "../providers/registry.js";
 
 export interface RegisterPluginInput {
   id: string;
@@ -49,9 +48,4 @@ export function readConfig(): InfuConfig {
   } catch {
     return { models: [] };
   }
-}
-
-function saveConfig(cfg: InfuConfig) {
-  mkdirSync(join(homedir(), ".infu"), { recursive: true });
-  writeFileSync(CONFIG_PATH, JSON.stringify({ ...cfg, version: cfg.version ?? 1 }, null, 2), "utf-8");
 }

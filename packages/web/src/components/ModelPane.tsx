@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import {
-  Plus, Pencil, Trash2, Star, X, KeyRound, Loader2, Server, Cpu, RefreshCw, Check, Workflow,
+  Plus, Pencil, Trash2, Star, Loader2, Server, Cpu, RefreshCw, Check, Workflow,
 } from "lucide-react";
 import { useStore } from "../store";
 import { fetchModels, fetchProviders, addProvider, updateProvider, deleteProvider, fetchProviderModels, fetchRoles, saveRoles, type ProviderInfo, type RoleConfig } from "../api";
@@ -68,8 +68,8 @@ function fmtWin(n?: number): string {
   return n >= 1000 ? `${(n / 1000).toFixed(n >= 10000 ? 0 : 1)}k` : String(n);
 }
 
-/** 模型管理弹窗（v2：供应商凭据 + 上游模型 + 思考级别） */
-export default function ModelManagerModal({ onClose }: { onClose: () => void }) {
+/** 模型管理内容面板（v2：供应商凭据 + 上游模型 + 思考级别；v2.4 内嵌进设置弹窗「模型设置」Tab） */
+export default function ModelPane() {
   // 当前任务选择的模型（顶栏/输入框选择器；角色未指定时跟随它，而非 config 静态默认）
   const { modelId: currentModelId } = useStore();
   const [tab, setTab] = useState<"providers" | "models">("providers");
@@ -300,36 +300,26 @@ export default function ModelManagerModal({ onClose }: { onClose: () => void }) 
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm" onClick={onClose}>
-      <div className="flex max-h-[85vh] w-[680px] max-w-[94vw] flex-col rounded-xl border border-line bg-panel shadow-2xl" onClick={(e) => e.stopPropagation()}>
-        <div className="flex items-center gap-2 border-b border-line px-4 py-3">
-          <KeyRound className="h-4 w-4 text-accent" />
-          <span className="text-sm font-semibold">模型管理</span>
-          <span className="text-[11px] text-sub">供应商凭据 + 上游模型（~/.infu/config.json）</span>
-          <button className="ml-auto cursor-pointer text-sub transition-colors hover:text-text" onClick={onClose} title="关闭">
-            <X className="h-4 w-4" />
+    <div>
+      {/* Tab 切换（供应商 / 模型） */}
+      <div className="flex gap-1 border-b border-line">
+        {([["providers", "供应商", Server], ["models", "模型", Cpu]] as const).map(([key, label, Icon]) => (
+          <button
+            key={key}
+            className={`flex cursor-pointer items-center gap-1.5 rounded-t-md px-3 py-1.5 text-xs transition-colors ${
+              tab === key ? "border-b-2 border-accent bg-accent/10 text-accent" : "text-sub hover:text-text"
+            }`}
+            onClick={() => setTab(key)}
+          >
+            <Icon className="h-3.5 w-3.5" />
+            {label}
+            {key === "models" && models.length > 0 && <span className="rounded bg-muted px-1 text-[9px]">{models.length}</span>}
           </button>
-        </div>
+        ))}
+      </div>
 
-        {/* Tab 切换 */}
-        <div className="flex gap-1 border-b border-line px-4 pt-2">
-          {([["providers", "供应商", Server], ["models", "模型", Cpu]] as const).map(([key, label, Icon]) => (
-            <button
-              key={key}
-              className={`flex cursor-pointer items-center gap-1.5 rounded-t-md px-3 py-1.5 text-xs transition-colors ${
-                tab === key ? "border-b-2 border-accent bg-accent/10 text-accent" : "text-sub hover:text-text"
-              }`}
-              onClick={() => setTab(key)}
-            >
-              <Icon className="h-3.5 w-3.5" />
-              {label}
-              {key === "models" && models.length > 0 && <span className="rounded bg-muted px-1 text-[9px]">{models.length}</span>}
-            </button>
-          ))}
-        </div>
-
-        <div className="min-h-0 flex-1 overflow-y-auto p-4">
-          {error && <div className="mb-3 rounded-md border border-danger/40 bg-danger/10 px-3 py-2 text-xs text-danger">{error}</div>}
+      <div className="pt-3">
+        {error && <div className="mb-3 rounded-md border border-danger/40 bg-danger/10 px-3 py-2 text-xs text-danger">{error}</div>}
 
           {tab === "providers" ? (
             <>
@@ -746,7 +736,6 @@ export default function ModelManagerModal({ onClose }: { onClose: () => void }) 
             </>
           )}
         </div>
-      </div>
     </div>
   );
 }

@@ -186,6 +186,51 @@ export interface SkillConfig {
   path?: string;
 }
 
+// ── v2.4 设置界面（权限等级 / 沙箱等级 / 常规 / 外观；全部可选节，passthrough 兼容）──
+
+/** 全局审批档位：auto=非人工必需全自动放行；smart=低风险自动、中/高人工（默认）；confirm=全部人工 */
+export type ApprovalMode = "auto" | "smart" | "confirm";
+
+/** 工具级风险/禁用覆盖（工具名精确 或 前缀*通配；与 MCP riskOverrides 同模式） */
+export interface ToolRiskOverride {
+  /** 工具名（如 "run_command"）或前缀通配（如 "git*"） */
+  tool: string;
+  /** 覆盖为指定风险（缺省 = 保留工具声明） */
+  risk?: RiskLevel;
+  /** 禁用该工具（命中即拒绝执行；对全部工具含 MCP/插件生效） */
+  disabled?: boolean;
+}
+
+/** 权限等级配置（v2.4：审批模式/按工具覆盖/命令白名单） */
+export interface ApprovalPolicyConfig {
+  /** 全局审批档位（缺省 smart） */
+  mode?: ApprovalMode;
+  /** 工具级覆盖列表（精确名 > 前缀* > 默认；按声明顺序，首个命中生效） */
+  toolOverrides?: ToolRiskOverride[];
+  /** 命令白名单（通配符 * 匹配任意字符序列；命中白名单的命令跳过高危命令审批；联网 requireExplicit 永不豁免） */
+  commandAllowlist?: string[];
+}
+
+/** 沙箱等级配置（v2.4：取代 INFU_SANDBOX 环境变量；off/L1/L1.5/L2/自动） */
+export interface SandboxConfig {
+  /** auto=按可用性自动选择（docker → win 受限 → 软沙箱）；off=直连；soft=L1 纯软；restricted=L1.5 Windows 受限；docker=L2 容器 */
+  mode?: "auto" | "off" | "soft" | "restricted" | "docker";
+}
+
+/** 常规设置（v2.4：Web 默认值） */
+export interface GeneralConfig {
+  /** 默认项目根目录（Web 输入框初始值） */
+  defaultRoot?: string;
+}
+
+/** 外观设置（v2.4：Web 界面偏好，随配置持久化） */
+export interface AppearanceConfig {
+  /** 界面字号（缺省 sm） */
+  fontSize?: "xs" | "sm" | "base";
+  /** 流式输出光标动画（缺省 true） */
+  streamCursor?: boolean;
+}
+
 /** 全局配置（v2：providers[] 凭据 + models[] 引用；未知字段保留前向兼容） */
 export interface InfuConfig {
   /** 配置 schema 版本（v2 = 供应商凭据两级结构） */
@@ -206,6 +251,14 @@ export interface InfuConfig {
   plugins?: PluginConfig[];
   /** v2.3 批 2：skill 显式引用（缺省按 name 在 ~/.infu/skills 与项目 .infu/skills 查找） */
   skills?: SkillConfig[];
+  /** v2.4：权限等级设置（审批档位/工具覆盖/命令白名单） */
+  approvalPolicy?: ApprovalPolicyConfig;
+  /** v2.4：沙箱等级设置（取代 INFU_SANDBOX 环境变量） */
+  sandbox?: SandboxConfig;
+  /** v2.4：常规设置 */
+  general?: GeneralConfig;
+  /** v2.4：外观设置 */
+  appearance?: AppearanceConfig;
 }
 
 /** 风险级别（审批挂钩） */
@@ -437,6 +490,43 @@ const skillConfigSchema = z
   })
   .passthrough();
 
+// ── v2.4 设置界面 schema（权限等级 / 沙箱等级 / 常规 / 外观；export 供 API 校验）──
+
+const toolRiskOverrideSchema = z
+  .object({
+    tool: z.string().min(1),
+    risk: z.enum(["low", "medium", "high"]).optional(),
+    disabled: z.boolean().optional(),
+  })
+  .passthrough();
+
+export const approvalPolicySchema = z
+  .object({
+    mode: z.enum(["auto", "smart", "confirm"]).optional(),
+    toolOverrides: z.array(toolRiskOverrideSchema).optional(),
+    commandAllowlist: z.array(z.string().min(1)).optional(),
+  })
+  .passthrough();
+
+export const sandboxConfigSchema = z
+  .object({
+    mode: z.enum(["auto", "off", "soft", "restricted", "docker"]).optional(),
+  })
+  .passthrough();
+
+export const generalConfigSchema = z
+  .object({
+    defaultRoot: z.string().optional(),
+  })
+  .passthrough();
+
+export const appearanceConfigSchema = z
+  .object({
+    fontSize: z.enum(["xs", "sm", "base"]).optional(),
+    streamCursor: z.boolean().optional(),
+  })
+  .passthrough();
+
 /** InfuConfig 校验 schema（未知字段保留；version 缺省补 1） */
 export const infuConfigSchema = z
   .object({
@@ -454,6 +544,10 @@ export const infuConfigSchema = z
     mcpServers: z.array(mcpServerSchema).optional(),
     plugins: z.array(pluginConfigSchema).optional(),
     skills: z.array(skillConfigSchema).optional(),
+    approvalPolicy: approvalPolicySchema.optional(),
+    sandbox: sandboxConfigSchema.optional(),
+    general: generalConfigSchema.optional(),
+    appearance: appearanceConfigSchema.optional(),
     version: z.number().int().positive().default(1),
   })
   .passthrough();

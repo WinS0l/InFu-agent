@@ -302,6 +302,57 @@ console.log("\n▶ /api/plugins + /api/skills API");
     r = await call("/api/plugins/bad", { method: "DELETE" });
     check("删除不存在 → 404", r.status === 404);
 
+    // ── v2.4 生成带钩子的插件（设置界面「新建钩子」）──
+    console.log("  ▶ 生成钩子插件（/api/plugins/generate）");
+    const genCode = `export default {
+  id: "gen-hooks",
+  name: "生成钩子",
+  description: "测试生成",
+  hooks: {
+    preToolUse: async (input) => ({ decision: "allow" }),
+    postToolUse: async () => ({}),
+  },
+};`;
+    // 成功生成（默认目录 ~/.infu/plugins/）
+    r = await call("/api/plugins/generate", {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ id: "gen-hooks", code: genCode }),
+    });
+    j = await r.json();
+    check("生成成功", r.status === 200 && j.ok && j.plugin === "gen-hooks", JSON.stringify(j));
+    check("文件路径含 plugins 目录", String(j.path ?? "").includes("plugins"), j.path);
+    check("文件已落盘", j.path && existsSync(j.path));
+    // 生成后可 probe（钩子生效）
+    r = await call("/api/plugins/gen-hooks/probe", { method: "POST" });
+    j = await r.json();
+    check("生成的插件可加载（pre/post 钩子各 1）",
+      j.ok && j.hooks.preToolUse === 1 && j.hooks.postToolUse === 1, JSON.stringify(j));
+    // 重名 → 409
+    r = await call("/api/plugins/generate", {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ id: "gen-hooks", code: genCode }),
+    });
+    check("重名 → 409", r.status === 409);
+    // 缺 code → 400
+    r = await call("/api/plugins/generate", {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ id: "gen-hooks-2" }),
+    });
+    check("缺 code → 400", r.status === 400);
+    // 指定 path 生成
+    r = await call("/api/plugins/generate", {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ id: "gen-hooks-3", code: genCode, path: join(proj, "custom-hooks.mjs") }),
+    });
+    j = await r.json();
+    check("指定 path 生成", r.status === 200 && String(j.path ?? "").includes("custom-hooks.mjs"), j.path);
+    // 清理生成的插件（删除注册 + 默认目录文件 + 自定义路径文件）
+    await call("/api/plugins/gen-hooks", { method: "DELETE" });
+    await call("/api/plugins/gen-hooks-3", { method: "DELETE" });
+    const genDefaultFile = join(homedir(), ".infu", "plugins", "gen-hooks.mjs");
+    if (existsSync(genDefaultFile)) rmSync(genDefaultFile, { force: true });
+    if (j.path && existsSync(j.path)) rmSync(j.path, { force: true });
+
     // skills：列表（项目级 2 个）
     r = await call("/api/skills");
     j = await r.json();

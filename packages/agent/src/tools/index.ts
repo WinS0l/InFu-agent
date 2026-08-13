@@ -11,7 +11,7 @@ import path from "node:path";
 import type { ToolDef, ToolContext, RiskLevel } from "@infu/shared";
 import {
   sanitizeEnv, isProtectedPath, auditCommand, dockerAvailable, buildDockerArgs,
-  resolveSandboxMode, type SandboxMode,
+  resolveSandboxMode, resolveEffectiveMode, type SandboxMode,
 } from "../sandbox/index.js";
 import {
   winRestrictedAvailable, runRestricted, type RestrictedRunResult,
@@ -21,6 +21,9 @@ import { registerMcpServer, type RegisterInput } from "../mcp/register.js";
 import { registerPlugin, type RegisterPluginInput } from "../plugin/register.js";
 import { listSkills, readSkillContent } from "../plugin/skills.js";
 import { loadConfig } from "../providers/registry.js";
+import {
+  currentApprovalPolicy, isToolDisabled, resolveToolRisk, shouldAutoApprove, isCommandAllowed,
+} from "../approval/policy.js";
 
 const execAsync = promisify(exec);
 const execFileAsync = promisify(execFile);
@@ -111,14 +114,19 @@ async function runInDocker(command: string, root: string, timeoutMs = 120000): P
   }
 }
 
-/** 沙箱模式解析（auto：有 Docker 用容器，否则本地软沙箱/受限沙箱） */
+/** 沙箱档位解析（v2.4：config.sandbox.mode 优先于环境变量；auto 按可用性选择 docker → win 受限 → 软沙箱） */
 async function getSandboxMode(): Promise<SandboxMode> {
-  const mode = resolveSandboxMode();
-  if (mode === "auto") {
-    const hasDocker = await dockerAvailable();
-    return hasDocker ? "docker" : "soft";
+  const requested = resolveSandboxMode(process.env, loadConfig());
+  // 受限可用性统一检查（含 INFU_SANDBOX_RESTRICTED=0 强制禁用；有会话级缓存）
+  const winRestrictedOk = process.platform === "win32" && (await winRestrictedAvailable());
+  if (requested === "auto") {
+    return resolveEffectiveMode(requested, {
+      dockerOk: await dockerAvailable(),
+      winRestrictedOk,
+      platform: process.platform,
+    });
   }
-  return mode;
+  return resolveEffectiveMode(requested, { dockerOk: false, winRestrictedOk, platform: process.platform });
 }
 
 /** 受限执行结果 → 标准输出格式（level/net 映射为模式标签；退出码 0 才算成功，与 Node exec 语义一致） */
@@ -140,8 +148,10 @@ function fmtRestricted(r: RestrictedRunResult): { out: string; ok: boolean; code
 }
 
 /**
- * 本地命令统一分派：Docker → 受限沙箱（win32，L1.5 硬沙箱）→ 软沙箱（L1）
+ * 本地命令统一分派：Docker(L2) → 受限沙箱(L1.5，win32 硬沙箱) → 软沙箱(L1)
  * run_command 与 run_test 共用（修复 run_test 绕过沙箱的历史缺口）。
+ * v2.4 档位语义：显式 soft = 纯软沙箱（不再隐式 L1.5）；显式 restricted 不可用时降级 soft；
+ * 显式 docker 不可用时报错（不静默降级）；auto 按可用性自动选择。
  * 网络出站控制为命令级策略（net-policy.ts，M6 软控制收尾）：
  * 外传命令在 run_command/run_test 入口拦截，不进入本分派。
  * 返回 sandbox 标签用于审计与展示。
@@ -160,12 +170,12 @@ async function execLocal(
     const r = await runShell(command, cwd, timeoutMs);
     return { ...r, sandbox: "off" };
   }
-  // soft / auto→soft：win32 且原生受限沙箱可用时优先（OS 级强制）
-  if (process.platform === "win32" && (await winRestrictedAvailable())) {
+  if (mode === "restricted") {
     const r = await runRestricted(command, cwd, timeoutMs, sanitizeEnv());
     if (r) return fmtRestricted(r);
     // native 异常 → 降级软沙箱（下面统一处理）
   }
+  // soft / 降级：纯软沙箱（L1，不隐式走 L1.5）
   const r = await runShell(command, cwd, timeoutMs);
   return { ...r, sandbox: "soft" };
 }
@@ -208,10 +218,25 @@ function walkFiles(root: string, maxFiles = 2000): string[] {
   return results;
 }
 
-/** 审批辅助：风险高于阈值时请求确认（requireExplicit：-y 自动批准也不放行——联网场景） */
-async function guard(ctx: ToolContext, risk: RiskLevel, description: string, requireExplicit?: boolean): Promise<boolean> {
-  if (risk === "low") return true;
-  return ctx.requestApproval(description, risk, requireExplicit);
+/**
+ * 审批辅助（v2.4 策略化）：按配置档位与工具覆盖决策——
+ * 工具级覆盖先应用（禁用拦截/风险覆盖），再按档位（auto 放行 / confirm 全人工 / smart low 放行）。
+ * requireExplicit（联网放行/自注册等安全线）任何档位下都需人工确认。
+ * 禁用工具的准确文案由 loop 执行段统一拦截；此处为直调兜底（返回 false）。
+ */
+async function guard(
+  ctx: ToolContext,
+  tool: string,
+  risk: RiskLevel,
+  description: string,
+  requireExplicit?: boolean
+): Promise<boolean> {
+  const policy = currentApprovalPolicy();
+  if (isToolDisabled(tool, policy.toolOverrides)) return false;
+  const effectiveRisk = resolveToolRisk(tool, risk, policy.toolOverrides);
+  const auto = shouldAutoApprove(policy, effectiveRisk, requireExplicit);
+  if (auto === true) return true;
+  return ctx.requestApproval(description, effectiveRisk, requireExplicit);
 }
 
 // ─────────────────────────── 工具定义 ───────────────────────────
@@ -263,7 +288,7 @@ export const TOOLS: Record<string, ToolDef> = {
         return `错误：目标路径位于受保护区域（${protectedName}），拒绝写入——Agent 没有修改 SSH 密钥/凭据/配置的合法场景`;
       }
       const desc = `写入文件 ${rel}（${(args.content as string).length} 字符）`;
-      if (!(await guard(ctx, "medium", desc))) return "用户拒绝：未写入";
+      if (!(await guard(ctx, "write_file", "medium", desc))) return "用户拒绝：未写入";
       fs.mkdirSync(path.dirname(abs), { recursive: true });
       fs.writeFileSync(abs, args.content as string, "utf-8");
       const lines = (args.content as string).split("\n").length;
@@ -296,7 +321,7 @@ export const TOOLS: Record<string, ToolDef> = {
         return "错误：未找到匹配的原文（old_text 与文件内容不一致），请先 read_file 确认";
       }
       const desc = `修改文件 ${rel}（替换 ${oldText.length} 字符）`;
-      if (!(await guard(ctx, "medium", desc))) return "用户拒绝：未修改";
+      if (!(await guard(ctx, "edit_file", "medium", desc))) return "用户拒绝：未修改";
       const updated = content.replace(oldText, args.new_text as string);
       fs.writeFileSync(abs, updated, "utf-8");
       // 行数 diff 统计（+N -M 行）
@@ -391,8 +416,8 @@ export const TOOLS: Record<string, ToolDef> = {
 
       let netAllowed = false;
       if (wantNetwork) {
-        // 联网必须人工审批（🌐 标记 + requireExplicit：-y 自动批准也不放行）
-        netAllowed = await guard(ctx, "high", `🌐 联网放行执行命令：${command}`, true);
+        // 联网必须人工审批（🌐 标记 + requireExplicit：-y 自动批准也不放行；白名单不豁免联网）
+        netAllowed = await guard(ctx, "run_command", "high", `🌐 联网放行执行命令：${command}`, true);
         if (!netAllowed && egress) {
           // 外传命令未获联网放行 → 断网策略拦截（不执行）
           const msg = egressBlockedMessage(egress);
@@ -400,13 +425,15 @@ export const TOOLS: Record<string, ToolDef> = {
           return `${msg}\n⚠ 联网审批被拒绝（断网策略）`;
         }
       } else {
-        // 常规审批（高危命令 high；其余 medium）
-        const DANGEROUS = /\b(rm\s+-rf|rmdir\s+\/s|del\s+\/f|format\s+|mkfs|dd\s+if=)\b/i;
-        if (DANGEROUS.test(command)) {
-          if (!(await guard(ctx, "high", `执行高风险命令：${command}`))) {
+        // 常规审批（高危命令 high；其余 medium）；命令白名单（v2.4 设置）命中的命令跳过高危审批
+        const policy = currentApprovalPolicy();
+        // 末尾无 \b：dd if=/…、mkfs.ext4 后随符号（/ .）处无词边界，加 \b 会漏检
+        const DANGEROUS = /\b(rm\s+-rf|rmdir\s+\/s|del\s+\/f|format\s+|mkfs|dd\s+if=)/i;
+        if (DANGEROUS.test(command) && !isCommandAllowed(command, policy.commandAllowlist)) {
+          if (!(await guard(ctx, "run_command", "high", `执行高风险命令：${command}`))) {
             return "用户拒绝：高危命令未执行";
           }
-        } else if (!(await guard(ctx, "medium", `执行命令：${command}`))) {
+        } else if (!(await guard(ctx, "run_command", "medium", `执行命令：${command}`))) {
           return "用户拒绝：命令未执行";
         }
       }
@@ -447,7 +474,7 @@ export const TOOLS: Record<string, ToolDef> = {
     async execute(args, ctx) {
       // 写配置 = 持久化副作用 + 影响后续任务工具面：high 级 + requireExplicit（-y 也不放行）
       const desc = `注册 MCP 服务器「${args.name}」（${(args.type as string) ?? "stdio"}）到全局配置：\n${JSON.stringify(args, null, 2)}`;
-      if (!(await guard(ctx, "high", desc, true))) {
+      if (!(await guard(ctx, "mcp_register", "high", desc, true))) {
         return "用户拒绝：未注册（MCP 服务器注册需人工确认）";
       }
       const r = registerMcpServer(args as unknown as RegisterInput);
@@ -469,7 +496,7 @@ export const TOOLS: Record<string, ToolDef> = {
     }),
     async execute(args, ctx) {
       const desc = `注册插件「${args.id}」（${args.path}）到全局配置：\n${JSON.stringify(args, null, 2)}`;
-      if (!(await guard(ctx, "high", desc, true))) {
+      if (!(await guard(ctx, "plugin_add", "high", desc, true))) {
         return "用户拒绝：未注册（插件注册需人工确认）";
       }
       const r = registerPlugin(args as unknown as RegisterPluginInput);
@@ -560,7 +587,7 @@ export const TOOLS: Record<string, ToolDef> = {
         else if (fs.existsSync(path.join(abs, "Cargo.toml"))) cmd = "cargo test";
         else return "未检测到测试框架，请用 command 参数指定";
       }
-      if (!(await guard(ctx, "medium", `运行测试：${cmd}`))) return "用户拒绝：未运行测试";
+      if (!(await guard(ctx, "run_test", "medium", `运行测试：${cmd}`))) return "用户拒绝：未运行测试";
       // 断网策略：测试默认断网，外传命令拦截（run_test 无 network 参数，需去掉外传工具或改用 run_command）
       const egress = detectEgress(cmd);
       if (egress) {

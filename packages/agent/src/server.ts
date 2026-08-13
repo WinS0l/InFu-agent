@@ -9,9 +9,10 @@
  */
 
 import { Hono } from "hono";
-import { serve } from "@hono/node-server";
 import { streamSSE } from "hono/streaming";
 import { randomUUID } from "node:crypto";
+import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
+import { Readable } from "node:stream";
 import { appendFileSync, mkdirSync, writeFileSync, readFileSync, existsSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -19,19 +20,28 @@ import path from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import type { ModelConfig, AgentEvent, RiskLevel, InfuConfig, OrchestrateMode, PhaseId, ProviderConfig } from "@infu/shared";
-import { loadConfig, resolveFallbackModels, resolveRoleModel, resolveRoleThinking, toRuntimeModel, resolveBaseURL, CONFIG_PATH } from "./providers/registry.js";
-import { parseInfuConfig } from "@infu/shared";
+import { loadConfig, saveConfig, resolveFallbackModels, resolveRoleModel, resolveRoleThinking, toRuntimeModel, resolveBaseURL, CONFIG_PATH } from "./providers/registry.js";
+import { parseInfuConfig, approvalPolicySchema, sandboxConfigSchema, generalConfigSchema, appearanceConfigSchema } from "@infu/shared";
 import { TOOLS } from "./tools/index.js";
 import { runAgent, DEFAULT_SYSTEM_PROMPT } from "./agent/loop.js";
 import { runOrchestratedTask, type OrchestratedRunOptions } from "./agent/orchestrator.js";
 import { inferResumePhase } from "./agent/resume.js";
 import { loadMcpTools } from "./mcp/index.js";
 import { loadPlugins } from "./plugin/index.js";
+import { registerPlugin } from "./plugin/register.js";
 import { listSkills, buildSkillsPrompt } from "./plugin/skills.js";
 import { TASK_TEMPLATES } from "./templates.js";
 import { getStore } from "./db/store.js";
 import { rebuildMessages } from "./db/rebuild.js";
 import type { ChatMessageLike } from "./providers/chat.js";
+import { resolveApprovalPolicy, shouldAutoApprove } from "./approval/policy.js";
+import { dockerAvailable } from "./sandbox/index.js";
+import { winRestrictedAvailable } from "./sandbox/win-restricted.js";
+import {
+  createTerminalSession, getTerminalSession, subscribeOutput, writeInput, resizeSession,
+  killTerminalSession, closeAllTerminalSessions, listTerminalSessions,
+} from "./terminal/session.js";
+import { detectDangerousTerminalCommand, auditTerminalCommand } from "./terminal/policy.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -51,11 +61,7 @@ async function isGitRepo(root: string): Promise<boolean> {
   }
 }
 
-/** 模型配置持久化（安全写入；v2.1 起带 schema 版本号） */
-function saveConfig(cfg: InfuConfig) {
-  mkdirSync(join(homedir(), ".infu"), { recursive: true });
-  writeFileSync(CONFIG_PATH, JSON.stringify({ ...cfg, version: cfg.version ?? 1 }, null, 2), "utf-8");
-}
+/** 读取配置（损坏/缺失返回空配置；写入统一走 registry.saveConfig） */
 function readConfigRaw(): InfuConfig {
   if (!existsSync(CONFIG_PATH)) return { models: [] };
   try {
@@ -96,6 +102,76 @@ export interface ServerOptions {
   host?: string;
   /** 默认项目根目录（无 root 时使用） */
   defaultRoot?: string;
+}
+
+/**
+ * Bridge a Web `Response` returned by Hono to Node's HTTP response.
+ *
+ * @hono/node-server 1.19.x can accept a chunked SSE response on Node 24 but
+ * leave its chunks buffered indefinitely.  Keep the Hono application and its
+ * Web-standard streaming API, while using this small, direct Node bridge for
+ * the final socket write.
+ */
+async function forwardResponse(response: Response, outgoing: ServerResponse) {
+  const headers = Object.fromEntries(response.headers.entries());
+  outgoing.writeHead(response.status, headers);
+  outgoing.flushHeaders();
+
+  if (!response.body) {
+    outgoing.end();
+    return;
+  }
+
+  const reader = response.body.getReader();
+  let closed = false;
+  const cancel = (reason?: Error) => {
+    if (!closed) reader.cancel(reason).catch(() => {});
+  };
+  outgoing.once("close", cancel);
+  outgoing.once("error", cancel);
+
+  try {
+    while (!closed) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (!outgoing.write(value)) {
+        await new Promise<void>((resolve, reject) => {
+          outgoing.once("drain", resolve);
+          outgoing.once("error", reject);
+        });
+      }
+    }
+    if (!outgoing.writableEnded) outgoing.end();
+  } catch (error) {
+    if (!outgoing.destroyed) outgoing.destroy(error instanceof Error ? error : undefined);
+  } finally {
+    closed = true;
+    outgoing.off("close", cancel);
+    outgoing.off("error", cancel);
+    reader.releaseLock();
+  }
+}
+
+async function handleNodeRequest(app: ReturnType<typeof createApp>, incoming: IncomingMessage, outgoing: ServerResponse) {
+  try {
+    const host = incoming.headers.host ?? "127.0.0.1";
+    const method = incoming.method ?? "GET";
+    const headers = new Headers();
+    for (const [key, value] of Object.entries(incoming.headers)) {
+      if (value === undefined) continue;
+      for (const item of Array.isArray(value) ? value : [value]) headers.append(key, item);
+    }
+    const request = new Request(`http://${host}${incoming.url ?? "/"}`, {
+      method,
+      headers,
+      ...(method === "GET" || method === "HEAD" ? {} : { body: Readable.toWeb(incoming) as ReadableStream, duplex: "half" as const }),
+    });
+    await forwardResponse(await app.fetch(request), outgoing);
+  } catch (error) {
+    if (!outgoing.headersSent) outgoing.writeHead(500, { "content-type": "application/json" });
+    if (!outgoing.writableEnded) outgoing.end(JSON.stringify({ ok: false, message: "Internal server error" }));
+    console.error("[infu-agent] request failed:", error);
+  }
 }
 
 /** API Key 脱敏 */
@@ -353,6 +429,153 @@ export function createApp(opts: ServerOptions = {}) {
     return c.json({ ok: true, roles: cfg.roles });
   });
 
+  // ── v2.4 设置界面（配置系统 UI 化：权限等级 / 沙箱等级 / 常规 / 外观）──
+
+  // 读取设置四节（缺省节返回空对象，Web 端渲染默认态；defaultModelId 供常规 Tab 默认模型）
+  // 附带沙箱可用性（docker/win 受限），供 UI 标注「当前机器不可用」
+  app.get("/api/config", async (c) => {
+    const cfg = loadConfig();
+    const [dockerOk, winOk] = await Promise.all([
+      dockerAvailable().catch(() => false),
+      (async () => process.platform === "win32" && (await winRestrictedAvailable()))(),
+    ]);
+    return c.json({
+      approvalPolicy: cfg?.approvalPolicy ?? {},
+      sandbox: { ...(cfg?.sandbox ?? {}), dockerAvailable: dockerOk, winRestrictedOk: winOk },
+      general: cfg?.general ?? {},
+      appearance: cfg?.appearance ?? {},
+      defaultModelId: cfg?.defaultModelId ?? null,
+    });
+  });
+
+  // 保存设置四节（白名单：只接受 approvalPolicy/sandbox/general/appearance/defaultModelId；
+  // models/providers/apiKey 等其余配置节不可达——防提权，与 mcp_register/plugin_add 同模式）
+  app.put("/api/config", async (c) => {
+    const body = await c.req.json().catch(() => ({}));
+    if (!body || typeof body !== "object") {
+      return c.json({ ok: false, message: "请求体必须为 JSON 对象" }, 400);
+    }
+    const ALLOWED = ["approvalPolicy", "sandbox", "general", "appearance", "defaultModelId"] as const;
+    const bad = Object.keys(body).filter((k) => !(ALLOWED as readonly string[]).includes(k));
+    if (bad.length) {
+      return c.json({ ok: false, message: `不允许写入的配置节: ${bad.join(", ")}` }, 400);
+    }
+    const clean: Partial<InfuConfig> = {};
+    for (const key of ALLOWED) {
+      if (body[key] === undefined || key === "defaultModelId") continue;
+      const schema =
+        key === "approvalPolicy" ? approvalPolicySchema
+        : key === "sandbox" ? sandboxConfigSchema
+        : key === "general" ? generalConfigSchema
+        : appearanceConfigSchema;
+      // strip 模式：拒绝未知字段落盘（防通过设置接口混入敏感字段）
+      const r = schema.strip().safeParse(body[key]);
+      if (!r.success) {
+        const issue = r.error.issues[0];
+        return c.json({ ok: false, message: `${key}: ${issue?.message ?? "格式错误"}` }, 400);
+      }
+      clean[key] = r.data as never;
+    }
+    const cfg = readConfigRaw();
+    const merged: InfuConfig = { ...cfg, ...clean };
+    // 默认模型：字符串 = 设置；null/空 = 清除（显式删键）
+    if (typeof body.defaultModelId === "string" && body.defaultModelId.trim()) {
+      merged.defaultModelId = body.defaultModelId.trim();
+    } else if (body.defaultModelId !== undefined) {
+      delete merged.defaultModelId;
+    }
+    const validated = parseInfuConfig(merged);
+    if (!validated.ok) {
+      return c.json({ ok: false, message: `配置校验失败: ${validated.error}` }, 400);
+    }
+    saveConfig(validated.config);
+    return c.json({ ok: true });
+  });
+
+  // ── v2.4 批 2 Web 交互式终端（node-pty；高危命令审批 + 全量审计）──
+
+  // 创建终端会话（cwd = 项目根；shell 可选 cmd/powershell/bash）
+  app.post("/api/terminal", async (c) => {
+    const body = await c.req.json().catch(() => ({}));
+    const session = createTerminalSession(
+      typeof body.cwd === "string" ? body.cwd : undefined,
+      typeof body.shell === "string" ? body.shell : undefined
+    );
+    return c.json({ ok: true, id: session.id, cwd: session.cwd, shell: session.shell, pid: session.pid });
+  });
+
+  // 写入输入。命令级高危审批协议：携带整命令（command 字段），命中高危且未 confirmed → 拦截返回
+  // requireApproval（不写入），前端人工确认后带 confirmed:true 重发才执行；每条命令审计落盘。
+  app.post("/api/terminal/:id/input", async (c) => {
+    const session = getTerminalSession(c.req.param("id"));
+    if (!session) return c.json({ ok: false, message: "终端会话不存在或已关闭" }, 404);
+    const body = await c.req.json().catch(() => ({}));
+    const data = typeof body.data === "string" ? body.data : "";
+    const command = typeof body.command === "string" ? body.command.trim() : "";
+    if (!data) return c.json({ ok: true });
+    if (command && detectDangerousTerminalCommand(command) && body.confirmed !== true) {
+      // 高危命令：拦截 + 要求人工确认（安全红线，与 run_command 一致）
+      return c.json({ ok: false, requireApproval: true, risk: "high", description: `执行高风险命令：${command}` });
+    }
+    if (session.exited) return c.json({ ok: false, message: "终端会话已退出" }, 400);
+    writeInput(session, data);
+    if (command) auditTerminalCommand(session.cwd, command);
+    return c.json({ ok: true });
+  });
+
+  // PTY 尺寸同步（前端 xterm fit 后调用）
+  app.post("/api/terminal/:id/resize", async (c) => {
+    const session = getTerminalSession(c.req.param("id"));
+    if (!session) return c.json({ ok: false, message: "终端会话不存在" }, 404);
+    const body = await c.req.json().catch(() => ({}));
+    resizeSession(session, Number(body.cols) || 0, Number(body.rows) || 0);
+    return c.json({ ok: true });
+  });
+
+  // 输出流（SSE：output / exit / ping；新连接先重放会话缓冲）
+  // 注意：hono streamSSE 在 callback resolve 后立即 close 流——回调必须保持 pending
+  // 直到连接中断（abort 时释放），否则未 await 的 writeSSE 与 close 竞态丢数据。
+  app.get("/api/terminal/:id/stream", (c) => {
+    const session = getTerminalSession(c.req.param("id"));
+    if (!session) return c.json({ ok: false, message: "终端会话不存在" }, 404);
+    return streamSSE(c, async (stream) => {
+      const heartbeat = setInterval(() => {
+        stream.writeSSE({ event: "ping", data: "" }).catch(() => {});
+      }, 10000);
+      // 连接存活期间保持 callback pending（abort 时释放）
+      let releaseHold!: () => void;
+      const hold = new Promise<void>((r) => { releaseHold = r; });
+      const unsubscribe = subscribeOutput(session, (data) => {
+        stream.writeSSE({ event: "output", data: JSON.stringify({ data }) }).catch(() => {});
+      });
+      stream.onAbort(() => {
+        clearInterval(heartbeat);
+        unsubscribe();
+        releaseHold();
+      });
+      if (session.exited) {
+        await stream.writeSSE({ event: "exit", data: JSON.stringify({ code: 0 }) }).catch(() => {});
+      }
+      await hold;
+    });
+  });
+
+  // 终止会话（kill 进程树 + 移除）
+  app.delete("/api/terminal/:id", (c) => {
+    const ok = killTerminalSession(c.req.param("id"));
+    return c.json({ ok });
+  });
+
+  // 活动会话列表（调试/管理用；含 buffer 长度与订阅者数诊断字段）
+  app.get("/api/terminal", (c) => {
+    return c.json({
+      sessions: listTerminalSessions().map((s) => {
+        const live = getTerminalSession(s.id);
+        return { ...s, bufferLen: live?.buffer.length ?? 0, listeners: live?.listeners.size ?? 0 };
+      }),
+    });
+  });
+
   // Agent 任务（SSE）
   app.post("/api/chat", (c) => {
     return streamSSE(c, async (stream) => {
@@ -479,7 +702,10 @@ export function createApp(opts: ServerOptions = {}) {
 
       // 审批：推送 approval-required 事件 → 挂 pending → 等待 POST /api/approvals/:id 决策
       // 连接中断（停止）时自动拒绝并释放
-      const requestApproval = async (description: string, risk: RiskLevel, _requireExplicit?: boolean) => {
+      // v2.4 审批档位（config.approvalPolicy.mode）：auto 直接放行不发事件；confirm 全部人工；
+      // requireExplicit（联网放行等安全线）任何档位都弹窗人工确认（guard 对内置工具已按档位拦截，此处兜底 MCP/插件直调路径）
+      const requestApproval = async (description: string, risk: RiskLevel, requireExplicit?: boolean) => {
+        if (shouldAutoApprove(resolveApprovalPolicy(loadConfig()), risk, requireExplicit) === true) return true;
         const id = randomUUID();
         emit({ type: "approval-required", id, description, risk });
         return new Promise<boolean>((resolve) => {
@@ -893,6 +1119,38 @@ export function createApp(opts: ServerOptions = {}) {
     return c.json({ ok: true, plugin: id });
   });
 
+  // 生成带钩子的插件（v2.4 追加：设置界面「新建钩子」——钩子是插件属性，
+  // 生成一个完整的插件模块文件（默认 ~/.infu/plugins/<id>.mjs，可指定 path）并注册；
+  // 用户自写代码 = 配置即信任，与 plugin_add 同信任级别）
+  app.post("/api/plugins/generate", async (c) => {
+    const body = await c.req.json().catch(() => ({}));
+    const cfg = readConfigRaw();
+    const id = String(body.id || "").trim().toLowerCase().replace(/[^a-z0-9-]+/g, "-").replace(/^-+|-+$/g, "");
+    const code = typeof body.code === "string" ? body.code.trim() : "";
+    if (!id) return c.json({ ok: false, message: "插件 id 不能为空" }, 400);
+    if (!code) return c.json({ ok: false, message: "插件代码不能为空" }, 400);
+    if ((cfg.plugins ?? []).some((x) => x.id === id)) {
+      return c.json({ ok: false, message: `插件 "${id}" 已存在` }, 409);
+    }
+    // 默认落盘：~/.infu/plugins/<id>.mjs（用户级）；body.path 可指定绝对路径——
+    // 以 .mjs/.js/.ts 结尾视为完整文件路径，否则视为目录
+    const explicitPath = typeof body.path === "string" && body.path.trim() ? body.path.trim() : "";
+    const file = explicitPath
+      ? /\.(mjs|js|ts)$/i.test(explicitPath)
+        ? explicitPath
+        : join(explicitPath, `${id}.mjs`)
+      : join(homedir(), ".infu", "plugins", `${id}.mjs`);
+    try {
+      mkdirSync(path.dirname(file), { recursive: true });
+      writeFileSync(file, code, "utf-8");
+    } catch (e) {
+      return c.json({ ok: false, message: `写入插件文件失败: ${(e as Error).message}` }, 500);
+    }
+    const r = registerPlugin({ id, path: file });
+    if (!r.ok) return c.json({ ok: false, message: r.message }, 400);
+    return c.json({ ok: true, plugin: id, path: file });
+  });
+
   // 更新插件（启停/路径）
   app.put("/api/plugins/:id", async (c) => {
     const id = c.req.param("id");
@@ -1036,8 +1294,11 @@ export function startServer(opts: ServerOptions = {}) {
   const app = createApp(opts);
 
   const tryListen = (port: number, attemptsLeft: number) => {
-    const server = serve({ fetch: app.fetch, port, hostname: host }, (info) => {
-      console.log(`[infu-agent] 服务已启动: http://${host}:${info.port}`);
+    const server = createServer((incoming, outgoing) => void handleNodeRequest(app, incoming, outgoing));
+    server.listen(port, host, () => {
+      const address = server.address();
+      const listeningPort = typeof address === "object" && address ? address.port : port;
+      console.log(`[infu-agent] 服务已启动: http://${host}:${listeningPort}`);
       console.log(`[infu-agent] 工具数: ${Object.keys(TOOLS).length}`);
       checkConfigHealth();
       console.log(`[infu-agent] Ctrl+C 停止服务`);
@@ -1053,6 +1314,8 @@ export function startServer(opts: ServerOptions = {}) {
     });
   };
   tryListen(basePort, 5);
+  // v2.4 批 2：服务退出统一清理终端子进程（防残留 PTY；与 MCP 连接清理同模式）
+  process.on("exit", () => closeAllTerminalSessions());
 }
 
 // 直接运行时入口：tsx src/server.ts / node dist/server.js

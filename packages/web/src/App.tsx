@@ -1,14 +1,13 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useStore } from "./store";
-import { fetchModels, sendChat, fetchSessions, fetchSessionEvents, maybeMigrateV1 } from "./api";
+import { fetchModels, sendChat, fetchSessions, fetchSessionEvents, maybeMigrateV1, fetchConfig } from "./api";
 import Sidebar from "./components/Sidebar";
 import ChatPanel from "./components/ChatPanel";
 import DiffPanel from "./components/DiffPanel";
 import ApprovalModal from "./components/ApprovalModal";
-import { RefreshCw, AlertTriangle, Settings2, Plug, Puzzle } from "lucide-react";
-import ModelManagerModal from "./components/ModelManagerModal";
-import McpManagerModal from "./components/McpManagerModal";
-import ExtensionsModal from "./components/ExtensionsModal";
+import { RefreshCw, AlertTriangle, Cog } from "lucide-react";
+import SettingsModal from "./components/SettingsModal";
+import TerminalPanel, { TerminalToggleButton } from "./components/TerminalPanel";
 
 const SVG_LOGO = (
   <svg viewBox="0 0 24 24" className="h-5 w-5" fill="none" stroke="currentColor" strokeWidth="2">
@@ -19,12 +18,18 @@ const SVG_LOGO = (
 );
 
 export default function App() {
-  const { models, modelId, setModelId, root, setRoot, running, messages } = useStore();
+  const { models, modelId, setModelId, root, setRoot, running, messages, fontSize, streamCursor, setAppearance } = useStore();
   const [modelError, setModelError] = useState("");
-  const [showModels, setShowModels] = useState(false);
-  const [showMcp, setShowMcp] = useState(false);
-  const [showExtensions, setShowExtensions] = useState(false);
+  // v2.4 信息架构升级：扩展/MCP/模型管理全部并入设置弹窗（顶栏仅保留「设置」入口）
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [terminalOpen, setTerminalOpen] = useState(false);
   const loaded = useRef(false);
+
+  // v2.4 外观即时应用（html data 属性 → index.css 规则）
+  useEffect(() => {
+    document.documentElement.dataset.fontSize = fontSize;
+    document.documentElement.dataset.streamCursor = streamCursor ? "on" : "off";
+  }, [fontSize, streamCursor]);
 
   const loadModels = useCallback(async () => {
     try {
@@ -39,6 +44,19 @@ export default function App() {
     if (loaded.current) return;
     loaded.current = true;
     loadModels();
+    // v2.4 设置：应用外观（字号/流式光标）与默认根目录（仅当输入框仍是默认值时）
+    fetchConfig()
+      .then((cfg) => {
+        const st = useStore.getState();
+        setAppearance({
+          fontSize: cfg.appearance.fontSize ?? "sm",
+          streamCursor: cfg.appearance.streamCursor ?? true,
+        });
+        if (cfg.general.defaultRoot && st.root === "E:\\InFu(test)") {
+          st.setRoot(cfg.general.defaultRoot);
+        }
+      })
+      .catch(() => {});
     // v2.1 会话：v1 localStorage 数据迁移 + 加载会话列表 + 恢复上次会话
     (async () => {
       try {
@@ -124,27 +142,11 @@ export default function App() {
           )}
           <button
             className="flex h-8 cursor-pointer items-center gap-1 rounded-md border border-line bg-muted px-2 text-xs text-text transition-colors hover:border-accent hover:text-accent"
-            onClick={() => setShowExtensions(true)}
-            title="扩展管理（v2.3 批 2：插件 = 工具/钩子/技能；skill = SKILL.md）"
+            onClick={() => setSettingsOpen(true)}
+            title="设置（基础设置 / Agent 能力 / 数据与统计：模型·MCP·插件·技能·命令等全部在此管理）"
           >
-            <Puzzle className="h-3.5 w-3.5" />
-            扩展
-          </button>
-          <button
-            className="flex h-8 cursor-pointer items-center gap-1 rounded-md border border-line bg-muted px-2 text-xs text-text transition-colors hover:border-accent hover:text-accent"
-            onClick={() => setShowMcp(true)}
-            title="MCP 服务器管理（v2.3：工具动态注入执行阶段）"
-          >
-            <Plug className="h-3.5 w-3.5" />
-            MCP
-          </button>
-          <button
-            className="flex h-8 cursor-pointer items-center gap-1 rounded-md border border-line bg-muted px-2 text-xs text-text transition-colors hover:border-accent hover:text-accent"
-            onClick={() => setShowModels(true)}
-            title="模型管理"
-          >
-            <Settings2 className="h-3.5 w-3.5" />
-            模型管理
+            <Cog className="h-3.5 w-3.5" />
+            设置
           </button>
         </div>
       </header>
@@ -156,10 +158,12 @@ export default function App() {
         <DiffPanel />
       </div>
 
+      {/* v2.4 批 2：Web 交互式终端（底部通栏） */}
+      {terminalOpen && <TerminalPanel />}
+      <TerminalToggleButton open={terminalOpen} onClick={() => setTerminalOpen(!terminalOpen)} />
+
       <ApprovalModal />
-      {showModels && <ModelManagerModal onClose={() => setShowModels(false)} />}
-      {showMcp && <McpManagerModal onClose={() => setShowMcp(false)} />}
-      {showExtensions && <ExtensionsModal onClose={() => setShowExtensions(false)} />}
+      {settingsOpen && <SettingsModal onClose={() => setSettingsOpen(false)} />}
     </div>
   );
 }

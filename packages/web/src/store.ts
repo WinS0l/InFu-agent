@@ -72,6 +72,10 @@ interface StoreState {
   phaseModels: Partial<Record<PhaseId, string>>;
   /** v2 思考级别（4 档 UI，按模型实际级别数自动映射；1-4，默认 2） */
   thinkingLevel: number;
+  /** v2.4 外观（来自 /api/config appearance 节；设置弹窗保存后即时应用） */
+  fontSize: "xs" | "sm" | "base";
+  streamCursor: boolean;
+  setAppearance: (a: { fontSize?: "xs" | "sm" | "base"; streamCursor?: boolean }) => void;
 
   setModels: (models: ModelConfig[]) => void;
   setModelId: (id: string) => void;
@@ -174,6 +178,10 @@ export const useStore = create<StoreState>()(
   templateId: null,
   phaseModels: {},
   thinkingLevel: 2,
+  fontSize: "sm",
+  streamCursor: true,
+
+  setAppearance: (a) => set((s) => ({ fontSize: a.fontSize ?? s.fontSize, streamCursor: a.streamCursor ?? s.streamCursor })),
 
   setModels: (models) => {
     const cur = get().modelId;
@@ -555,6 +563,8 @@ export const useStore = create<StoreState>()(
       orchestrate: s.orchestrate,
       mode: s.mode,
       activeSessionId: s.activeSessionId,
+      fontSize: s.fontSize,
+      streamCursor: s.streamCursor,
     }),
     merge: (persisted, current) => {
       const p = (persisted ?? {}) as Partial<StoreState>;

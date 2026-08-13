@@ -18,7 +18,7 @@ import { randomUUID } from "node:crypto";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AgentEvent, InfuConfig, ModelConfig, ProviderKind } from "@infu/shared";
-import { loadConfig, resolveModel, resolveFallbackModels, resolveRoleModel, toRuntimeModel, CONFIG_PATH } from "./providers/registry.js";
+import { loadConfig, saveConfig, resolveModel, resolveFallbackModels, resolveRoleModel, toRuntimeModel, CONFIG_PATH } from "./providers/registry.js";
 import { TOOLS } from "./tools/index.js";
 import { runAgent, makeApprovalHandler, DEFAULT_SYSTEM_PROMPT } from "./agent/loop.js";
 import { sanitizeEnv } from "./sandbox/index.js";
@@ -28,6 +28,7 @@ import { findTemplate, renderTemplate } from "./templates.js";
 import { getStore } from "./db/store.js";
 import { rebuildMessages } from "./db/rebuild.js";
 import { inferResumePhase } from "./agent/resume.js";
+import { resolveApprovalPolicy, shouldAutoApprove } from "./approval/policy.js";
 import { loadMcpTools, withMcpTools } from "./mcp/index.js";
 import { mcpCli } from "./mcp/cli.js";
 import { loadPlugins, withPlugins } from "./plugin/index.js";
@@ -79,9 +80,11 @@ function printEvent(e: AgentEvent, prefix = "") {
   }
 }
 
-/** 默认审批：CLI 交互（-y 自动批准；联网放行等 requireExplicit 场景 -y 也不自动放行，一律拒绝）
+/** 默认审批：CLI 交互（-y 自动批准；v2.4 档位 config.approvalPolicy.mode；联网放行等 requireExplicit 场景 -y 也不自动放行，一律拒绝）
  *  统一走 getLines() 单一 readline——避免与 ask() 双实例抢 stdin（v2.3 附加指示被吞的根因） */
 function makeDecider(autoApprove: boolean) {
+  // v2.4 审批档位（guard 层对内置工具已按档位拦截，此处兜底 MCP/插件工具直调 requestApproval 的路径）
+  const policy = resolveApprovalPolicy(loadConfig());
   return async (
     description: string,
     risk: "low" | "medium" | "high",
@@ -89,7 +92,7 @@ function makeDecider(autoApprove: boolean) {
   ) => {
     if (requireExplicit) {
       if (autoApprove) return false; // 联网必须人工确认，自动批准模式不适用
-    } else if (autoApprove) {
+    } else if (autoApprove || shouldAutoApprove(policy, risk) === true) {
       return true;
     }
     process.stderr.write(C.yellow(`  是否允许（y/n，默认 n）？`));
@@ -184,11 +187,6 @@ function ask(question: string, def?: string): Promise<string> {
   return getLines()
     .next()
     .then((r) => r.value?.trim() || def || "");
-}
-
-function saveConfig(cfg: InfuConfig) {
-  mkdirSync(join(homedir(), ".infu"), { recursive: true });
-  writeFileSync(CONFIG_PATH, JSON.stringify({ ...cfg, version: cfg.version ?? 1 }, null, 2), "utf-8");
 }
 
 async function configWizard() {

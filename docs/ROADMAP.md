@@ -78,9 +78,20 @@
   - **函数式钩子**（opencode 式，非命令式）：`preToolUse`（block 拦截/改 args）/`postToolUse`（改 result），挂 loop 统一执行段（对全部工具含 MCP 生效），抛错放行不阻塞；`applyPreToolUseHooks`/`applyPostToolUseHooks` 导出可测。**选型定稿（2026-08-13 联网调研）**：ZCode/Claude Code 的 hooks 是与插件**分离的独立系统**（config 直配 + 子进程 JSON 协议 + user/workspace/plugin 三层），opencode 是插件内函数式统一——InFu 选择 opencode 式（函数式、热加载、简单）；「零插件配钩子」的独立 config 通道**不做**（触发条件：出现真实多端共享钩子/团队策略需求时，届时再评估 B/C 档）
   - **skill 加载**（SKILL.md 社区标准，agentskills.io 规范，progressive disclosure 三级）：发现层 name+description 常驻 Executor system（`buildSkillsPrompt`）+ 激活层内置工具 `use_skill`（第 13 个，low 只读，进 Planner/Reviewer 白名单）读全文 + 执行层按需 read_file references/scripts；目录 `~/.infu/skills/` > `<root>/.infu/skills/` > config `skills[]` 显式；CLI `infu skill add/list/remove` + API `/api/skills`；Web 管理 UI 留 v2.4 设置界面
   - 验证：`npm test` 367 项全绿（新增 tests/plugin.test.ts 61 项）+ 端到端实测（示例插件工具调用 + preToolUse 钩子拦截、SKILL.md use_skill 读取）
-### v2.4 设置界面与终端
-- 配置系统 UI 化：**权限等级设置**（审批模式/按风险/按工具/命令白名单/通配符/禁用工具）+ **沙箱等级设置**（off/L1/L1.5/L2 Docker/自动，取代 INFU_SANDBOX 环境变量）+ 常规/外观/模型设置
-- Web 交互式终端
+### ✅ v2.4 设置界面与终端【批 1 ✅ 2026-08-13，批 2 ✅ 2026-08-13】
+- ✅ **批 1 设置界面（2026-08-13）**：
+  - **配置 schema 扩展**（shared）：四节全 passthrough 兼容——`approvalPolicy`（mode: auto/smart/confirm 默认 smart + toolOverrides[{tool 精确或前缀*, risk?, disabled?}] + commandAllowlist（* 通配））、`sandbox`（mode: auto/off/soft/restricted/docker 默认 auto，取代 INFU_SANDBOX）、`general`（defaultRoot）、`appearance`（fontSize/streamCursor）
+  - **审批策略核心**（新 `approval/policy.ts`）：`shouldAutoApprove` 档位矩阵（auto 全放行/confirm 全人工/smart 现状；requireExplicit 任何档位不豁免）+ `resolveToolRisk`（精确 > 前缀* > 默认）+ `isToolDisabled`（loop 执行段统一拦截全部工具含 MCP/插件）+ `isCommandAllowed`（glob 通配）；guard 加 tool 参数（内置工具逐个接线）+ run_command 危险命令白名单豁免（联网 requireExplicit 永不豁免）+ CLI makeDecider / server requestApproval 接入档位（server auto 档不发弹窗事件）；**顺手修 DANGEROUS 正则 \b 漏检**（dd if=/…、mkfs.ext4 后随符号处无词边界）
+  - **沙箱档位**（sandbox/index.ts）：`SandboxMode` 加 restricted（L1.5 独立成档）；`resolveSandboxMode` env 优先 > config.sandbox.mode > auto；`resolveEffectiveMode` 纯函数（auto：docker → win 受限 → soft；restricted 不可用降级 soft；显式 docker 不可用报错不静默；显式 soft 不再隐式 L1.5——语义修正）；`INFU_SANDBOX_RESTRICTED=0` 保留
+  - **API**：`GET /api/config`（四节 + defaultModelId + 沙箱可用性检测字段 dockerAvailable/winRestrictedOk）、`PUT /api/config`（白名单只写四节 + defaultModelId，strip 模式拒绝未知字段落盘，防提权与 mcp_register 同模式）；saveConfig 4 份拷贝收敛到 registry 单实现
+  - **Web 设置弹窗**（SettingsModal）：顶栏「设置」按钮（Cog）→ w-[820px] 大弹窗 + 左侧竖排导航（常规/权限/沙箱/外观/模型）——权限 Tab（三档 radio 附说明 + 工具覆盖行：工具名/风险下拉/禁用开关 + 命令白名单行）、沙箱 Tab（5 档 + 「当前机器不可用」徽标，docker/restricted 可用性检测）、常规 Tab（默认根目录/默认模型）、外观 Tab（字号 3 档 + 流式光标开关，html data 属性即时应用）、模型 Tab（默认模型 + 跳转完整模型管理）；保存 = 一次 PUT 落盘
+- ✅ **批 2 Web 交互式终端（2026-08-13）**：
+  - 后端 `terminal/`（新）：session.ts（node-pty 真实 PTY：Windows ConPTY；多会话 Map、输出环形缓冲 64KB 供 SSE 重连重放、服务退出统一清理）+ policy.ts（高危命令检测 DANGEROUS_TERMINAL + auditCommand 落盘 sandbox=terminal）；auditCommand 加 logPath 参数（测试注入）
+  - 端点：`POST /api/terminal`（创建，cwd/shell 可选，cmd/powershell/bash 解析）、`POST /api/terminal/:id/input`（**命令级高危审批协议**：携带 command 字段，命中高危且未 confirmed → 拦截返回 requireApproval 不写入；确认后重发执行；每条命令审计）、`POST /api/terminal/:id/resize`、`GET /api/terminal/:id/stream`（SSE：output/exit/ping + 缓冲重放）、`DELETE /api/terminal/:id`、`GET /api/terminal`（列表含诊断字段）
+  - **SSE 传输链路修复（关键）**：@hono/node-server 1.19.x 在 Node 24 下 chunked SSE 数据滞留（write 返回 true 但客户端收不到；最小复现 = serve()+streamSSE 即可，与业务无关）——**服务启动改为原生 Node HTTP 转发**（`forwardResponse`：Web Stream → socket，处理背压 drain/客户端断开；`handleNodeRequest`：IncomingMessage → web Request），Hono 路由与 streamSSE 保持不变；实测终端 SSE 与 /api/chat SSE 均正常
+  - 前端 TerminalPanel（新）：底部通栏（240px）+ 右下角常驻入口按钮；xterm.js Dark OLED 主题 + FitAddon；输入模型（命令字符本地缓冲 + 预览回显，回车清预览行整行发送、退格删预览、控制字符即时透传、**完整转义序列透传**——修复 xterm 聚焦 focus 报告 ESC[O/ESC[I 混入命令的 bug）；高危确认框（拒绝显示 ⛔ 提示/允许执行）；串行写入队列保证 PTY 输入顺序；收起 = 断开 SSE 会话保留（重连重放）
+  - 安全边界（docs/TERMINAL.md）：终端 = 用户亲手输入直连 spawn（不走 L1.5 整命令执行模型——PTY 需交互），env 消毒 + 高危审批 + 全量审计兜底；命令白名单不豁免终端
+  - 验证：`npm test` 542 项全绿（新增 approval-policy 54 / sandbox-config 29 / settings-api 45 / terminal 41）+ CLI/浏览器端到端实测（设置弹窗保存落盘 curl 验证；终端输入回显/高危确认拒绝与允许/审计落盘）
 
 ### v2.5 子智能体与并行
 - 子智能体（opencode 式）：委派、独立上下文、并行执行、结果回收；agent 文件化定义（markdown 定义角色/工具/模型）

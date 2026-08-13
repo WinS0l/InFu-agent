@@ -16,12 +16,13 @@
     "@ai-sdk/gateway": "^3.0.96",
     "@ai-sdk/google": "^3.0.107",
     "@ai-sdk/openai": "^3.0.94",
-    "@hono/node-server": "^1.19.14",
+    "@hono/node-server": "^1.19.17",
     "@infu/sandbox-rs": "*",
     "@infu/shared": "*",
     "@modelcontextprotocol/sdk": "^1.30.0",
     "ai": "^6.0.159",
     "hono": "^4.12.12",
+    "node-pty": "^1.1.0",
     "zod": "^4.0.0"
   },
   "devDependencies": {

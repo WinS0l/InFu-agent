@@ -12,16 +12,17 @@
     "start": "tsx src/server.ts"
   },
   "dependencies": {
-    "@infu/shared": "*",
-    "@infu/sandbox-rs": "*",
-    "@ai-sdk/gateway": "^3.0.96",
-    "@ai-sdk/openai": "^3.0.94",
     "@ai-sdk/anthropic": "^3.0.110",
+    "@ai-sdk/gateway": "^3.0.96",
     "@ai-sdk/google": "^3.0.107",
+    "@ai-sdk/openai": "^3.0.94",
+    "@hono/node-server": "^1.19.14",
+    "@infu/sandbox-rs": "*",
+    "@infu/shared": "*",
+    "@modelcontextprotocol/sdk": "^1.30.0",
     "ai": "^6.0.159",
-    "zod": "^4.0.0",
     "hono": "^4.12.12",
-    "@hono/node-server": "^1.19.14"
+    "zod": "^4.0.0"
   },
   "devDependencies": {
     "@types/node": "^25.0.0",

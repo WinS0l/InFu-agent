@@ -4,6 +4,7 @@ import { fetchModels, sendChat, fetchSessions, fetchSessionEvents, maybeMigrateV
 import Sidebar from "./components/Sidebar";
 import ChatPanel from "./components/ChatPanel";
 import DiffPanel from "./components/DiffPanel";
+import SubagentViewer from "./components/SubagentViewer";
 import ApprovalModal from "./components/ApprovalModal";
 import { RefreshCw, AlertTriangle, Cog } from "lucide-react";
 import SettingsModal from "./components/SettingsModal";
@@ -152,10 +153,12 @@ export default function App() {
       </header>
 
       {/* 三栏主体 */}
-      <div className="flex min-h-0 flex-1">
+      <div className="relative flex min-h-0 flex-1">
         <Sidebar />
         <ChatPanel />
         <DiffPanel />
+        {/* v2.5 子智能体详情弹窗（右侧滑出；点击对话流中的子智能体条目打开） */}
+        <SubagentViewer />
       </div>
 
       {/* v2.4 批 2：Web 交互式终端（底部通栏） */}

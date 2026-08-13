@@ -13,7 +13,7 @@
  * 终态事件（report/done）由编排层统一汇总发出。
  */
 
-import type { AgentEvent, PhaseId, ProviderKind, ToolContext, ToolDef, HookFn, ToolHookInput } from "@infu/shared";
+import type { AgentEvent, PhaseId, ProviderKind, RiskLevel, ToolContext, ToolDef, HookFn, ToolHookInput } from "@infu/shared";
 import { randomUUID } from "node:crypto";
 import { streamChatWithFailover, ModelChain, type ModelCandidate } from "../providers/gateway.js";
 import { zodToJsonSchema, type ChatMessageLike } from "../providers/chat.js";
@@ -79,6 +79,8 @@ export interface AgentRunOptions {
    * 钩子抛错不阻塞主流程（emit 错误事件后放行/原样返回）。
    */
   hooks?: { preToolUse?: HookFn[]; postToolUse?: HookFn[] };
+  /** 委派深度（v2.5 子智能体内部字段：0=顶层；子循环 +1；入 ToolContext 供 delegate_task 深度限制） */
+  delegationDepth?: number;
 }
 
 /** runAgent 运行结果（供编排层汇总报告 / 调用方打印） */
@@ -228,6 +230,7 @@ export async function runAgent(opts: AgentRunOptions): Promise<RunResult> {
     modelConfig, fallbackModelConfigs, system, prompt, tools, root,
     emit, requestApproval, maxSteps = 30, suggestOnly = false, abortSignal,
     phase, suppressFinal = false, initialMessages, thinkingLevel = 2, hooks,
+    delegationDepth = 0,
   } = opts;
 
   const ctx: ToolContext = {
@@ -235,6 +238,12 @@ export async function runAgent(opts: AgentRunOptions): Promise<RunResult> {
     cwd: root,
     requestApproval,
     emit,
+    // ── v2.5 子智能体委派：模型/深度信息随 ctx 传递给工具（delegate_task 解析子模型）──
+    modelConfig,
+    fallbackModelConfigs,
+    thinkingLevel,
+    delegationDepth,
+    abortSignal,
   };
 
   // 模型降级链（v2.2）：主模型重试耗尽 → 依次切换备用模型；切换时发事件（审计/前端徽标）
@@ -400,7 +409,8 @@ export async function runAgent(opts: AgentRunOptions): Promise<RunResult> {
     }
 
     // 2) 解析工具调用参数（JSON）
-    const calls = rawToolCalls
+    type ParsedCall = { toolCallId: string; toolName: string; input: Record<string, unknown> };
+    const calls: ParsedCall[] = rawToolCalls
       .filter((c) => c.id && c.name)
       .map((c) => {
         let input: Record<string, unknown> = {};
@@ -426,23 +436,28 @@ export async function runAgent(opts: AgentRunOptions): Promise<RunResult> {
     }
 
     // 3) 执行工具（含审批；v2.3 批 2 函数式钩子：preToolUse 拦截/改参，postToolUse 改结果）
+    // v2.5：同轮多个工具调用**并行执行**（对齐 ZCode「同一消息多个工具调用并发运行」——
+    // 模型可一次派发多个 delegate_task 等长任务，同时跑；结果按原调用顺序回填）
     const toolResultParts: Array<{ role: "tool"; tool_call_id: string; content: string }> = [];
+
+    // 3.1) 预处理（顺序）：禁用检查 + tool-start 事件 + preToolUse 钩子；收集待执行调用
+    const execs: Array<{
+      call: typeof calls[number];
+      args: Record<string, unknown>;
+      risk: RiskLevel;
+      /** 占位结果（禁用/钩子拦截：不执行，直接回填） */
+      skipped?: { ok: boolean; msg: string };
+    }> = [];
     for (const call of calls) {
       const execute = toolExecutors.get(call.toolName);
       if (!execute) {
-        toolResultParts.push({
-          role: "tool", tool_call_id: call.toolCallId,
-          content: `错误：未知工具 ${call.toolName}`,
-        });
+        execs.push({ call, args: call.input, risk: "low", skipped: { ok: false, msg: `错误：未知工具 ${call.toolName}` } });
         continue;
       }
       // v2.4 审批策略：工具级覆盖统一生效（禁用拦截 + 风险覆盖；对全部工具含 MCP/插件）
       const policy = currentApprovalPolicy();
       if (isToolDisabled(call.toolName, policy.toolOverrides)) {
-        const msg = `错误：工具 ${call.toolName} 已被审批策略禁用`;
-        emit({ type: "tool-result", tool: call.toolName, ok: false, summary: msg, callId: call.toolCallId });
-        toolLogs.push({ tool: call.toolName, args: call.input, ok: false, summary: msg });
-        toolResultParts.push({ role: "tool", tool_call_id: call.toolCallId, content: msg });
+        execs.push({ call, args: call.input, risk: "low", skipped: { ok: false, msg: `错误：工具 ${call.toolName} 已被审批策略禁用` } });
         continue;
       }
       const risk = resolveToolRisk(call.toolName, tools[call.toolName]?.risk ?? "low", policy.toolOverrides);
@@ -455,31 +470,43 @@ export async function runAgent(opts: AgentRunOptions): Promise<RunResult> {
         emit
       );
       if (blocked) {
-        const msg = `用户拒绝：${blocked}`;
-        emit({ type: "tool-result", tool: call.toolName, ok: false, summary: msg, callId: call.toolCallId });
-        toolLogs.push({ tool: call.toolName, args, ok: false, summary: msg });
-        toolResultParts.push({ role: "tool", tool_call_id: call.toolCallId, content: msg });
+        execs.push({ call, args, risk, skipped: { ok: false, msg: `用户拒绝：${blocked}` } });
         continue;
       }
-      try {
-        let out = await execute(args, ctx);
-        // ── postToolUse 钩子（改写回填模型的工具结果文本；抛错放行）──
-        out = await applyPostToolUseHooks(
-          hooks?.postToolUse,
-          { tool: call.toolName, args, callId: call.toolCallId, risk, phase: phase?.id },
-          out,
-          emit
-        );
-        // summary 推完整输出（v2.1 会话落库与 Diff 面板需要完整内容；显示层自行截断）
-        emit({ type: "tool-result", tool: call.toolName, ok: true, summary: out, callId: call.toolCallId });
-        toolLogs.push({ tool: call.toolName, args, ok: true, summary: out });
-        toolResultParts.push({ role: "tool", tool_call_id: call.toolCallId, content: out });
-      } catch (e) {
-        const msg = `工具执行异常: ${(e as Error).message}`;
-        emit({ type: "tool-result", tool: call.toolName, ok: false, summary: msg, callId: call.toolCallId });
-        toolLogs.push({ tool: call.toolName, args, ok: false, summary: msg });
-        toolResultParts.push({ role: "tool", tool_call_id: call.toolCallId, content: msg });
-      }
+      execs.push({ call, args, risk });
+    }
+
+    // 3.2) 并行执行（v2.5）：每个调用独立 ctx 浅拷贝（callId 隔离，防并行时相互覆盖）
+    const results = await Promise.all(
+      execs.map(async ({ call, args, risk, skipped }) => {
+        if (skipped) return { call, args, ok: skipped.ok, out: skipped.msg };
+        // v2.5：执行前检查中止——父已终止时不再启动新工具（正在执行的工具由各工具尽快返回）
+        if (abortSignal?.aborted) {
+          return { call, args, ok: false, out: "任务已停止（用户中止）" };
+        }
+        try {
+          const execute = toolExecutors.get(call.toolName)!; // 预处理已确认存在
+          let out = await execute(args, { ...ctx, callId: call.toolCallId });
+          // ── postToolUse 钩子（改写回填模型的工具结果文本；抛错放行）──
+          out = await applyPostToolUseHooks(
+            hooks?.postToolUse,
+            { tool: call.toolName, args, callId: call.toolCallId, risk, phase: phase?.id },
+            out,
+            emit
+          );
+          return { call, args, ok: true, out };
+        } catch (e) {
+          return { call, args, ok: false, out: `工具执行异常: ${(e as Error).message}` };
+        }
+      })
+    );
+
+    // 3.3) 按原调用顺序回填（tool-result 事件 + 日志 + 消息——顺序与 assistant tool_calls 一致）
+    for (const { call, args, ok, out } of results) {
+      // summary 推完整输出（v2.1 会话落库与 Diff 面板需要完整内容；显示层自行截断）
+      emit({ type: "tool-result", tool: call.toolName, ok, summary: out, callId: call.toolCallId });
+      toolLogs.push({ tool: call.toolName, args, ok, summary: out });
+      toolResultParts.push({ role: "tool", tool_call_id: call.toolCallId, content: out });
     }
 
     // 4) 回填消息，进入下一轮

@@ -42,6 +42,41 @@ export interface ToolEventState {
   phase?: PhaseId;
   /** 开始时间戳（思考耗时计算） */
   startedAt: number;
+  /** v2.5：模型工具调用 id（subagent-start 的 parentCallId 关联委派条目锚点） */
+  callId?: string;
+  /** v2.5：所属子智能体 id（delegate_task 条目挂载；主对话流点击打开右侧栏详情） */
+  subagentId?: string;
+}
+
+/**
+ * 子智能体消息（右侧栏弹窗消息流；与父 Agent 消息同构：思考/文本/工具过程）
+ */
+export interface SubagentMsg {
+  id: string;
+  text: string;
+  reasoning?: string;
+  tools: ToolEventState[];
+  step: number;
+}
+
+/**
+ * 子智能体完整线程（v2.5 返工：对齐 opencode/Claude Code——子 Agent 独立会话视图，
+ * 右侧栏弹窗展示完整消息流；主对话流只显示派出条目，点击打开）
+ */
+export interface SubagentThread {
+  id: string;
+  name: string;
+  model?: string;
+  prompt: string;
+  status: "running" | "done" | "error";
+  ok?: boolean;
+  steps: number;
+  toolCount: number;
+  /** 最终摘要（subagent-done 携带） */
+  summary: string;
+  /** 只读委派（免审批）标记：主对话流徽标展示用（只读 → 绿色「只读」，写能力 → [high]） */
+  readOnly?: boolean;
+  messages: SubagentMsg[];
 }
 
 export interface ApprovalState {
@@ -138,6 +173,16 @@ interface StoreState {
   clearPlan: () => void;
   requestApproval: (ev: Extract<AgentEvent, { type: "approval-required" }>) => void;
   resolveApproval: (approved: boolean) => void;
+  // ── v2.5 子智能体（主对话流条目 + 右侧栏详情弹窗）──
+  startSubagent: (ev: Extract<AgentEvent, { type: "subagent-start" }>) => void;
+  updateSubagent: (ev: AgentEvent) => void;
+  finishSubagent: (ev: Extract<AgentEvent, { type: "subagent-done" }>) => void;
+  /** 子智能体线程（右侧栏弹窗数据：与父 Agent 同构的消息流） */
+  subagentThreads: Record<string, SubagentThread>;
+  /** 当前打开的详情弹窗（subagentId；null = 关闭） */
+  subagentViewer: string | null;
+  openSubagentViewer: (id: string) => void;
+  closeSubagentViewer: () => void;
   setReport: (content: string) => void;
   finishAssistant: () => void;
   addError: (msg: string) => void;
@@ -151,6 +196,114 @@ const nextId = () => `m${++msgSeq}`;
 export function stepKey(phase: PhaseId | null | undefined, step: number): string {
   return `${phase ?? "agent"}:${step}`;
 }
+
+/**
+ * v2.5 子智能体定位：在消息树中按条件找到最近命中的工具卡片并应用更新（不可变更新）。
+ * 委派卡片唯一性：一个 subagent 只挂在它自己的 delegate 卡片上，故只改最近一个命中。
+ */
+function mapTool(
+  msgs: ChatMsg[],
+  find: (t: ToolEventState) => boolean,
+  fn: (t: ToolEventState) => ToolEventState
+): ChatMsg[] | null {
+  for (let i = msgs.length - 1; i >= 0; i--) {
+    const idx = msgs[i].tools.findIndex(find);
+    if (idx >= 0) {
+      const next = [...msgs];
+      const tools = [...msgs[i].tools];
+      tools[idx] = fn(msgs[i].tools[idx]);
+      next[i] = { ...msgs[i], tools };
+      return next;
+    }
+  }
+  return null;
+}
+
+/** 新建子智能体线程（subagent-start 初始化） */
+function newSubagentThread(ev: { id: string; name: string; model?: string; prompt: string; readOnly?: boolean }): SubagentThread {
+  return {
+    id: ev.id,
+    name: ev.name,
+    model: ev.model,
+    prompt: ev.prompt,
+    status: "running",
+    steps: 0,
+    toolCount: 0,
+    summary: "",
+    readOnly: ev.readOnly,
+    messages: [],
+  };
+}
+
+/**
+ * subagent-start 事件路由：优先按 parentCallId 关联委派工具条目（挂 subagentId，
+ * 主对话流点击打开详情），缺失时回退到「最近一个运行中的 delegate_task 条目」。
+ */
+function attachSubagentId(msgs: ChatMsg[], ev: Extract<AgentEvent, { type: "subagent-start" }>): ChatMsg[] {
+  const byCall = ev.parentCallId
+    ? mapTool(msgs, (t) => t.callId === ev.parentCallId, (t) => ({ ...t, subagentId: ev.id }))
+    : null;
+  if (byCall) return byCall;
+  return (
+    mapTool(msgs, (t) => t.tool === "delegate_task" && t.status === "running", (t) => ({ ...t, subagentId: ev.id })) ??
+    msgs
+  );
+}
+
+/**
+ * 子智能体内部过程事件路由（带 subagentId）：收集进线程消息流（右侧栏详情的数据源；
+ * 与父 Agent 消息同构——思考/文本/工具过程）。主对话流不再内嵌展示。
+ */
+function routeSubagentEvent(threads: Record<string, SubagentThread>, ev: AgentEvent): boolean {
+  if (!ev || !("subagentId" in ev) || !ev.subagentId) return false;
+  const id = ev.subagentId;
+  const thread = threads[id];
+  if (!thread) return false;
+  const msgs = thread.messages;
+  const cur = msgs[msgs.length - 1];
+  switch (ev.type) {
+    case "step-start": {
+      // 新一轮 = 新消息（与父 Agent 同构）；同轮重复 step-start 忽略
+      if (cur && (cur.text || cur.reasoning || cur.tools.length)) {
+        msgs.push({ id: `${id}-s${ev.step}`, text: "", tools: [], step: ev.step });
+      }
+      break;
+    }
+    case "text":
+      if (!cur) msgs.push({ id: `${id}-s1`, text: "", tools: [], step: 1 });
+      msgs[msgs.length - 1].text += ev.text;
+      break;
+    case "reasoning":
+      if (!cur) msgs.push({ id: `${id}-s1`, text: "", tools: [], step: 1 });
+      msgs[msgs.length - 1].reasoning = (msgs[msgs.length - 1].reasoning ?? "") + ev.text;
+      break;
+    case "tool-start":
+      if (!cur) msgs.push({ id: `${id}-s1`, text: "", tools: [], step: 1 });
+      msgs[msgs.length - 1].tools.push({
+        id: `${id}-t${msgs[msgs.length - 1].tools.length}-${ev.tool}`,
+        tool: ev.tool,
+        args: ev.args,
+        risk: ev.risk,
+        status: "running",
+        step: msgs[msgs.length - 1].step,
+        startedAt: Date.now(),
+      });
+      break;
+    case "tool-result": {
+      const tools = msgs[msgs.length - 1]?.tools;
+      if (tools) {
+        const x = tools.find((it) => it.tool === ev.tool && it.status === "running");
+        if (x) { x.status = ev.ok ? "ok" : "error"; x.summary = ev.summary; }
+      }
+      break;
+    }
+    default:
+      break; // approval-*/model-fallback/context-compressed 等不进入消息流
+  }
+  return true;
+}
+
+/** v2.5 重放辅助：子智能体过程事件 → 线程（会话历史重建） */
 
 export const useStore = create<StoreState>()(
   persist(
@@ -171,6 +324,8 @@ export const useStore = create<StoreState>()(
   currentPhase: null,
   mode: "orchestrate",
   plan: null,
+  subagentThreads: {},
+  subagentViewer: null,
   currentStep: 1,
   stepStartTimes: {},
   diffContent: "",
@@ -212,18 +367,24 @@ export const useStore = create<StoreState>()(
       currentPhase: null,
       phaseModels: {},
       plan: null,
+      subagentThreads: {},
+      subagentViewer: null,
     }),
 
   /** 历史会话重放：事件流 → 消息（复用消息结构，右侧 Diff/文件改动一并恢复） */
   loadSession: (events) => {
-    const msgs: ChatMsg[] = [];
+    let msgs: ChatMsg[] = [];
     const fileChanges: string[] = [];
     let diffContent = "";
     let cur: ChatMsg | null = null; // 当前 assistant 轮次（每个 step-start 一条）
     let phase: PhaseId | undefined;
     const phaseModels: Partial<Record<PhaseId, string>> = {}; // v2.2 阶段模型记录
     let currentStep = 1;
+    // v2.5：子智能体线程重建（右侧栏详情数据源；主对话流只挂条目 id）
+    const subagentThreads: Record<string, SubagentThread> = {};
     for (const { seq, ts, event } of events) {
+      // v2.5：子智能体内部事件（带 subagentId）→ 收集进线程消息流，不进入主消息流
+      if (routeSubagentEvent(subagentThreads, event)) continue;
       switch (event.type) {
         case "user-message":
           // seqStart 记 user-message 事件 seq（回滚锚点：编辑重发 = 替换这条用户消息）
@@ -261,6 +422,7 @@ export const useStore = create<StoreState>()(
             step: currentStep,
             phase,
             startedAt: ts, // 历史时间戳（耗时展示）
+            callId: event.callId,
           });
           break;
         }
@@ -272,6 +434,28 @@ export const useStore = create<StoreState>()(
           // 恢复右侧面板（与 finishTool 同规则）
           if (event.tool === "git_diff" || /^diff --git/m.test(event.summary)) diffContent = event.summary;
           if (event.tool === "write_file" || event.tool === "edit_file") fileChanges.push(event.summary);
+          break;
+        }
+        case "subagent-start": {
+          // 委派条目关联。注意：必须**原地**挂 subagentId——不可变替换（mapTool）会让
+          // 重放循环的 cur 指向旧消息对象，tool-result 更新旧对象而渲染的是新对象
+          // → 委派工具保持 running → 收尾误标 error（✗ 红框 bug）
+          const target =
+            (event.parentCallId ? cur?.tools.find((x) => x.callId === event.parentCallId) : undefined) ??
+            cur?.tools.find((x) => x.tool === "delegate_task" && x.status === "running");
+          if (target) target.subagentId = event.id;
+          subagentThreads[event.id] = newSubagentThread(event);
+          break;
+        }
+        case "subagent-done": {
+          const t = subagentThreads[event.id];
+          if (t) {
+            t.status = event.ok ? "done" : "error";
+            t.ok = event.ok;
+            t.steps = event.steps;
+            t.toolCount = event.toolCount;
+            t.summary = event.text;
+          }
           break;
         }
         case "report":
@@ -319,6 +503,8 @@ export const useStore = create<StoreState>()(
       pendingRollback: null,
       running: false,
       approvals: [],
+      subagentThreads,
+      subagentViewer: null,
     });
   },
 
@@ -443,6 +629,7 @@ export const useStore = create<StoreState>()(
       step: get().currentStep,
       phase: get().currentPhase ?? undefined,
       startedAt: Date.now(),
+      callId: ev.callId,
     };
     set((s) => ({
       messages: s.messages.map((m) =>
@@ -512,6 +699,44 @@ export const useStore = create<StoreState>()(
     }).catch(() => {});
   },
 
+  /** v2.5：subagent-start → 主对话流委派条目挂 subagentId + 初始化线程（右侧栏详情数据源） */
+  startSubagent: (ev) =>
+    set((s) => ({
+      messages: attachSubagentId(s.messages, ev),
+      subagentThreads: { ...s.subagentThreads, [ev.id]: newSubagentThread(ev) },
+    })),
+
+  /** v2.5：带 subagentId 的子智能体内部事件 → 收集进线程消息流（不进入主消息流） */
+  updateSubagent: (ev) => {
+    const s = useStore.getState();
+    const threads = { ...s.subagentThreads };
+    if (routeSubagentEvent(threads, ev)) useStore.setState({ subagentThreads: threads });
+  },
+
+  /** v2.5：subagent-done → 线程状态与最终摘要 */
+  finishSubagent: (ev) =>
+    set((s) => {
+      const t = s.subagentThreads[ev.id];
+      if (!t) return {};
+      return {
+        subagentThreads: {
+          ...s.subagentThreads,
+          [ev.id]: {
+            ...t,
+            status: ev.ok ? "done" : "error",
+            ok: ev.ok,
+            steps: ev.steps,
+            toolCount: ev.toolCount,
+            summary: ev.text,
+          },
+        },
+      };
+    }),
+
+  /** v2.5：打开/关闭右侧栏子智能体详情弹窗 */
+  openSubagentViewer: (id) => set({ subagentViewer: id }),
+  closeSubagentViewer: () => set({ subagentViewer: null }),
+
   setReport: (content) =>
     set((s) => ({
       messages: s.messages.map((m, i) =>
@@ -552,6 +777,8 @@ export const useStore = create<StoreState>()(
       stepStartTimes: {},
       currentPhase: null,
       plan: null,
+      subagentThreads: {},
+      subagentViewer: null,
     }),
   }),
   {

@@ -19,7 +19,7 @@ import {
 import type { RiskLevel } from "@infu/shared";
 import { useStore } from "../store";
 import { fetchConfig, updateConfig, type ApprovalMode, type SettingsConfig, type ToolRiskOverrideInput } from "../api";
-import { McpPane, PluginsPane, SkillsPane, HooksPane, ComingSoonPane } from "./SettingsPanes";
+import { McpPane, PluginsPane, SkillsPane, AgentsPane, HooksPane, ComingSoonPane } from "./SettingsPanes";
 import ModelPane from "./ModelPane";
 
 export type SettingsTab =
@@ -94,7 +94,7 @@ const NAV_GROUPS: Array<{ label: string; items: Array<{ id: SettingsTab; label: 
       { id: "memory", label: "记忆", icon: BrainCircuit, planned: true },
       { id: "plugins", label: "插件", icon: Blocks },
       { id: "skills", label: "技能", icon: Bot },
-      { id: "subagent", label: "子智能体", icon: Bot, planned: true },
+      { id: "subagent", label: "子智能体", icon: Bot },
       { id: "mcp", label: "MCP 服务器", icon: Plug },
       { id: "commands", label: "命令", icon: ShieldCheck },
       { id: "hooks", label: "钩子", icon: Blocks },
@@ -120,11 +120,6 @@ const PLANNED: Record<string, { name: string; desc: string; roadmap: string }> =
     name: "记忆",
     desc: "三层记忆系统（项目记忆 / 任务总和记忆 / 全局记忆）的管理：启用开关、来源与检索。形态实施前需单独讨论定稿。",
     roadmap: "规划：v2.6 记忆与任务",
-  },
-  subagent: {
-    name: "子智能体",
-    desc: "子智能体（opencode 式）：委派、独立上下文、并行执行、结果回收；agent 文件化定义（markdown 定义角色/工具/模型）。",
-    roadmap: "规划：v2.5 子智能体与并行",
   },
   index: {
     name: "索引库",
@@ -345,6 +340,7 @@ export default function SettingsModal({ onClose, initialTab = "general" }: Props
 
             {tab === "plugins" && <PluginsPane />}
             {tab === "skills" && <SkillsPane />}
+            {tab === "subagent" && <AgentsPane />}
             {tab === "mcp" && <McpPane />}
             {tab === "hooks" && <HooksPane />}
 

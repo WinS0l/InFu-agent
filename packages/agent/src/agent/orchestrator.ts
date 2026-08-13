@@ -110,6 +110,8 @@ export interface OrchestratedRunOptions {
   hooks?: import("./loop.js").AgentRunOptions["hooks"];
   /** skill 发现层提示段（追加到 Executor system；Planner/Reviewer 保持简洁，v1 不注入） */
   skillsPrompt?: string;
+  /** v2.5：子智能体发现层提示段（可用 agent 角色 name+description；追加到 Executor system） */
+  agentsPrompt?: string;
 }
 
 /** 编排运行结果（含各阶段产出） */
@@ -129,7 +131,7 @@ export async function runOrchestratedTask(opts: OrchestratedRunOptions): Promise
     modelConfig, fallbackModelConfigs, roleModelConfigs, initialMessages, prompt, root, emit, requestApproval,
     maxSteps, abortSignal, orchestrate = "full", planApproval = true,
     confirmPlan, templateId, thinkingLevel, roleThinking, executorTools, startPhase, resumePlanText,
-    hooks, skillsPrompt,
+    hooks, skillsPrompt, agentsPrompt,
   } = opts;
 
   let planText = resumePlanText ?? "";
@@ -273,7 +275,7 @@ export async function runOrchestratedTask(opts: OrchestratedRunOptions): Promise
     fallbackModelConfigs: rcExec.fallbackModelConfigs,
     thinkingLevel: roleThink("executor"),
     initialMessages,
-    system: EXECUTOR_SYSTEM_PROMPT + (skillsPrompt ?? ""),
+    system: EXECUTOR_SYSTEM_PROMPT + (skillsPrompt ?? "") + (agentsPrompt ?? ""),
     prompt: execPrompt,
     tools: executorTools ? withMcpTools(TOOLS, executorTools) : TOOLS,
     hooks,

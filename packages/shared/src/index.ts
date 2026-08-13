@@ -270,16 +270,20 @@ export type PhaseId = "planner" | "executor" | "reviewer";
 /** 分层编排模式：off=单 Agent；plan=Planner→Executor；full=Planner→Executor→Reviewer */
 export type OrchestrateMode = "off" | "plan" | "full";
 
-/** Agent 过程事件（CLI 打印 / SSE 推送前端；v2.1 起全量落库 ~/.infu/infu.db） */
+/**
+ * Agent 过程事件（CLI 打印 / SSE 推送前端；v2.1 起全量落库 ~/.infu/infu.db）。
+ * v2.5：过程事件（text/step/tool/审批/降级/压缩）可携带可选 `subagentId`——
+ * 子智能体委派（delegate_task 内部事件打标，用于审计归属；UI 不再内嵌展示内部过程）。
+ */
 export type AgentEvent =
-  | { type: "text"; text: string }
-  | { type: "reasoning"; text: string }
-  | { type: "step-start"; step: number }
-  | { type: "phase-start"; phase: PhaseId; label: string; /** v2.2：该阶段实际使用的模型（角色路由后） */ model?: string }
-  | { type: "tool-start"; tool: string; args: Record<string, unknown>; risk: RiskLevel; callId?: string }
-  | { type: "tool-result"; tool: string; ok: boolean; summary: string; callId?: string }
-  | { type: "approval-required"; id: string; description: string; risk: RiskLevel }
-  | { type: "approval-result"; id: string; approved: boolean }
+  | { type: "text"; text: string; subagentId?: string }
+  | { type: "reasoning"; text: string; subagentId?: string }
+  | { type: "step-start"; step: number; subagentId?: string }
+  | { type: "phase-start"; phase: PhaseId; label: string; /** v2.2：该阶段实际使用的模型（角色路由后） */ model?: string; subagentId?: string }
+  | { type: "tool-start"; tool: string; args: Record<string, unknown>; risk: RiskLevel; callId?: string; subagentId?: string }
+  | { type: "tool-result"; tool: string; ok: boolean; summary: string; callId?: string; subagentId?: string }
+  | { type: "approval-required"; id: string; description: string; risk: RiskLevel; subagentId?: string }
+  | { type: "approval-result"; id: string; approved: boolean; subagentId?: string }
   | { type: "report"; content: string }
   | { type: "review"; content: string }
   | { type: "plan"; id: string; content: string }
@@ -287,14 +291,30 @@ export type AgentEvent =
   | { type: "error"; message: string }
   // ── v2.2 模型可靠性新增 ──
   /** 模型降级切换（主模型失败 → 备用模型；Timeline 展示与审计） */
-  | { type: "model-fallback"; from: string; to: string; reason: string }
+  | { type: "model-fallback"; from: string; to: string; reason: string; subagentId?: string }
   /** 上下文压缩（v2.2：历史超预算时摘要化，before/after 为估算 token；DB 事件流无损） */
-  | { type: "context-compressed"; before: number; after: number; summary: string }
+  | { type: "context-compressed"; before: number; after: number; summary: string; subagentId?: string }
+  // ── v2.5 子智能体委派新增 ──
+  /** 子智能体启动（delegate_task 委派；parentCallId 关联父级委派工具调用的 callId；readOnly=只读委派免审批） */
+  | { type: "subagent-start"; id: string; name: string; prompt: string; parentCallId?: string; model?: string; readOnly?: boolean }
+  /** 子智能体完成（结果回收：最终摘要文本/步数/工具次数） */
+  | { type: "subagent-done"; id: string; text: string; steps: number; toolCount: number; ok: boolean }
   // ── v2.1 会话持久化新增 ──
   /** SSE 首帧：回传新会话 id（Web 端绑定 activeSessionId） */
   | { type: "session"; id: string }
   /** 用户消息（服务端落库/重放历史用；模型不消费） */
   | { type: "user-message"; text: string };
+
+/** 运行时模型信息（v2.5：ToolContext 携带，子智能体委派解析子模型用；结构同 registry toRuntimeModel 返回值） */
+export interface RuntimeModelInfo {
+  provider: string;
+  model: string;
+  baseURL?: string;
+  apiKey: string;
+  contextWindow?: number;
+  thinkingLevels?: number;
+  thinkingOverride?: Array<Record<string, unknown> | null>;
+}
 
 /** 工具执行上下文 */
 export interface ToolContext {
@@ -313,6 +333,19 @@ export interface ToolContext {
   ) => Promise<boolean>;
   /** 事件推送 */
   emit: (event: AgentEvent) => void;
+  // ── v2.5 子智能体委派（runAgent 填充；delegate_task 解析子模型/深度限制）──
+  /** 当前 Agent 的模型配置（子智能体缺省继承；modelId 显式指定时覆盖） */
+  modelConfig?: RuntimeModelInfo;
+  /** 备用模型降级链（子智能体继承父级） */
+  fallbackModelConfigs?: RuntimeModelInfo[];
+  /** 思考级别（4 档 UI；子智能体继承，agent 文件 thinkingLevel 可覆盖） */
+  thinkingLevel?: number;
+  /** 委派深度（0=顶层；子智能体 +1；超 MAX_DELEGATION_DEPTH 拒绝再委派） */
+  delegationDepth?: number;
+  /** 中止信号（子智能体循环跟随父级） */
+  abortSignal?: AbortSignal;
+  /** v2.5：当前工具调用的 callId（loop 每次 execute 前填充；delegate_task 作 subagent-start 的 parentCallId） */
+  callId?: string;
 }
 
 /** 工具定义（统一接口） */

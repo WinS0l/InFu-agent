@@ -81,6 +81,9 @@ export function rebuildMessages(events: StoredEvent[], opts: RebuildOptions = {}
   };
 
   for (const { event } of slice) {
+    // v2.5：子智能体内部事件（带 subagentId）跳过——父级上下文只保留委派工具的结果文本，
+    // 内部工具调用/步骤不进入父上下文（防孤儿 tool-result 误配对与上下文爆炸）
+    if (event && "subagentId" in event && event.subagentId) continue;
     switch (event.type) {
       case "user-message":
         flush();

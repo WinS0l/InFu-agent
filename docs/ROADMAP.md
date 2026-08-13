@@ -93,9 +93,9 @@
   - 安全边界（docs/TERMINAL.md）：终端 = 用户亲手输入直连 spawn（不走 L1.5 整命令执行模型——PTY 需交互），env 消毒 + 高危审批 + 全量审计兜底；命令白名单不豁免终端
   - 验证：`npm test` 542 项全绿（新增 approval-policy 54 / sandbox-config 29 / settings-api 45 / terminal 41）+ CLI/浏览器端到端实测（设置弹窗保存落盘 curl 验证；终端输入回显/高危确认拒绝与允许/审计落盘）
 
-### v2.5 子智能体与并行
-- 子智能体（opencode 式）：委派、独立上下文、并行执行、结果回收；agent 文件化定义（markdown 定义角色/工具/模型）
-- best-of-n Web 端并行 UI（并行任务卡片 + 择优对比）
+### ✅ v2.5 子智能体与并行【完成 2026-08-13】
+- ✅ **子智能体（opencode 式，2026-08-13）**：`delegate_task`（第 14 个内置工具）——独立上下文 + 结果回收 + **同轮多工具调用并行执行**（loop 3.2 段 Promise.all，对齐 ZCode）+ `tasks[]` 并行批量（最多 6）；**agent 文件化定义**（`.infu/agents/<name>.md` frontmatter：description/tools/model/maxSteps/thinkingLevel/permission/sandbox）；**内置 agent 对齐 ZCode**（general-purpose=全工具 / explore=只读，调用时机经 ZCode 本机 33 次调用实证：explore 67% 只读探索调研 / general-purpose 33% 深度审计）；**审批对齐 ZCode**（只读委派免审批、写能力一次授权、内部继承授权、requireExplicit 红线逐条、agent 名不存在直接报错）；**展示对齐 opencode/Claude Code**（主对话流条目 + 右侧栏完整消息流弹窗，内部过程不进主对话流）；**摘要完整接收**（≤2000 字结构化约定 + 20K 兜底）；设置面板可编辑 agent（工具/权限/沙箱/模型/推理强度）；`npm test` 641 项全绿 + CLI/浏览器端到端
+- ✅ **best-of-n 按用户评审完全移除（2026-08-13）**：同任务 N 路竞速被判定多余（同模型同工具产出趋同；主流 Agent 并发全是「不同任务并行」）——删除 CLI `--best-of-n`、server 分支、Web 第 4 档模式 + TrialsPanel、tests/parallel.test.ts、docs/BEST-OF-N.md；真并发 = delegate tasks 不同任务并行（见上）
 
 ### v2.6 记忆与任务
 - 记忆系统三层（项目记忆/任务总和记忆/全局记忆；形态实施前讨论）+ 项目级指令文件（INFU.md）+ 路径作用域规则
@@ -113,7 +113,7 @@
 
 - ⏳ **v3 团队/公司版 InFu（触发条件已定义，2026-08-12）**：Agent 跑在云端服务器 + 云端沙箱 + 多租户隔离/认证授权。**触发条件 = 出现第二个真实用户或明确的团队使用场景**——在那之前不做（v2 聚焦单机个人化深耕）。**若落地，microVM 随本项一并触发**（多租户 = 不可信代码场景，ROADMAP 已定义）；届时网络隔离在可控环境（云服务器）下随 microVM 一并解决。v3 立项时再讨论具体形态
 - ⏳ WSL2 原生沙箱（bubblewrap/Landlock）作为 L3 备选
-- ⏳ /best-of-n Web 端并行 UI（CLI 版已完成，Web 版需审批/计划确认通道加 taskId）
+- ⏳ 子智能体增强（恢复子智能体 / 后台模式——参考 Claude Code `SendMessage` 恢复与 Agent View 仪表盘；InFu 事件全量落库已具备重放基础）
 
 ---
 

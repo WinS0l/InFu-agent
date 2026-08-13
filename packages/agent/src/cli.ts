@@ -23,7 +23,6 @@ import { TOOLS } from "./tools/index.js";
 import { runAgent, makeApprovalHandler, DEFAULT_SYSTEM_PROMPT } from "./agent/loop.js";
 import { sanitizeEnv } from "./sandbox/index.js";
 import { runOrchestratedTask } from "./agent/orchestrator.js";
-import { runBestOfN, formatComparison } from "./best-of-n.js";
 import { findTemplate, renderTemplate } from "./templates.js";
 import { getStore } from "./db/store.js";
 import { rebuildMessages } from "./db/rebuild.js";
@@ -33,7 +32,9 @@ import { loadMcpTools, withMcpTools } from "./mcp/index.js";
 import { mcpCli } from "./mcp/cli.js";
 import { loadPlugins, withPlugins } from "./plugin/index.js";
 import { listSkills, buildSkillsPrompt } from "./plugin/skills.js";
+import { listAgents, buildAgentsPrompt } from "./agent/agents.js";
 import { pluginCli, skillCli } from "./plugin/cli.js";
+import { agentCli } from "./agent/agent-cli.js";
 import type { ChatMessageLike } from "./providers/chat.js";
 
 const require = createRequire(import.meta.url);
@@ -76,6 +77,12 @@ function printEvent(e: AgentEvent, prefix = "") {
       break;
     case "error":
       console.error(C.red(`\n${P}✗ ${e.message}`));
+      break;
+    case "subagent-start":
+      console.error(C.cyan(`\n${P}◇ 子智能体「${e.name}」启动${e.model ? C.dim(` 模型=${e.model}`) : ""}`));
+      break;
+    case "subagent-done":
+      console.error(C.green(`\n${P}◇ 子智能体完成（${e.steps} 步 / ${e.toolCount} 次工具）：${e.text.slice(0, 200).replace(/\n/g, " ")}`));
       break;
   }
 }
@@ -313,6 +320,11 @@ async function main() {
     return;
   }
 
+  if (args[0] === "agent") {
+    agentCli(args.slice(1)).catch((e) => console.error(C.red(`\n✗ agent: ${e.message}`)));
+    return;
+  }
+
   if (args[0] === "config") {
     configWizard().catch((e) => console.error(C.red(`\n✗ 配置失败: ${e.message}`)));
     return;
@@ -360,7 +372,7 @@ async function main() {
   const getRepeatedArgs = (name: string): string[] =>
     args.flatMap((a, i) => (a === name && args[i + 1] ? [args[i + 1]] : []));
   // 任务 prompt 提取：跳过全部参数（带值参数连同其值，开关单独跳过）——顺带修复参数值混入 prompt 的既有问题
-  const VALUE_ARGS = new Set(["--root", "--model", "--fallback-model", "--max-steps", "--template", "--best-of-n", "--session", "--thinking",
+  const VALUE_ARGS = new Set(["--root", "--model", "--fallback-model", "--max-steps", "--template", "--session", "--thinking",
     "--planner-model", "--executor-model", "--reviewer-model"]);
   const FLAG_ONLY = new Set(["-y", "--yes", "--suggest", "--no-orchestrate", "--no-plan-approval"]);
   let prompt = "";
@@ -387,7 +399,6 @@ async function main() {
   const orchestrate = args.includes("--no-orchestrate") ? "off" : "full";
   const planApproval = !args.includes("--no-plan-approval");
   const templateId = getArg("--template");
-  const bestOfN = parseInt(getArg("--best-of-n") || "", 10) || 0;
 
   // 模板任务：--template <id> 用模板 prompt 代替手动输入（字段用默认值）
   if (templateId) {
@@ -410,6 +421,7 @@ async function main() {
   infu mcp add/list/remove/status   MCP 服务器管理（v2.3：工具动态注入执行阶段）
   infu plugin add/list/remove/status   插件管理（v2.3 批 2：JS 模块 = 工具/钩子/技能）
   infu skill add/list/remove       技能管理（SKILL.md 社区标准）
+  infu agent list                  子智能体列表（v2.5：.infu/agents/<name>.md 文件即注册）
   infu --session <id> "继续的指令"   继续之前的会话（消息级重建：完整恢复历史与进度）
   infu --setup   生成模型配置模板（JSON）
   infu --suggest 建议模式（模型只出方案，不执行工具）
@@ -467,46 +479,41 @@ async function main() {
   // v2.3 阶段级精确续跑：已确认过计划的会话 → 跳过规划阶段（executor 起点）
   let resumePoint: ReturnType<typeof inferResumePhase> = {};
   let effectivePrompt = prompt;
-  if (bestOfN) {
-    console.error(C.dim("（/best-of-n 并行模式不写入会话历史）"));
-  } else {
-    const sessionArg = getArg("--session");
-    if (sessionArg) {
-      const s = store.getSession(sessionArg);
-      if (!s) {
-        console.error(C.red(`会话不存在：${sessionArg}（可用 infu sessions 查看）`));
-        process.exit(1);
-      }
-      sessionId = sessionArg;
-      if (!rootArg) root = s.root; // 继续会话：沿用历史项目目录
-      initialMessages = rebuildMessages(store.getEvents(sessionId));
-      resumePoint = inferResumePhase(store.getEvents(sessionId));
-      console.error(C.dim(`继续会话（消息级重建）：${s.title}（上次状态 ${s.status}，历史已完整恢复）`));
-    } else {
-      sessionId = store.createSession({
-        title: prompt.slice(0, 40),
-        root,
-        modelId,
-        mode: suggestOnly ? "ask" : orchestrate === "off" ? "direct" : "orchestrate",
-      });
+  const sessionArg = getArg("--session");
+  if (sessionArg) {
+    const s = store.getSession(sessionArg);
+    if (!s) {
+      console.error(C.red(`会话不存在：${sessionArg}（可用 infu sessions 查看）`));
+      process.exit(1);
     }
-    store.appendEvent(sessionId, { type: "user-message", text: prompt });
+    sessionId = sessionArg;
+    if (!rootArg) root = s.root; // 继续会话：沿用历史项目目录
+    initialMessages = rebuildMessages(store.getEvents(sessionId));
+    resumePoint = inferResumePhase(store.getEvents(sessionId));
+    console.error(C.dim(`继续会话（消息级重建）：${s.title}（上次状态 ${s.status}，历史已完整恢复）`));
+  } else {
+    sessionId = store.createSession({
+      title: prompt.slice(0, 40),
+      root,
+      modelId,
+      mode: suggestOnly ? "ask" : orchestrate === "off" ? "direct" : "orchestrate",
+    });
   }
+  store.appendEvent(sessionId, { type: "user-message", text: prompt });
 
   const emit = (e: AgentEvent) => {
     printEvent(e);
     if (sessionId) store.appendEvent(sessionId, e);
   };
 
-  // v2.3 MCP 动态注入：仅非建议模式/非 best-of-n 加载（suggestOnly 不注入外部工具；
-  // best-of-n 并行 worktree 场景不注入，保持 v1 简单）；任务结束后统一 close（防残留子进程）
-  const mcp = suggestOnly || bestOfN ? null : await loadMcpTools(config?.mcpServers, emit);
+  // v2.3 MCP 动态注入：仅非建议模式加载（suggestOnly 不注入外部工具）；任务结束后统一 close（防残留子进程）
+  const mcp = suggestOnly ? null : await loadMcpTools(config?.mcpServers, emit);
   if (mcp) {
     if (mcp.tools.length) console.error(C.green(`MCP 工具已注入：${mcp.tools.length} 个（仅执行阶段可用，默认 medium 审批）`));
     for (const f of mcp.failures) console.error(C.yellow(`⚠ MCP 服务器连接失败（已跳过）：${f.message.slice(0, 120)}`));
   }
   // v2.3 批 2 插件（JS 模块：工具/钩子/技能）+ skill 发现层描述注入
-  const plugin = suggestOnly || bestOfN ? null : await loadPlugins(config?.plugins, emit);
+  const plugin = suggestOnly ? null : await loadPlugins(config?.plugins, emit);
   if (plugin) {
     if (plugin.tools.length) console.error(C.green(`插件工具已注入：${plugin.tools.length} 个（仅执行阶段可用）`));
     if (plugin.hooks.preToolUse.length || plugin.hooks.postToolUse.length) {
@@ -515,6 +522,8 @@ async function main() {
     for (const f of plugin.failures) console.error(C.yellow(`⚠ 插件加载失败（已跳过）：${f.message.slice(0, 120)}`));
   }
   const skillsPrompt = buildSkillsPrompt(listSkills(config, root));
+  // v2.5 子智能体发现层：可用 agent 角色 name+description（delegate_task 委派参考）
+  const agentsPrompt = buildAgentsPrompt(listAgents(root));
   if (resumePoint.startPhase) {
     console.error(C.dim("↻ 阶段级续跑：历史中已有确认过的计划，跳过规划阶段，直接从执行阶段继续"));
   }
@@ -543,7 +552,7 @@ async function main() {
     .map((p) => `${p}=${roleModelConfigs[p].modelConfig.model}`);
   if (roleHints.length) console.error(C.dim(`角色模型: ${roleHints.join(" · ")}`));
   console.error(C.dim(`项目: ${root}`));
-  console.error(C.dim(`审批: ${autoApprove ? "自动批准" : "交互确认"}${suggestOnly ? " | 建议模式" : ""}${orchestrate === "off" ? "" : " | 分层编排 " + (orchestrate === "full" ? "(Planner→Executor→Reviewer)" : "(Planner→Executor)")}${orchestrate === "off" || suggestOnly ? "" : planApproval ? " | 计划需确认" : " | 计划不确认"}${bestOfN ? ` | /best-of-n ×${bestOfN}` : ""}${sessionId ? " | 会话已记录" : ""}`));
+  console.error(C.dim(`审批: ${autoApprove ? "自动批准" : "交互确认"}${suggestOnly ? " | 建议模式" : ""}${orchestrate === "off" ? "" : " | 分层编排 " + (orchestrate === "full" ? "(Planner→Executor→Reviewer)" : "(Planner→Executor)")}${orchestrate === "off" || suggestOnly ? "" : planApproval ? " | 计划需确认" : " | 计划不确认"}${sessionId ? " | 会话已记录" : ""}`));
   console.error(C.dim(`工具: ${Object.keys(TOOLS).length} 个\n`));
 
   const common = {
@@ -559,32 +568,11 @@ async function main() {
     maxSteps,
   };
 
-  // /best-of-n 并行尝试：N 路独立 worktree + 评分择优（计划确认自动关闭）
-  if (bestOfN) {
-    if (suggestOnly || orchestrate === "off") {
-      console.error(C.red("--best-of-n 与 --suggest/--no-orchestrate 不能同时使用（并行的是完整编排）"));
-      process.exit(1);
-    }
-    if (!autoApprove) {
-      console.error(C.yellow("提示：/best-of-n 并行模式下计划确认已关闭；建议加 -y 自动批准（否则审批将逐条询问）"));
-    }
-    console.error(C.yellow(`⚠  /best-of-n 将消耗 ${bestOfN} 倍 token`));
-    runBestOfN({ n: bestOfN, ...common, abortSignal: abortController.signal })
-      .then((r) => {
-        process.stdout.write(formatComparison(r) + "\n");
-      })
-      .catch((e) => {
-        console.error(C.red(`\n✗ /best-of-n 运行失败: ${e.message}`));
-        process.exit(1);
-      });
-    return;
-  }
-
   // 建议模式 / 关闭编排：直跑单 Agent（保持一期行为；suggestOnly 不注入 MCP/插件工具）
   if (suggestOnly || orchestrate === "off") {
     runAgent({
       ...common,
-      system: DEFAULT_SYSTEM_PROMPT + skillsPrompt,
+      system: DEFAULT_SYSTEM_PROMPT + skillsPrompt + agentsPrompt,
       tools: mcp || plugin ? withPlugins(withMcpTools(TOOLS, mcp?.tools ?? []), plugin?.tools ?? []) : TOOLS,
       hooks: plugin?.hooks,
       suggestOnly,
@@ -626,6 +614,7 @@ async function main() {
     executorTools: [...(mcp?.tools ?? []), ...(plugin?.tools ?? [])],
     hooks: plugin?.hooks,
     skillsPrompt,
+    agentsPrompt,
     startPhase: resumePoint.startPhase,
     resumePlanText: resumePoint.planText,
   })

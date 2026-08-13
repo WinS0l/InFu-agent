@@ -30,6 +30,7 @@ import { loadMcpTools } from "./mcp/index.js";
 import { loadPlugins } from "./plugin/index.js";
 import { registerPlugin } from "./plugin/register.js";
 import { listSkills, buildSkillsPrompt } from "./plugin/skills.js";
+import { listAgents, buildAgentsPrompt, writeAgentFile, deleteAgentFile } from "./agent/agents.js";
 import { TASK_TEMPLATES } from "./templates.js";
 import { getStore } from "./db/store.js";
 import { rebuildMessages } from "./db/rebuild.js";
@@ -747,6 +748,8 @@ export function createApp(opts: ServerOptions = {}) {
         const plugin = suggestOnly ? null : await loadPlugins(config?.plugins, emit);
         // skill 发现层：可用技能 name+description 追加到 Executor system（progressive disclosure）
         const skillsPrompt = buildSkillsPrompt(listSkills(config, root));
+        // v2.5 子智能体发现层：可用 agent 角色 name+description（delegate_task 委派参考）
+        const agentsPrompt = buildAgentsPrompt(listAgents(root));
         try {
           // 阶段级续跑提示（emit 已就绪；跳过规划阶段直接续执行）
           if (resumePoint.startPhase) {
@@ -785,6 +788,7 @@ export function createApp(opts: ServerOptions = {}) {
                 executorTools: [...(mcp?.tools ?? []), ...(plugin?.tools ?? [])],
                 hooks: plugin?.hooks,
                 skillsPrompt,
+                agentsPrompt,
                 // 阶段级续跑：跳过已完成的规划阶段（计划沿用上次确认的）
                 startPhase: resumePoint.startPhase,
                 resumePlanText: resumePoint.planText,
@@ -1246,6 +1250,53 @@ export function createApp(opts: ServerOptions = {}) {
     }
     cfg.skills = (cfg.skills ?? []).filter((s) => s.name !== name);
     saveConfig(cfg);
+    return c.json({ ok: true });
+  });
+
+  // ── v2.5 子智能体管理（agent 文件化定义：内置 > ~/.infu/agents > 项目 .infu/agents；文件系统即注册）──
+
+  // 列表（含完整定义：工具/权限/沙箱/模型/推理强度/正文，供设置面板编辑回填）
+  app.get("/api/agents", (c) => {
+    const root = opts.defaultRoot || process.cwd();
+    const agents = listAgents(root).map((a) => ({
+      name: a.name,
+      description: a.description.slice(0, 200),
+      tools: a.tools,
+      model: a.model,
+      maxSteps: a.maxSteps,
+      thinkingLevel: a.thinkingLevel,
+      permission: a.permission,
+      sandbox: a.sandbox,
+      body: a.body,
+      path: a.path,
+      level: a.level,
+    }));
+    return c.json({ agents });
+  });
+
+  // 保存（创建/更新）：level = 用户级 ~/.infu/agents 或项目级 <root>/.infu/agents；内容 = 完整 markdown
+  app.post("/api/agents", async (c) => {
+    const body = await c.req.json().catch(() => ({}));
+    const name = String(body.name || "").trim();
+    const level = body.level === "user" ? "user" : "project";
+    const content = String(body.content || "");
+    if (!name || !content.trim()) return c.json({ ok: false, message: "name 与 content 不能为空" }, 400);
+    try {
+      const path = writeAgentFile(name, level, content, opts.defaultRoot || process.cwd());
+      return c.json({ ok: true, name, level, path });
+    } catch (e) {
+      return c.json({ ok: false, message: (e as Error).message }, 400);
+    }
+  });
+
+  // 删除（仅用户级/项目级文件；内置 agent 不可删）
+  app.delete("/api/agents/:name", (c) => {
+    const name = c.req.param("name");
+    const root = opts.defaultRoot || process.cwd();
+    const removed = deleteAgentFile(name, root, "user") || deleteAgentFile(name, root, "project");
+    if (!removed) {
+      return c.json({ ok: false, message: `未找到可删除的 agent 文件（${name}；内置 agent 不可删除）` }, 404);
+    }
     return c.json({ ok: true });
   });
 

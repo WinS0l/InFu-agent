@@ -189,6 +189,35 @@ export async function fetchSkills(): Promise<SkillInfo[]> {
 export const addSkill = (body: { name: string; path?: string }) => providerApi("/api/skills", "POST", body);
 export const deleteSkill = (name: string) => providerApi(`/api/skills/${encodeURIComponent(name)}`, "DELETE");
 
+// ── v2.5 子智能体（agent 文件化定义：内置 > ~/.infu/agents > 项目 .infu/agents，文件系统即注册）──
+
+export interface AgentInfo {
+  name: string;
+  description: string;
+  tools?: string[];
+  model?: string;
+  maxSteps?: number;
+  thinkingLevel?: number;
+  permission?: "allow" | "ask";
+  sandbox?: "off" | "soft" | "restricted";
+  body: string;
+  path: string;
+  level: "user" | "project" | "builtin";
+}
+
+export async function fetchAgents(): Promise<AgentInfo[]> {
+  const res = await fetch("/api/agents");
+  if (!res.ok) throw new Error(`子智能体加载失败: ${res.status}`);
+  const data = await res.json();
+  return data.agents ?? [];
+}
+
+/** 保存（创建/更新）agent 文件：level = user（~/.infu/agents）| project（项目 .infu/agents） */
+export const saveAgent = (body: { name: string; level: "user" | "project"; content: string }) =>
+  providerApi("/api/agents", "POST", body) as Promise<{ ok: boolean; path: string }>;
+
+export const deleteAgent = (name: string) => providerApi(`/api/agents/${encodeURIComponent(name)}`, "DELETE");
+
 // ── v2.4 设置界面（配置系统 UI 化：权限等级 / 沙箱等级 / 常规 / 外观）──
 
 export type ApprovalMode = "auto" | "smart" | "confirm";
@@ -307,6 +336,13 @@ export async function fetchTemplates(): Promise<TaskTemplate[]> {
 /** SSE 事件分发 */
 function handleEvent(ev: AgentEvent) {
   const st = useStore.getState();
+  // v2.5：子智能体内部过程事件（带 subagentId）→ 路由进委派卡片的迷你时间线，不进主消息流
+  if (ev && "subagentId" in ev && ev.subagentId) {
+    st.updateSubagent(ev);
+    // 子智能体内部的高危审批也必须进同一审批队列（否则服务端挂起死等）
+    if (ev.type === "approval-required") st.requestApproval(ev);
+    return;
+  }
   switch (ev.type) {
     case "session":
       // v2.1：SSE 首帧回传新会话 id，绑定当前会话
@@ -355,6 +391,12 @@ function handleEvent(ev: AgentEvent) {
       break;
     case "context-compressed":
       st.appendCompressed(ev.before, ev.after, ev.summary);
+      break;
+    case "subagent-start":
+      st.startSubagent(ev);
+      break;
+    case "subagent-done":
+      st.finishSubagent(ev);
       break;
     case "error":
       st.addError(ev.message);

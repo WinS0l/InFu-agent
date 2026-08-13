@@ -20,6 +20,8 @@ import { detectEgress, egressBlockedMessage } from "../sandbox/net-policy.js";
 import { registerMcpServer, type RegisterInput } from "../mcp/register.js";
 import { registerPlugin, type RegisterPluginInput } from "../plugin/register.js";
 import { listSkills, readSkillContent } from "../plugin/skills.js";
+import { listAgents, readAgentFile } from "../agent/agents.js";
+import { delegateTasks, describeDelegation, isReadOnlyDelegation, type SubagentSpec } from "../agent/subagent.js";
 import { loadConfig } from "../providers/registry.js";
 import {
   currentApprovalPolicy, isToolDisabled, resolveToolRisk, shouldAutoApprove, isCommandAllowed,
@@ -47,12 +49,13 @@ function fmtOut(o: { stdout: string; stderr: string }, ok: boolean): string {
   return ok ? clip(body) : `命令执行失败：\n${clip(body)}`;
 }
 
-/** 执行 shell 命令（win32 自动选 shell；默认使用消毒后的环境变量） */
+/** 执行 shell 命令（win32 自动选 shell；默认使用消毒后的环境变量；signal 中止时 kill 子进程） */
 async function runShell(
   command: string,
   cwd: string,
   timeoutMs = 60000,
-  env: NodeJS.ProcessEnv = sanitizeEnv()
+  env: NodeJS.ProcessEnv = sanitizeEnv(),
+  signal?: AbortSignal
 ): Promise<{ ok: boolean; out: string; code: number | null }> {
   // 先检查工作目录，给出明确错误而不是神秘失败
   if (!fs.existsSync(cwd) || !fs.statSync(cwd).isDirectory()) {
@@ -67,10 +70,16 @@ async function runShell(
       windowsHide: true,
       encoding: "utf8",
       maxBuffer: 8 * 1024 * 1024,
+      // v2.5：中止信号传递——父/子智能体被终止时立即 kill 命令（不等 60s 超时）
+      signal,
     });
     return { ok: true, out: fmtOut({ stdout, stderr }, true), code: 0 };
   } catch (e: any) {
     const code = e.code ?? e.status ?? null;
+    // 中止：不当作错误透出（上层 abort 流程处理）
+    if (signal?.aborted || e.name === "AbortError") {
+      return { ok: false, out: "任务已停止（用户中止）", code: null };
+    }
     // 关键：错误详情必须透出（目录不存在/找不到命令/退出码），不要吞掉
     const detail = [e.stderr, e.stdout, e.message ? String(e.message) : ""]
       .filter((s) => typeof s === "string" && s.trim())
@@ -159,7 +168,8 @@ function fmtRestricted(r: RestrictedRunResult): { out: string; ok: boolean; code
 async function execLocal(
   command: string,
   cwd: string,
-  timeoutMs = 60000
+  timeoutMs = 60000,
+  signal?: AbortSignal
 ): Promise<{ ok: boolean; out: string; code: number | null; sandbox: string }> {
   const mode = await getSandboxMode();
   if (mode === "docker") {
@@ -167,7 +177,7 @@ async function execLocal(
     return { ...r, sandbox: "docker" };
   }
   if (mode === "off") {
-    const r = await runShell(command, cwd, timeoutMs);
+    const r = await runShell(command, cwd, timeoutMs, sanitizeEnv(), signal);
     return { ...r, sandbox: "off" };
   }
   if (mode === "restricted") {
@@ -176,7 +186,7 @@ async function execLocal(
     // native 异常 → 降级软沙箱（下面统一处理）
   }
   // soft / 降级：纯软沙箱（L1，不隐式走 L1.5）
-  const r = await runShell(command, cwd, timeoutMs);
+  const r = await runShell(command, cwd, timeoutMs, sanitizeEnv(), signal);
   return { ...r, sandbox: "soft" };
 }
 
@@ -240,6 +250,35 @@ async function guard(
 }
 
 // ─────────────────────────── 工具定义 ───────────────────────────
+
+/**
+ * delegate_task 参数 schema（v2.5）：单任务（prompt）或并行批量（tasks[]）互斥。
+ * 单任务字段（agent/tools/root/maxSteps/modelId）与 tasks 元素同构。
+ */
+const subagentTaskSchema = z.object({
+  prompt: z.string().min(1).describe("委派的子任务指令（清晰说明目标与约束）"),
+  agent: z.string().min(1).optional().describe("agent 角色名（.infu/agents/<name>.md；缺省用默认子智能体角色）"),
+  tools: z.array(z.string().min(1)).optional().describe("工具白名单（内置工具名；缺省 = 只读 + run_test）"),
+  root: z.string().min(1).optional().describe("子工作目录（相对项目根；缺省 = 项目根）"),
+  maxSteps: z.number().int().min(1).max(50).optional().describe("子循环步数上限（缺省 12）"),
+  modelId: z.string().min(1).optional().describe("子模型 id（配置中的模型；缺省继承父级模型）"),
+});
+const delegateTaskSchema = z
+  .object({
+    prompt: z.string().min(1).optional(),
+    tasks: z.array(subagentTaskSchema).min(1).max(6).optional(),
+    agent: z.string().min(1).optional(),
+    tools: z.array(z.string().min(1)).optional(),
+    root: z.string().min(1).optional(),
+    maxSteps: z.number().int().min(1).max(50).optional(),
+    modelId: z.string().min(1).optional(),
+  })
+  .superRefine((v, ctx) => {
+    const single = !!v.prompt;
+    const batch = !!v.tasks?.length;
+    if (!single && !batch) ctx.addIssue({ code: "custom", message: "必须提供 prompt（单任务）或 tasks（并行任务）" });
+    if (single && batch) ctx.addIssue({ code: "custom", message: "prompt 与 tasks 不能同时提供" });
+  });
 
 export const TOOLS: Record<string, ToolDef> = {
   read_file: {
@@ -439,8 +478,8 @@ export const TOOLS: Record<string, ToolDef> = {
       }
       const timeoutMs = (args.timeout as number | undefined) || 60000;
 
-      // 沙箱统一分派（docker / 受限沙箱 / 软沙箱）
-      const r = await execLocal(command, ctx.root, timeoutMs);
+      // 沙箱统一分派（docker / 受限沙箱 / 软沙箱）；signal 中止时 kill 命令
+      const r = await execLocal(command, ctx.root, timeoutMs, ctx.abortSignal);
       const netNote = wantNetwork && !netAllowed ? "\n⚠ 该命令未获联网放行（断网执行）" : "";
       const netTag = netAllowed ? "（联网放行）" : "";
 
@@ -536,12 +575,74 @@ export const TOOLS: Record<string, ToolDef> = {
     async execute(args, ctx) {
       const rel = (args.path as string | undefined) || ".";
       const abs = path.resolve(ctx.root, rel);
-      const r = await runShell("git status --short --branch", abs);
+      const r = await runShell("git status --short --branch", abs, 60000, sanitizeEnv(), ctx.abortSignal);
       if (!r.ok) {
         if (/not a git repository/i.test(r.out)) return `该目录不是 Git 仓库：${abs}`;
         return r.out; // 其他错误（目录不存在/找不到 git）直接透出真实原因
       }
       return r.out;
+    },
+  },
+
+  // ── v2.5 子智能体委派（opencode 式：独立上下文/并行执行/结果回收；agent 文件化定义见 agent/agents.ts）──
+  delegate_task: {
+    name: "delegate_task",
+    description:
+      "委派子智能体执行子任务：以独立上下文运行一个子 Agent（或 tasks 并行多个不同任务，同时跑），完成后回收结果摘要。\n" +
+      "调用时机（对齐 ZCode）：\n" +
+      "· explore（只读，免审批）：探索/调研/摸清现状——回答需要跨多文件扫描、只需结论不要文件转储时；指定搜索广度（medium/very thorough）\n" +
+      "· general-purpose（全工具，写能力需一次授权）：复杂多步任务——深度审计/代码审查/实现功能等需要多步推理执行时\n" +
+      "· 单点查找（已知文件/符号/值）直接搜索即可，不要委派\n" +
+      "· 有多个独立子任务时用 tasks 数组并行（最多 6 个）\n" +
+      "agent 参数可引用内置角色（explore / general-purpose）或 .infu/agents/<name>.md 角色文件；只读委派免审批，写能力委派需一次授权审批。",
+    risk: "high",
+    schema: delegateTaskSchema,
+    async execute(args, ctx) {
+      const tasks: SubagentSpec[] = (args.tasks as SubagentSpec[])?.length
+        ? (args.tasks as SubagentSpec[])
+        : [{
+            prompt: args.prompt as string,
+            agent: args.agent as string | undefined,
+            tools: args.tools as string[] | undefined,
+            root: args.root as string | undefined,
+            maxSteps: args.maxSteps as number | undefined,
+            modelId: args.modelId as string | undefined,
+          }];
+      try {
+        // 校验角色存在（拼错/不存在 → 直接报错，不弹无效审批；模型可据错误自纠）
+        for (const t of tasks) {
+          if (t.agent && !readAgentFile(t.agent, ctx.root)) {
+            const available = listAgents(ctx.root).map((a) => a.name).join("、");
+            return `错误：未找到 agent 定义 "${t.agent}"（可用：${available}；写入 .infu/agents/<name>.md 即自动注册）`;
+          }
+        }
+        // v2.5 返工（对齐 ZCode）：只读委派（explore / 只读白名单）免审批——
+        // 读文件搜索不该打断；有写能力的委派（默认全工具/白名单含写工具）→ 一次授权审批，
+        // 批准后子智能体内部继承授权（requireExplicit 安全红线仍逐条弹）。
+        const readOnly = tasks.every((t) => isReadOnlyDelegation(t, ctx.root));
+        if (!readOnly) {
+          const approved = await ctx.requestApproval(
+            tasks.map((t) => describeDelegation(t, ctx.root)).join("\n\n"),
+            "high"
+          );
+          if (!approved) return "用户拒绝：未授权该委派任务";
+        }
+        return await delegateTasks(tasks, {
+          tools: TOOLS,
+          root: ctx.root,
+          emit: ctx.emit,
+          requestApproval: ctx.requestApproval,
+          modelConfig: ctx.modelConfig,
+          fallbackModelConfigs: ctx.fallbackModelConfigs,
+          thinkingLevel: ctx.thinkingLevel,
+          delegationDepth: ctx.delegationDepth,
+          abortSignal: ctx.abortSignal,
+          parentCallId: ctx.callId,
+          readOnly,
+        });
+      } catch (e) {
+        return `错误：${(e as Error).message}`;
+      }
     },
   },
 
@@ -556,7 +657,7 @@ export const TOOLS: Record<string, ToolDef> = {
     async execute(args, ctx) {
       const rel = (args.path as string | undefined) || ".";
       const abs = path.resolve(ctx.root, rel);
-      const r = await runShell(args.staged ? "git diff --staged --stat && git diff --staged" : "git diff --stat && git diff", abs);
+      const r = await runShell(args.staged ? "git diff --staged --stat && git diff --staged" : "git diff --stat && git diff", abs, 60000, sanitizeEnv(), ctx.abortSignal);
       if (!r.ok) {
         if (/not a git repository/i.test(r.out)) return `该目录不是 Git 仓库：${abs}`;
         return r.out;
@@ -595,8 +696,8 @@ export const TOOLS: Record<string, ToolDef> = {
         auditCommand(abs, cmd, false, msg, "egress-blocked");
         return `${msg}\n（受限沙箱·断网策略）测试未执行`;
       }
-      // 测试命令与 run_command 同走沙箱分派（docker / 受限沙箱 / 软沙箱）
-      const r = await execLocal(cmd, abs, 300000);
+      // 测试命令与 run_command 同走沙箱分派（docker / 受限沙箱 / 软沙箱）；signal 中止时 kill
+      const r = await execLocal(cmd, abs, 300000, ctx.abortSignal);
       auditCommand(abs, cmd, r.ok, r.out, r.sandbox);
       return r.out + (r.ok ? `\n${sandboxTag(r.sandbox)}执行完成` : `\n${sandboxTag(r.sandbox)}`);
     },

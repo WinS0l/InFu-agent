@@ -27,7 +27,6 @@ npm install                    # 装依赖
 npm run build                  # shared → sandbox-rs(native) → agent
 npm run config                 # 交互式模型配置向导（~/.infu/config.json，Key 不入库）
 npm run infu -- "任务" --root <路径> -y   # CLI 跑 Agent
-npm run infu -- "任务" --root <路径> -y --best-of-n 3   # /best-of-n 并行尝试（N 路 worktree + 评分择优）
 npm run infu -- sessions       # 会话历史（v2.1：每次任务自动落库）
 npm run infu -- --session <id> "继续的指令"   # 继续之前的会话（v2.2：消息级重建续跑，完整恢复历史）
 npm run infu -- "任务" --fallback-model <id> [--fallback-model <id>...]   # 备用模型降级链（v2.2）
@@ -68,18 +67,20 @@ start-infu.bat                 # Windows 一键启动（服务 + Web + 浏览器
 - 📌 **钩子形态选型定稿（2026-08-13 联网调研）**：ZCode/Claude Code 的 hooks 是与插件**分离的独立系统**（config 直配 + 子进程 JSON 协议 + user/workspace/plugin 三层，详见 ROADMAP v2.3 批 2）；InFu 定稿 **opencode 式统一**（钩子 = 插件内 JS 函数，函数式/热加载/简单）。「零插件配钩子」的独立 config 通道**不做**，触发条件 = 真实多端共享钩子/团队策略需求（届时评估命令式兼容档）
 - ✅ **v2.4 批 1 设置界面（2026-08-13）**：config 四节（approvalPolicy/sandbox/general/appearance，全 passthrough）+ **审批策略核心**（`approval/policy.ts`：三档 auto/smart/confirm + 工具覆盖/禁用（精确>前缀*>默认）+ 命令白名单 glob；guard 加 tool 参数接线、run_command 白名单豁免、loop 层禁用兜底、CLI/server 档位接入；顺手修 DANGEROUS 正则 \b 漏检）+ **沙箱档位**（SandboxMode 加 restricted 独立成档、resolveEffectiveMode 纯函数、显式 soft 不再隐式 L1.5、env 优先 config）+ `GET/PUT /api/config`（白名单四节 + defaultModelId，strip 防提权；saveConfig 4 拷贝收敛 registry）+ **Web 设置弹窗**（顶栏设置按钮 → w-[820px] 左导航大弹窗：常规/权限/沙箱/外观/模型 5 Tab，L2 档「当前机器不可用」徽标，外观字号/光标即时应用）。`npm test` 501 项全绿（新增 approval-policy 54/sandbox-config 29/settings-api 45）+ 浏览器实测（档位/覆盖/白名单/L1.5 沙箱保存落盘 curl 验证）
 - ✅ **v2.4 批 2 Web 交互式终端（2026-08-13）**：`terminal/`（node-pty 真实 PTY：Windows ConPTY；会话 Map + 输出环形缓冲 SSE 重连重放 + 服务退出清理）+ 端点（创建/输入[命令级高危审批协议：未 confirmed 拦截 requireApproval]/resize/SSE 流/删除）+ **SSE 传输链路修复（关键）**：@hono/node-server 在 Node 24 下 chunked SSE 数据滞留（最小复现 serve()+streamSSE，与业务无关）→ 服务启动改**原生 Node HTTP 转发**（forwardResponse：Web Stream→socket + 背压/断开处理），Hono 路由与 streamSSE 不变，实测终端/chat SSE 均正常 + 前端 TerminalPanel（xterm 底部通栏 + 右下角入口；本地预览缓冲 + 转义序列透传修复 focus 报告污染；高危确认框拒绝/允许；串行写入队列）+ docs/TERMINAL.md（安全边界：终端直连不走 L1.5，高危审批 + 全量审计兜底，白名单不豁免终端）。`npm test` 542 项全绿（新增 terminal 41）+ 浏览器实测（输入回显/高危确认/审计落盘）
-- ✅ **设置界面信息架构升级（v2.4 追加，2026-08-13，用户定稿三组导航）**：设置弹窗左侧导航按三组组织——**基础设置**（常规/外观/模型设置/浏览器[规划中]）、**Agent 能力**（记忆[规划中]/插件/技能/子智能体[规划中]/MCP 服务器/命令/钩子）、**数据与统计**（索引库[规划中]/使用统计[规划中]）；MCP/插件/技能/钩子从独立弹窗**内嵌**进设置（新 `SettingsPanes.tsx`：McpPane/PluginsPane/SkillsPane/HooksPane/ComingSoonPane，删除 McpManagerModal/ExtensionsModal）；「命令」= 原权限 Tab 重组（审批档位 + 工具覆盖/禁用 + 命令白名单 + 沙箱等级 + 高危命令红线说明）；未实现功能显示**禁用态占位 + 规划中徽标**（信息架构一步到位，后续版本往里填）；顶栏「扩展」「MCP」按钮改为打开设置并定位对应 Tab；浏览器实测通过（三组导航/内嵌页真实数据/顶栏跳转高亮/占位点击无效）。**追加（用户定稿「对号入座」）**：模型管理弹窗也彻底内嵌（ModelManagerModal → ModelPane 去壳保留全部功能：供应商 CRUD/上游拉取/模型 CRUD/角色路由面板），顶栏「扩展」「MCP」「模型管理」三按钮**全部删除**，仅剩「设置」单一入口；模型管理全部功能归入「模型设置」Tab
+- ✅ **设置界面信息架构升级（v2.4 追加，2026-08-13，用户定稿三组导航）**：设置弹窗左侧导航按三组组织——**基础设置**（常规/外观/模型设置/浏览器[规划中]）、**Agent 能力**（记忆[规划中]/插件/技能/子智能体/MCP 服务器/命令/钩子）、**数据与统计**（索引库[规划中]/使用统计[规划中]）；MCP/插件/技能/钩子从独立弹窗**内嵌**进设置（新 `SettingsPanes.tsx`：McpPane/PluginsPane/SkillsPane/HooksPane/ComingSoonPane，删除 McpManagerModal/ExtensionsModal）；「命令」= 原权限 Tab 重组（审批档位 + 工具覆盖/禁用 + 命令白名单 + 沙箱等级 + 高危命令红线说明）；未实现功能显示**禁用态占位 + 规划中徽标**；顶栏「扩展」「MCP」按钮改为打开设置并定位对应 Tab；**追加（用户定稿「对号入座」）**：模型管理弹窗彻底内嵌（ModelManagerModal → ModelPane），顶栏「扩展」「MCP」「模型管理」三按钮**全部删除**，仅剩「设置」单一入口
+- ✅ **v2.5 子智能体（opencode 式委派，2026-08-13）**：**delegate_task**（第 14 个内置工具，high）——独立上下文 + 结果回收 + **同轮多工具调用并行执行**（loop 3.2 段 Promise.all，对齐 ZCode「同一消息多个工具调用并发运行」，`ctx.callId` 按调用隔离）+ **tasks[] 并行批量**（不同任务同时跑，最多 6）；**agent 文件化定义**（`~/.infu/agents/<name>.md` > 项目 `.infu/agents/<name>.md`，文件系统即注册；frontmatter：description/tools/model/maxSteps/thinkingLevel/permission(allow|ask)/sandbox）+ **内置 agent 对齐 ZCode**（`general-purpose`=全工具复杂多步任务 / `explore`=只读 7 件；调用时机经 ZCode 本机 33 次调用实证归纳：explore 67% 只读探索调研、general-purpose 33% 深度审计/审查，delegate_task 描述 + buildAgentsPrompt 注入调用时机引导）；**审批对齐 ZCode**：只读委派免审批（explore/只读白名单）、写能力委派一次授权审批（描述含工具范围）、内部继承授权不逐个弹（requireExplicit 安全红线仍逐条）、permission:ask 可要求内部逐条、agent 名不存在直接报错不弹无效审批；**展示对齐 opencode/Claude Code**：主对话流只显示子智能体条目（一行：名称/状态/委派任务），点击 → 右侧栏弹窗 = 完整消息流（思考/文本/工具过程与父 Agent 一致，实时流式）+ 最终摘要；内部过程不进主对话流（事件带 subagentId 全量落库可审计可重放）；**摘要完整接收**：system 注入输出约定（结构化摘要 ≤2000 字），20K 兜底截断；**设置面板可编辑**（新建/编辑/删除 agent：工具多选/权限/沙箱/模型/推理强度/角色提示词，POST/DELETE /api/agents）；安全边界：深度 1 不可再委派、delegate_task/mcp_register/plugin_add 架构级排除、root 越界拦截。**best-of-n 按用户评审完全移除**（同任务多路竞速多余：删除 CLI `--best-of-n`/server 分支/Web 第 4 档+TrialsPanel/tests/parallel.test.ts/docs/BEST-OF-N.md；真并发 = delegate tasks 不同任务并行）。`npm test` 643 项全绿（subagent 套件 94 项：解析/内置 agent/免审批/并行/级联停止/readOnly 徽标/深度/越界/rebuild 跳过）+ 端到端（CLI 委派真实模型回收 + 浏览器：只读委派免审批/主对话流条目/设置面板表单）。docs/SUBAGENTS.md 重写
 
 ## 未完成 / 下一步
 
 **以 `docs/ROADMAP.md` 为准**（本处仅摘要）：
-- 🔄 **v2 按 ROADMAP 7 阶段推进**（v2.1 ✅，v2.2 ✅ 全两批，v2.3 ✅ 全两批，v2.4 ✅ 全两批：设置界面 + Web 交互式终端）：下一步 **v2.5 子智能体与并行**（子智能体：opencode 式委派/独立上下文/并行执行/结果回收，agent 文件化定义；best-of-n Web 端并行 UI）。v2.2 遗留仅剩：**完整 codex 式模型选择流程**（细节实施前讨论）
+- 🔄 **v2 按 ROADMAP 7 阶段推进**（v2.1 ✅，v2.2 ✅ 全两批，v2.3 ✅ 全两批，v2.4 ✅ 全两批，v2.5 ✅ 子智能体与并行：opencode 式委派/真并发/agent 文件化定义；best-of-n 按用户评审移除）：下一步 **v2.6 记忆与任务**。v2.2 遗留仅剩：**完整 codex 式模型选择流程**（细节实施前讨论）
 - ⏳ 沙箱长期升级 microVM（**已降级为条件触发**：仅多租户/不可信代码场景需要，如云版 InFu 落地时）
-- ⏳ 低优先级：**v3 团队版 InFu**（触发条件 = 出现第二个真实用户/团队需求，届时 microVM 一并触发，见 ROADMAP）、WSL2 原生沙箱、/best-of-n Web 端并行 UI
+- ⏳ 低优先级：**v3 团队版 InFu**（触发条件 = 出现第二个真实用户/团队需求，届时 microVM 一并触发，见 ROADMAP）、WSL2 原生沙箱、子智能体增强（恢复子智能体/后台模式，参考 Claude Code SendMessage 恢复与 Agent View）
 
 ## 项目约定（用户明确要求，2026-08-12）
 
 - **UI 决策必须先讨论后动手**：v2.1 设计系统升级、v2.3 整体打磨，以及任何新页面/新交互的视觉方案，动手前必须先与用户讨论定稿（用户强调"到时候必须讨论"）
+- **测试模型固定用 agnes（agnes-2.5-flash）**：所有 InFu 端到端测试/实测默认用 agnes 模型，**不许用 deepseek**（用户 2026-08-13 明确要求）
 - **v2 聚焦单机个人化**：团队/公司版（v3）触发条件 = 出现第二个真实用户或明确团队需求，届时再讨论
 - **记忆系统形态**（项目记忆/任务总和记忆/全局记忆三层）与**模型选择流程**（codex 式）细节，实施前单独讨论定稿
 

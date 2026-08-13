@@ -11,14 +11,16 @@
 
 import { useEffect, useState } from "react";
 import {
-  Plus, Trash2, Loader2, Plug, Puzzle, RefreshCw, ChevronDown, ChevronRight, Check, Blocks,
+  Plus, Trash2, Loader2, Plug, Puzzle, RefreshCw, ChevronDown, ChevronRight, Check, Blocks, Pencil,
 } from "lucide-react";
 import {
   fetchMcpServers, addMcpServer, updateMcpServer, deleteMcpServer, probeMcpTools,
   fetchPlugins, addPlugin, updatePlugin, deletePlugin, probePlugin, generatePlugin,
   fetchSkills, addSkill, deleteSkill,
+  fetchAgents, saveAgent, deleteAgent, type AgentInfo,
   type McpServerInfo, type McpToolProbe, type PluginInfo, type PluginProbeResult, type SkillInfo,
 } from "../api";
+import { useStore } from "../store";
 
 /** 风险徽标颜色（low 绿 / medium 黄 / high 红，与运行绿设计一致；全站统一） */
 export const RISK_STYLE: Record<string, string> = {
@@ -591,6 +593,304 @@ export function SkillsPane() {
       )}
       <div className="mt-3 border-t border-line pt-2 text-[11px] text-sub/70">
         技能描述会自动注入 Agent 上下文，任务匹配时模型调用 use_skill 读取全文。
+      </div>
+    </div>
+  );
+}
+
+// ─────────────────────────── 子智能体（v2.5）───────────────────────────
+
+const AGENT_LEVEL_STYLE: Record<string, string> = {
+  builtin: "border-[#38bdf8]/40 bg-[#38bdf8]/10 text-[#38bdf8]",
+  user: "border-accent/40 bg-accent/10 text-accent",
+  project: "border-warn/40 bg-warn/10 text-warn",
+};
+const AGENT_LEVEL_LABEL: Record<string, string> = { builtin: "内置", user: "用户级", project: "项目级" };
+
+/** 可注入子智能体的内置工具（delegate_task/mcp_register/plugin_add 架构级排除） */
+const AGENT_TOOL_OPTIONS = [
+  "read_file", "write_file", "edit_file", "search_code", "list_directory", "project_scan",
+  "git_status", "git_diff", "run_test", "run_command", "use_skill",
+];
+
+interface AgentForm {
+  name: string;
+  level: "user" | "project";
+  description: string;
+  tools: string[];
+  model: string;
+  maxSteps: string;
+  thinkingLevel: string;
+  permission: "allow" | "ask";
+  sandbox: "" | "off" | "soft" | "restricted";
+  body: string;
+}
+const EMPTY_AGENT_FORM: AgentForm = {
+  name: "", level: "user", description: "", tools: [],
+  model: "", maxSteps: "", thinkingLevel: "", permission: "allow", sandbox: "", body: "",
+};
+
+/** 表单 → agent 文件 markdown（frontmatter + 正文） */
+function buildAgentMarkdown(f: AgentForm): string {
+  const fm: string[] = ["---", `description: ${f.description.trim()}`];
+  if (f.tools.length) fm.push(`tools: ${f.tools.join(", ")}`);
+  if (f.model.trim()) fm.push(`model: ${f.model.trim()}`);
+  if (f.maxSteps.trim()) fm.push(`maxSteps: ${f.maxSteps.trim()}`);
+  if (f.thinkingLevel.trim()) fm.push(`thinkingLevel: ${f.thinkingLevel.trim()}`);
+  if (f.permission === "ask") fm.push("permission: ask");
+  if (f.sandbox) fm.push(`sandbox: ${f.sandbox}`);
+  return fm.join("\n") + "\n---\n\n" + f.body.trim();
+}
+
+/** 子智能体管理（agent 文件化定义：内置 > ~/.infu/agents > 项目 .infu/agents；可创建/编辑/删除） */
+export function AgentsPane() {
+  const [agents, setAgents] = useState<AgentInfo[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+  const [editing, setEditing] = useState(false);
+  const [form, setForm] = useState<AgentForm>(EMPTY_AGENT_FORM);
+  const [saving, setSaving] = useState(false);
+  const [confirmDel, setConfirmDel] = useState<string | null>(null);
+  const models = useStore((s) => s.models);
+
+  const load = async () => {
+    setLoading(true);
+    setError("");
+    try { setAgents(await fetchAgents()); }
+    catch (e) { setError((e as Error).message); }
+    finally { setLoading(false); }
+  };
+  useEffect(() => { load(); }, []);
+
+  const startCreate = () => { setForm(EMPTY_AGENT_FORM); setEditing(true); setError(""); };
+  const startEdit = (a: AgentInfo) => {
+    setForm({
+      name: a.name,
+      level: a.level === "project" ? "project" : "user",
+      description: a.description,
+      tools: a.tools ?? [],
+      model: a.model ?? "",
+      maxSteps: a.maxSteps ? String(a.maxSteps) : "",
+      thinkingLevel: a.thinkingLevel ? String(a.thinkingLevel) : "",
+      permission: a.permission === "ask" ? "ask" : "allow",
+      sandbox: a.sandbox ?? "",
+      body: a.body,
+    });
+    setEditing(true);
+    setError("");
+  };
+
+  const submitSave = async () => {
+    if (!form.name.trim()) { setError("名称不能为空"); return; }
+    if (!form.description.trim()) { setError("描述不能为空（发现层摘要）"); return; }
+    if (!form.body.trim()) { setError("角色提示词正文不能为空"); return; }
+    setSaving(true);
+    setError("");
+    try {
+      await saveAgent({ name: form.name.trim(), level: form.level, content: buildAgentMarkdown(form) });
+      setEditing(false);
+      await load();
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const doDelete = async (a: AgentInfo) => {
+    setSaving(true);
+    setError("");
+    try {
+      await deleteAgent(a.name);
+      setConfirmDel(null);
+      await load();
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const toggleTool = (t: string) =>
+    setForm((f) => ({ ...f, tools: f.tools.includes(t) ? f.tools.filter((x) => x !== t) : [...f.tools, t] }));
+
+  return (
+    <div>
+      <PaneError error={error} />
+      {!editing ? (
+        <button className={dashedAddCls} onClick={startCreate}>
+          <Plus className="h-3.5 w-3.5" />新建子智能体（自定义工具 / 权限 / 沙箱 / 模型 / 推理强度）
+        </button>
+      ) : (
+        <div className="rounded-lg border border-line bg-muted/40 p-3">
+          <div className="mb-2 text-xs font-medium text-text">
+            {form.name && agents.some((a) => a.name === form.name && a.level !== "builtin") ? `编辑子智能体「${form.name}」` : "新建子智能体"}
+          </div>
+          <div className="grid grid-cols-2 gap-2">
+            <label className="text-[11px] text-sub">
+              名称（= 文件名；delegate_task agent 参数引用）
+              <input className={inputCls} value={form.name} placeholder="如 code-reviewer"
+                onChange={(e) => setForm((f) => ({ ...f, name: e.target.value }))} spellCheck={false} />
+            </label>
+            <label className="text-[11px] text-sub">
+              保存位置
+              <select className={inputCls} value={form.level}
+                onChange={(e) => setForm((f) => ({ ...f, level: e.target.value as "user" | "project" }))}>
+                <option value="user">用户级（~/.infu/agents）</option>
+                <option value="project">项目级（项目 .infu/agents）</option>
+              </select>
+            </label>
+          </div>
+          <label className="mt-2 block text-[11px] text-sub">
+            描述（必填；发现层摘要，注入 Executor 上下文）
+            <input className={inputCls} value={form.description} placeholder="只读审查代码质量，不修改文件"
+              onChange={(e) => setForm((f) => ({ ...f, description: e.target.value }))} />
+          </label>
+          <div className="mt-2 text-[11px] text-sub">
+            工具白名单（不选 = 全部内置工具；仅勾选只读工具 = 委派免审批）
+            <div className="mt-1 grid max-h-28 grid-cols-3 gap-1 overflow-y-auto">
+              {AGENT_TOOL_OPTIONS.map((t) => (
+                <button key={t}
+                  className={`cursor-pointer rounded border px-1.5 py-0.5 font-mono text-[10px] transition-colors ${
+                    form.tools.includes(t)
+                      ? "border-accent/50 bg-accent/15 text-accent"
+                      : "border-line bg-muted text-sub/70 hover:text-text"
+                  }`}
+                  onClick={() => toggleTool(t)}>
+                  {t}
+                </button>
+              ))}
+            </div>
+          </div>
+          <div className="mt-2 grid grid-cols-2 gap-2">
+            <label className="text-[11px] text-sub">
+              内部工具权限
+              <select className={inputCls} value={form.permission}
+                onChange={(e) => setForm((f) => ({ ...f, permission: e.target.value as "allow" | "ask" }))}>
+                <option value="allow">allow（继承委派授权，内部不逐个询问）</option>
+                <option value="ask">ask（内部工具仍逐条审批）</option>
+              </select>
+            </label>
+            <label className="text-[11px] text-sub">
+              沙箱档位
+              <select className={inputCls} value={form.sandbox}
+                onChange={(e) => setForm((f) => ({ ...f, sandbox: e.target.value as AgentForm["sandbox"] }))}>
+                <option value="">跟随全局设置</option>
+                <option value="off">off（直连）</option>
+                <option value="soft">soft（软沙箱）</option>
+                <option value="restricted">restricted（L1.5 受限令牌）</option>
+              </select>
+            </label>
+            <label className="text-[11px] text-sub">
+              模型（缺省继承父级）
+              <select className={inputCls} value={form.model}
+                onChange={(e) => setForm((f) => ({ ...f, model: e.target.value }))}>
+                <option value="">继承父级模型</option>
+                {models.map((m) => (
+                  <option key={m.id} value={m.id}>{m.name}（{m.model}）</option>
+                ))}
+              </select>
+            </label>
+            <label className="text-[11px] text-sub">
+              推理强度 / 步数（可选）
+              <div className="flex gap-1">
+                <select className={inputCls} value={form.thinkingLevel} title="思考级别（1-4）"
+                  onChange={(e) => setForm((f) => ({ ...f, thinkingLevel: e.target.value }))}>
+                  <option value="">思考级别：跟随全局</option>
+                  {[1, 2, 3, 4].map((n) => <option key={n} value={n}>思考级别 {n}</option>)}
+                </select>
+                <input className={inputCls} value={form.maxSteps} placeholder="步数上限"
+                  onChange={(e) => setForm((f) => ({ ...f, maxSteps: e.target.value }))} spellCheck={false} />
+              </div>
+            </label>
+          </div>
+          <label className="mt-2 block text-[11px] text-sub">
+            角色提示词（正文 = 子智能体 system prompt；建议末尾约定输出格式与字数上限）
+            <textarea className={`${inputCls} mt-1 h-28 w-full resize-y py-1.5`}
+              value={form.body}
+              placeholder={"你是资深代码审查员…\n完成后输出结构化摘要：结论 / 关键发现 / 建议，总字数不超过 2000 字。"}
+              onChange={(e) => setForm((f) => ({ ...f, body: e.target.value }))} spellCheck={false} />
+          </label>
+          <div className="mt-2 flex gap-2">
+            <button
+              className="flex h-7 cursor-pointer items-center gap-1 rounded-md border border-accent/50 bg-accent/10 px-3 text-xs text-accent transition-colors hover:bg-accent/20 disabled:opacity-50"
+              onClick={submitSave} disabled={saving}>
+              {saving ? <Loader2 className="h-3 w-3 animate-spin" /> : <Check className="h-3 w-3" />}保存
+            </button>
+            <button className="h-7 cursor-pointer rounded-md border border-line px-3 text-xs text-sub transition-colors hover:text-text"
+              onClick={() => { setEditing(false); setError(""); }}>
+              取消
+            </button>
+          </div>
+        </div>
+      )}
+
+      {loading ? (
+        <div className="flex items-center justify-center gap-2 py-10 text-xs text-sub">
+          <Loader2 className="h-4 w-4 animate-spin text-accent" />正在加载子智能体…
+        </div>
+      ) : (
+        <div className="mt-3 space-y-2">
+          {agents.map((a) => (
+            <div key={a.name} className="rounded-lg border border-line bg-muted/30 p-3">
+              <div className="flex items-center gap-2">
+                <span className="text-sm font-medium text-text">{a.name}</span>
+                <span className={`rounded border px-1.5 py-px text-[10px] ${AGENT_LEVEL_STYLE[a.level] ?? ""}`}>
+                  {AGENT_LEVEL_LABEL[a.level] ?? a.level}
+                </span>
+                {a.model && (
+                  <span className="rounded border border-line bg-muted px-1.5 py-px font-mono text-[10px] text-sub">模型 {a.model}</span>
+                )}
+                {a.permission === "ask" && (
+                  <span className="rounded border border-warn/40 bg-warn/10 px-1.5 py-px text-[10px] text-warn">内部逐条审批</span>
+                )}
+                {a.sandbox && (
+                  <span className="rounded border border-line bg-muted px-1.5 py-px font-mono text-[10px] text-sub">沙箱 {a.sandbox}</span>
+                )}
+                {a.maxSteps && (
+                  <span className="rounded border border-line bg-muted px-1.5 py-px font-mono text-[10px] text-sub">≤{a.maxSteps} 步</span>
+                )}
+                <div className="ml-auto flex items-center gap-1">
+                  {a.level !== "builtin" ? (
+                    <>
+                      <button className="cursor-pointer rounded p-1 text-sub transition-colors hover:text-accent"
+                        onClick={() => startEdit(a)} title="编辑">
+                        <Pencil className="h-3.5 w-3.5" />
+                      </button>
+                      {confirmDel === a.name ? (
+                        <button className="h-6 cursor-pointer rounded-md border border-danger/50 bg-danger/10 px-2 text-[11px] text-danger"
+                          onClick={() => doDelete(a)} disabled={saving}>确认删除？</button>
+                      ) : (
+                        <button className="cursor-pointer rounded p-1 text-sub transition-colors hover:text-danger"
+                          onClick={() => setConfirmDel(a.name)} title="删除 agent 文件">
+                          <Trash2 className="h-3.5 w-3.5" />
+                        </button>
+                      )}
+                    </>
+                  ) : (
+                    <span className="text-[10px] text-sub/60">内置（不可编辑）</span>
+                  )}
+                </div>
+              </div>
+              <div className="mt-1.5 text-[11px] text-sub/80">{a.description}</div>
+              <div className="mt-1.5 flex flex-wrap items-center gap-1">
+                <span className="text-[10px] text-sub/60">工具：</span>
+                {a.tools && a.tools.length > 0 ? (
+                  a.tools.map((t) => (
+                    <span key={t} className="rounded border border-line bg-muted px-1.5 py-px font-mono text-[10px] text-sub/80">{t}</span>
+                  ))
+                ) : (
+                  <span className="text-[10px] text-sub/60">全部内置工具（缺省）</span>
+                )}
+              </div>
+              <div className="mt-1 font-mono text-[10px] text-sub/60">{a.path}</div>
+            </div>
+          ))}
+        </div>
+      )}
+      <div className="mt-3 border-t border-line pt-2 text-[11px] text-sub/70">
+        agent 描述自动注入 Executor 上下文，模型用 delegate_task（agent 参数）委派执行；
+        只读委派免审批，写能力委派需一次授权；子智能体不可再委派/自注册。
       </div>
     </div>
   );

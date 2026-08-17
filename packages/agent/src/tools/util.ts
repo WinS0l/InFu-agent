@@ -19,7 +19,7 @@ import { loadConfig } from "../providers/registry.js";
 import {
   currentApprovalPolicy, isToolDisabled, resolveToolRisk, shouldAutoApprove, isCommandAllowed,
 } from "../approval/policy.js";
-import { approvalMemoryKey, approvalRemembered, approvalRemember } from "../approval/cache.js";
+import { approvalMemoryKey, approvalRemembered, approvalRemember, isSessionBypassed } from "../approval/cache.js";
 
 const execAsync = promisify(exec);
 const execFileAsync = promisify(execFile);
@@ -281,9 +281,13 @@ export async function guard(
   const effectiveRisk = resolveToolRisk(tool, risk, policy.toolOverrides);
   const auto = shouldAutoApprove(policy, effectiveRisk, requireExplicit);
   if (auto === true) return true;
+  // v3.2 会话级全权放行：用户在审批弹窗点「本会话全部放行」后，本会话内所有审批
+  // （含 requireExplicit 红线）直接放行——显式禁用（上方 isToolDisabled）不受影响；
+  // 命令审计/事件流照常。作用域仅当前会话（无人值守没有按钮可点，红线拒绝语义不变）。
+  const sid = ctx.sessionId ?? "cli";
+  if (isSessionBypassed(sid)) return true;
   // v3.1 审批流优化：会话级已批准记忆——非红线（requireExplicit）操作，本会话内
   // 同参批准过一次后直接放行（弹窗只出现一次；命令审计不受影响）
-  const sid = ctx.sessionId ?? "cli";
   const memKey = approvalMemoryKey(tool, effectiveRisk, description);
   if (approvalRemembered(sid, memKey)) return true;
   const approved = await ctx.requestApproval(description, effectiveRisk, requireExplicit);

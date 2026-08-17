@@ -224,6 +224,8 @@ console.log("\n── 工具接线 ──");
     const rBlock = await TOOLS.write_file.execute({ path: "keep.txt", content: "改" }, denyCtx);
     check("write_file 命中禁止规则 → 拒绝", rBlock.includes("超出作用域"));
     const allowCtx = mkCtx({ scopeRules: [{ allow: true, pattern: "*.txt" }] });
+    // v3.2 read-before-edit：覆盖已存在文件前先读（模拟真实 Agent 行为）
+    await TOOLS.read_file.execute({ path: "keep.txt" }, allowCtx);
     const rOk = await TOOLS.write_file.execute({ path: "keep.txt", content: "允许改" }, allowCtx);
     check("write_file 允许范围内 → 正常写入", rOk.includes("已写入"));
     // read_file 同样校验

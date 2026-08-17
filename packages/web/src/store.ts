@@ -147,6 +147,9 @@ interface StoreState {
   retryBySession: Record<string, { attempt: number; maxAttempts: number; delayMs: number; message: string }>;
   setRetry: (sid: string, r: { attempt: number; maxAttempts: number; delayMs: number; message: string }) => void;
   clearRetry: (sid: string) => void;
+  /** v3.2：会话级全权放行（审批弹窗「本会话全部放行」；开启后该会话审批不再弹窗） */
+  bypassBySession: Record<string, boolean>;
+  setBypassFor: (sid: string, enabled: boolean) => void;
   /** v3.1 排队发送：每会话待发队列（会话运行中输入 → 入队；done 后自动消费队首） */
   queuesBySession: Record<string, QueueItem[]>;
   enqueue: (text: string) => void;
@@ -504,6 +507,8 @@ export const useStore = create<StoreState>()(
       delete retryBySession[sid];
       return { retryBySession };
     }),
+  bypassBySession: {},
+  setBypassFor: (sid, enabled) => set((s) => ({ bypassBySession: { ...s.bypassBySession, [sid]: enabled } })),
   queuesBySession: {},
   enqueue: (text) =>
     set((s) => {

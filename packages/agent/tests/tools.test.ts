@@ -72,10 +72,28 @@ check("路径越界被拦截", escape.includes("越界"), escape);
 
 // 6. edit_file
 console.log("\n▶ edit_file");
+// v3.2 read-before-edit：未读文件直接编辑被拒
+const ed0 = await run("edit_file", { path: "README.md", old_text: "# Fixture", new_text: "# InFu" });
+check("未读文件编辑被拒（先读后改）", ed0.includes("先 read_file"), ed0);
 const ed = await run("edit_file", { path: "src/app.ts", old_text: "Hello ${name}", new_text: "Hi ${name}" });
-check("编辑成功", ed.includes("已修改"), ed);
+check("已读文件编辑成功", ed.includes("已修改"), ed);
 const ed2 = await run("edit_file", { path: "src/app.ts", old_text: "不存在的内容", new_text: "x" });
 check("原文不匹配报错", ed2.includes("未找到"), ed2);
+// v3.2：read 后允许 edit（README.md 之前未读 → 读后编辑成功）
+const rdReadme = await run("read_file", { path: "README.md" });
+check("read README.md 成功", rdReadme.includes("Fixture"), rdReadme);
+const ed3 = await run("edit_file", { path: "README.md", old_text: "# Fixture", new_text: "# InFu" });
+check("读取后编辑成功", ed3.includes("已修改"), ed3);
+// v3.2：覆盖已存在文件必须先读（用本会话从未读过的 package.json）
+const wr2 = await run("write_file", { path: "package.json", content: "{\"name\":\"evil\"}" });
+check("已存在文件未读覆盖被拒（先读后改）", wr2.includes("先 read_file"), wr2);
+const rdPkg = await run("read_file", { path: "package.json" });
+check("read package.json 成功", rdPkg.includes("fixture"), rdPkg);
+const wr3 = await run("write_file", { path: "src/new.txt", content: "hello again" });
+check("读取后覆盖成功", wr3.includes("已写入"), wr3);
+// v3.2：新建文件无需先读
+const wr4 = await run("write_file", { path: "src/brand-new.txt", content: "fresh" });
+check("新建文件无需先读", wr4.includes("已写入"), wr4);
 
 // 7. run_command
 console.log("\n▶ run_command");

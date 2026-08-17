@@ -4,7 +4,7 @@
 import { guard } from "../src/tools/util.js";
 import {
   approvalMemoryKey, approvalRemembered, approvalRemember,
-  clearApprovalMemory, resetApprovalMemory,
+  clearApprovalMemory, resetApprovalMemory, setSessionBypass, isSessionBypassed, clearSessionBypass,
 } from "../src/approval/cache.js";
 import type { ToolContext, RiskLevel } from "@infu/shared";
 
@@ -99,6 +99,38 @@ ok("清理后不命中", !approvalRemembered(SID, k));
   } as unknown as ToolContext;
   const r = await guard(ctx, "write_file", "low", "写入文件：x.ts");
   ok("low 在 smart 档自动放行且无弹窗", r === true && popups === 0);
+}
+
+// ── v3.2 会话级全权放行（approval/cache.ts + guard 集成）──
+{
+  resetApprovalMemory();
+  clearSessionBypass(SID);
+  ok("初始未开启", !isSessionBypassed(SID));
+  setSessionBypass(SID, true);
+  ok("开启后命中", isSessionBypassed(SID));
+  ok("其他会话不命中", !isSessionBypassed("other"));
+  clearSessionBypass(SID);
+  ok("清理后不命中", !isSessionBypassed(SID));
+
+  // guard 集成：bypass 后红线（requireExplicit）不再弹窗
+  setSessionBypass(SID, true);
+  let popups = 0;
+  const ctx: ToolContext = {
+    root: process.cwd(), cwd: process.cwd(), sessionId: SID,
+    emit: () => {},
+    requestApproval: async () => { popups++; return true; },
+  } as unknown as ToolContext;
+  const r1 = await guard(ctx, "run_command", "high", "🌐 联网放行执行命令：curl x.com", true);
+  ok("bypass 后红线直接放行（无弹窗）", r1 === true && popups === 0);
+  const r2 = await guard(ctx, "write_file", "medium", "写入文件：a.ts");
+  ok("bypass 后普通审批也直接放行", r2 === true && popups === 0);
+  // 显式禁用工具仍拒绝（对齐 opencode 显式 deny 不覆盖）
+  const r3 = await guard(ctx, "write_file", "medium", "写入文件：b.ts");
+  ok("bypass 下普通工具仍放行", r3 === true);
+  clearSessionBypass(SID);
+  const r4 = await guard(ctx, "run_command", "high", "🌐 联网放行执行命令：curl x.com", true);
+  ok("关闭后红线恢复弹窗", r4 === true && popups === 1);
+  clearSessionBypass(SID);
 }
 
 console.log(`\n=== 结果：${pass} 通过 / ${fail} 失败 ===`);

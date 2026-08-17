@@ -27,7 +27,8 @@ import type { ModelConfig, AgentEvent, RiskLevel, InfuConfig, PhaseId, ProviderC
 import { loadConfig, saveConfig, resolveFallbackModels, resolveRoleModel, resolveRoleThinking, toRuntimeModel, resolveBaseURL, CONFIG_PATH } from "./providers/registry.js";
 import { autoNameSession } from "./session-naming.js";
 import { parseInfuConfig, approvalPolicySchema, sandboxConfigSchema, generalConfigSchema, appearanceConfigSchema, browserConfigSchema, memoryConfigSchema } from "@infu/shared";
-import { TOOLS } from "./tools/index.js";
+import { TOOLS, clearObservedFiles } from "./tools/index.js";
+import { clearApprovalMemory, clearSessionBypass, setSessionBypass, isSessionBypassed } from "./approval/cache.js";
 import { isPathInside } from "./tools/util.js";
 import { DEFAULT_SYSTEM_PROMPT } from "./agent/loop.js";
 import { runOrchestratedTask, type OrchestratedRunOptions } from "./agent/orchestrator.js";
@@ -1452,6 +1453,16 @@ const pendingQuestions = new Map<string, (answer: string | null) => void>();
     return c.json({ ok: true });
   });
 
+  // v3.2 会话级全权放行开关（审批弹窗「本会话全部放行」按钮）：
+  // 开启后该会话内所有审批（含红线）自动放行，直到会话结束/删除（见 deleteSession 清理）。
+  app.post("/api/approvals/bypass", async (c) => {
+    const body = await c.req.json().catch(() => ({}));
+    const sid = typeof body.sessionId === "string" && body.sessionId ? body.sessionId : null;
+    if (!sid) return c.json({ ok: false, message: "缺少 sessionId" });
+    setSessionBypass(sid, body.enabled !== false);
+    return c.json({ ok: true, bypass: isSessionBypassed(sid) });
+  });
+
   // 计划确认入口（v2.3 计划卡片：提交 = {plan?, feedback}；取消 = {cancelled: true}）
   app.post("/api/plan/:id", async (c) => {
     const id = c.req.param("id");
@@ -1557,6 +1568,10 @@ const pendingQuestions = new Map<string, (answer: string | null) => void>();
     const sess = store.getSession(id);
     if (!sess) return c.json({ ok: false, message: "会话不存在" }, 404);
     store.deleteSession(id);
+    // v3.2：会话删除 → 清理运行时状态（read-before-edit 观察 / 已批准记忆 / 全权放行——防长驻服务内存增长）
+    clearObservedFiles(id);
+    clearApprovalMemory(id);
+    clearSessionBypass(id);
     // v3.0 批 12：会话删除 → 清理该会话的 computer use 截图（.infu/screenshots/screen-<sid8>-*.png）
     // 项目文件夹整体删除时截图随文件夹消失；这里补「只删会话」场景的孤儿截图
     try {

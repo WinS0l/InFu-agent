@@ -2,7 +2,7 @@
   "name": "infu",
   "version": "0.1.0",
   "private": true,
-  "description": "InFu - 软件工程智能体平台（Infinite Future）",
+  "description": "InFu",
   "workspaces": [
     "packages/*"
   ],

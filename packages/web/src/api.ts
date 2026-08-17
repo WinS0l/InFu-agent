@@ -618,6 +618,18 @@ export async function postPlanDecision(id: string, body: { plan?: string; feedba
   return data;
 }
 
+/** v3.2 会话级全权放行开关（审批弹窗「本会话全部放行」；enabled=false 关闭） */
+export async function setApprovalBypass(sessionId: string, enabled: boolean) {
+  const res = await apiFetch("/api/approvals/bypass", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ sessionId, enabled }),
+  });
+  const data = await res.json();
+  if (!res.ok || data.ok === false) throw new Error(data.message || "切换全权放行失败");
+  return data;
+}
+
 // ── v2.1 会话管理 ──
 
 /** 会话列表（刷新 store） */

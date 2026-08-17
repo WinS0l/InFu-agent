@@ -2,12 +2,12 @@ import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Send, Square, GitBranch, Loader2,
   RotateCcw, AlertTriangle, Files, Folder, FolderOpen, ChevronDown, Check,
-  BrainCircuit, ShieldCheck, ShieldAlert, Scale, Cpu, Paperclip, FileText, X, Pencil, Image as ImageIcon, WifiOff,
+  BrainCircuit, ShieldCheck, ShieldAlert, Scale, Cpu, Paperclip, FileText, X, Pencil, Image as ImageIcon, WifiOff, Zap,
 } from "lucide-react";
 import { Streamdown } from "streamdown";
 import type { PhaseId } from "@infu/shared";
 import { useStore, type ChatMsg } from "../store";
-import { sendChat, mergeWorktree, rewindSession, fetchProjects, fetchConfig, updateConfig, fetchPlugins, type ApprovalMode, type ChatFileInput, type PluginInfo } from "../api";
+import { sendChat, mergeWorktree, rewindSession, fetchProjects, fetchConfig, updateConfig, fetchPlugins, setApprovalBypass, type ApprovalMode, type ChatFileInput, type PluginInfo } from "../api";
 import Timeline from "./Timeline";
 import ReasoningBlock from "./ReasoningBlock";
 import QueueDock from "./QueueDock";
@@ -302,6 +302,9 @@ export default function ChatPanel() {
   const activeSid = useStore((s) => s.activeSessionId);
   // v3.2：断网/瞬时故障重试信息（当前视图会话；状态行倒计时显示）
   const retryInfo = useStore((s) => (activeSid ? s.retryBySession[activeSid] : undefined));
+  // v3.2：会话级全权放行状态（审批弹窗开启；状态行徽标展示，点击可关闭）
+  const bypassActive = useStore((s) => (activeSid ? s.bypassBySession[activeSid] === true : false));
+  const setBypassFor = useStore((s) => s.setBypassFor);
   useEffect(() => {
     setEditingSeq(null);
   }, [activeSid]);
@@ -1166,6 +1169,20 @@ export default function ChatPanel() {
                 <WifiOff className="h-3.5 w-3.5" />
                 网络错误，正在重试 {retryInfo.attempt}/{retryInfo.maxAttempts}（{Math.max(1, Math.round(retryInfo.delayMs / 1000))} 秒后）
               </span>
+            )}
+            {/* v3.2：会话级全权放行状态（点击关闭） */}
+            {bypassActive && (
+              <button
+                className="flex cursor-pointer items-center gap-1 rounded-full border border-accent/40 bg-accent/10 px-2 py-0.5 text-[12px] text-accent transition-colors hover:bg-accent/20"
+                onClick={() => {
+                  void setApprovalBypass(activeSid ?? "", false);
+                  setBypassFor(activeSid ?? "", false);
+                }}
+                title="本会话已开启全部放行（含联网/自注册/高危命令）；点击关闭，恢复逐项审批"
+              >
+                <Zap className="h-3 w-3" />
+                本会话已全权放行 · 点击关闭
+              </button>
             )}
           </div>
         )}

@@ -358,9 +358,14 @@ function sanitizeBrowserUrl(raw?: string): string | null {
   }
 };
 
-// ── computer-use 桌面通道（v3.0 vision 底座）──
+// ── computer-use 桌面通道（v3.0 vision 底座；v3.2 增强：DPI 感知/多显示器/滚动/按键/移动）──
 // 零依赖实现：截图 = PowerShell System.Drawing（CopyFromScreen）；
 // 输入 = PowerShell user32 SendInput P/Invoke。每次调用启动一次 PS（~300ms，可接受）。
+// v3.2 DPI 修复：PS 进程默认 DPI 非感知时 CopyFromScreen 得到的是**逻辑分辨率**位图，
+// 而 SetCursorPos 是物理像素——125%/150% 缩放下截图与点击坐标系统性偏移（点错位置）。
+// 修复 = 截图脚本先 SetProcessDPIAware()（物理像素）+ VirtualScreen（全显示器合并边界），
+// 并把虚拟原点（可能为负）存全局——click/move 时坐标加回原点偏移。
+let lastShotOrigin = { x: 0, y: 0 };
 
 
 /** 桌面截图 → 保存 PNG → 返回路径（失败 null）。dir 必须已存在；
@@ -383,14 +388,22 @@ function sanitizeBrowserUrl(raw?: string): string | null {
   const psSingleQuote = (s: string) => s.replace(/\\/g, "\\\\").replace(/'/g, "''");
   const script =
     `Add-Type -AssemblyName System.Windows.Forms,System.Drawing;` +
-    `$b=[System.Windows.Forms.Screen]::PrimaryScreen.Bounds;` +
+    // v3.2：DPI 感知（物理像素——截图与 SendInput 坐标一致；否则高 DPI 缩放系统性偏移）
+    `Add-Type -TypeDefinition 'using System;using System.Runtime.InteropServices;public static class DpiFix{[DllImport("user32.dll")]public static extern bool SetProcessDPIAware();}';` +
+    `[DpiFix]::SetProcessDPIAware();` +
+    // v3.2：VirtualScreen = 全显示器合并边界（多显示器也完整）；主屏在右侧/下方时原点为负值
+    `$b=[System.Windows.Forms.Screen]::VirtualScreen.Bounds;` +
     `$bmp=New-Object System.Drawing.Bitmap($b.Width,$b.Height);` +
     `$g=[System.Drawing.Graphics]::FromImage($bmp);` +
     `$g.CopyFromScreen($b.Location,[System.Drawing.Point]::Empty,$b.Size);` +
     `$bmp.Save('${psSingleQuote(file)}');` +
-    `$g.Dispose();$bmp.Dispose();`;
+    `$g.Dispose();$bmp.Dispose();` +
+    `Write-Output "$($b.Location.X),$($b.Location.Y)"`;
   try {
-    execFileSync("powershell", ["-NoProfile", "-Command", script], { timeout: 15000, windowsHide: true });
+    const out = execFileSync("powershell", ["-NoProfile", "-Command", script], { timeout: 15000, windowsHide: true, encoding: "utf-8" });
+    // 解析虚拟屏原点（"X,Y"）——click/move 坐标要加回该偏移（位图坐标 → 物理坐标）
+    const m = /(-?\d+)\s*,\s*(-?\d+)/.exec((out ?? "").trim());
+    if (m) lastShotOrigin = { x: Number(m[1]), y: Number(m[2]) };
     if (minimized && mainWindow && !mainWindow.isDestroyed()) {
       setTimeout(() => {
         if (mainWindow && !mainWindow.isDestroyed()) mainWindow.restore();
@@ -404,23 +417,20 @@ function sanitizeBrowserUrl(raw?: string): string | null {
   }
 };
 
-/** 桌面输入（SendInput P/Invoke）——返回 "OK" 或错误描述 */
+/** 桌面输入（SendInput P/Invoke）——返回 "OK" 或错误描述。
+ *  action：click（坐标点击）/ type（文本粘贴）/ move（仅移动光标）/
+ *          scroll（滚轮：direction up/down/left/right + amount 格数）/
+ *          key（按键组合：如 ctrl+c、alt+tab、enter、f5） */
 (globalThis as Record<string, unknown>).__infuScreenInput = (
-  action: "click" | "type",
+  action: "click" | "type" | "move" | "scroll" | "key",
   ...params: Array<string | number>
 ): string => {
   try {
-    let script = "";
-    if (action === "click") {
-      const x = Math.round(Number(params[0]));
-      const y = Math.round(Number(params[1]));
-      const btn = String(params[2] ?? "left");
-      const flags = btn === "right" ? 0x0008 : btn === "double" ? 0x0002 : 0x0002; // RButtonDown | LButtonDown
-      const upFlags = btn === "right" ? 0x0010 : 0x0004; // RButtonUp | LButtonUp
-      const clicks = btn === "double" ? 2 : 1;
-      script =
-        `Add-Type -TypeDefinition @'
+    // 统一 P/Invoke 头（一次编译，多方法；user32 SendInput/keybd_event/SetCursorPos）
+    const addType =
+      `Add-Type -TypeDefinition @'
 using System;
+using System.Threading;
 using System.Runtime.InteropServices;
 public static class InFuInput {
   [StructLayout(LayoutKind.Sequential)] public struct POINT { public int X; public int Y; }
@@ -429,34 +439,83 @@ public static class InFuInput {
   [DllImport("user32.dll")] static extern bool SetCursorPos(int x, int y);
   [DllImport("user32.dll")] static extern uint SendInput(uint nInputs, INPUT[] pInputs, int cbSize);
   public static void Click(int x, int y, uint down, uint up) {
-    SetCursorPos(x, y);
-    System.Threading.Thread.Sleep(50);
+    SetCursorPos(x, y); Thread.Sleep(50);
     INPUT[] inputs = new INPUT[2];
     inputs[0].type = 0; inputs[0].mi.dwFlags = down;
     inputs[1].type = 0; inputs[1].mi.dwFlags = up;
     SendInput(2, inputs, Marshal.SizeOf(typeof(INPUT)));
   }
+  public static void Move(int x, int y) { SetCursorPos(x, y); }
+  public static void Scroll(int delta, bool horizontal) {
+    INPUT[] inputs = new INPUT[1];
+    inputs[0].type = 0;
+    inputs[0].mi.dwFlags = horizontal ? 0x1000u : 0x0800u; // MOUSEEVENTF_HWHEEL / WHEEL
+    inputs[0].mi.mouseData = (uint)delta;
+    SendInput(1, inputs, Marshal.SizeOf(typeof(INPUT)));
+  }
 }
-'@;` +
-        `[InFuInput]::Click(${x}, ${y}, ${flags}u, ${upFlags}u)` +
+public static class InFuKeys {
+  [DllImport("user32.dll")] static extern void keybd_event(byte bVk, byte bScan, uint dwFlags, UIntPtr dwExtraInfo);
+  public static void Tap(byte vk) { keybd_event(vk, 0, 0, UIntPtr.Zero); keybd_event(vk, 0, 2, UIntPtr.Zero); }
+  public static void Press(byte vk) { keybd_event(vk, 0, 0, UIntPtr.Zero); }
+  public static void Release(byte vk) { keybd_event(vk, 0, 2, UIntPtr.Zero); }
+  public static void Paste() {
+    Press(0x11); Tap(0x56); Release(0x11); // Ctrl+V
+  }
+}
+'@;`;
+    const shift = lastShotOrigin;
+    let script = addType;
+    if (action === "click") {
+      const x = Math.round(Number(params[0])) + shift.x;
+      const y = Math.round(Number(params[1])) + shift.y;
+      const btn = String(params[2] ?? "left");
+      const flags = btn === "right" ? 0x0008 : 0x0002; // RButtonDown | LButtonDown
+      const upFlags = btn === "right" ? 0x0010 : 0x0004; // RButtonUp | LButtonUp
+      const clicks = btn === "double" ? 2 : 1;
+      script += `[InFuInput]::Click(${x}, ${y}, ${flags}u, ${upFlags}u)` +
         (clicks > 1 ? `;[InFuInput]::Click(${x}, ${y}, ${flags}u, ${upFlags}u)` : "");
+    } else if (action === "move") {
+      const x = Math.round(Number(params[0])) + shift.x;
+      const y = Math.round(Number(params[1])) + shift.y;
+      script += `[InFuInput]::Move(${x}, ${y})`;
+    } else if (action === "scroll") {
+      // params: direction("up"|"down"|"left"|"right"), amount(格数，默认 1)
+      const dir = String(params[0] ?? "down");
+      const amount = Math.max(1, Math.round(Number(params[1] ?? 1)));
+      const delta = 120 * amount;
+      const horizontal = dir === "left" || dir === "right";
+      const signed = dir === "down" || dir === "right" ? delta : -delta;
+      script += `[InFuInput]::Scroll(${signed}, ${horizontal ? "true" : "false"})`;
+    } else if (action === "key") {
+      // 按键组合：ctrl+c / alt+tab / enter / f5 / shift+up …（+ 分隔；先修饰键后主键）
+      const combo = String(params[0] ?? "").trim().toLowerCase();
+      const MAP: Record<string, number> = {
+        enter: 0x0d, tab: 0x09, esc: 0x1b, escape: 0x1b, backspace: 0x08, space: 0x20,
+        delete: 0x2e, home: 0x24, end: 0x23, pageup: 0x21, pagedown: 0x22,
+        up: 0x26, down: 0x28, left: 0x25, right: 0x27,
+        ctrl: 0x11, alt: 0x12, shift: 0x10, win: 0x5b, meta: 0x5b,
+        f1: 0x70, f2: 0x71, f3: 0x72, f4: 0x73, f5: 0x74, f6: 0x75, f7: 0x76,
+        f8: 0x77, f9: 0x78, f10: 0x79, f11: 0x7a, f12: 0x7b,
+      };
+      const parts = combo.split("+").map((p) => p.trim()).filter(Boolean);
+      const vks: number[] = [];
+      for (const p of parts) {
+        if (p.length === 1 && /[a-z0-9]/.test(p)) vks.push(p.charCodeAt(0) >= 0x30 && p.charCodeAt(0) <= 0x39 ? p.charCodeAt(0) : p.toUpperCase().charCodeAt(0));
+        else if (MAP[p]) vks.push(MAP[p]);
+        else return `按键未知：${p}（支持 a-z/0-9/enter/tab/esc/space/方向键/f1-f12/ctrl/alt/shift/win，用 + 组合如 ctrl+c）`;
+      }
+      if (!vks.length) return "按键为空";
+      // 先按修饰键（ctrl/alt/shift/win），再 Tap 主键，再松开修饰键
+      for (const v of vks) if (v === 0x11 || v === 0x12 || v === 0x10 || v === 0x5b) script += `[InFuKeys]::Press(${v}u);`;
+      const main = vks[vks.length - 1];
+      script += `[InFuKeys]::Tap(${main}u);`;
+      for (const v of [...vks].reverse()) if (v === 0x11 || v === 0x12 || v === 0x10 || v === 0x5b) script += `[InFuKeys]::Release(${v}u);`;
     } else {
       // type：剪贴板粘贴（Unicode 安全，绕开 SendKeys 特殊字符转义）
       const text = String(params[0] ?? "").replace(/'/g, "''");
-      script =
-        `Add-Type -AssemblyName System.Windows.Forms;` +
+      script +=
         `[System.Windows.Forms.Clipboard]::SetText('${text}');` +
-        `Add-Type -TypeDefinition @'
-using System;
-using System.Runtime.InteropServices;
-public static class InFuKeys {
-  [DllImport("user32.dll")] static extern void keybd_event(byte bVk, byte bScan, uint dwFlags, UIntPtr dwExtraInfo);
-  public static void Paste() {
-    keybd_event(0x11, 0, 0, UIntPtr.Zero); keybd_event(0x56, 0, 0, UIntPtr.Zero);
-    keybd_event(0x56, 0, 2, UIntPtr.Zero); keybd_event(0x11, 0, 2, UIntPtr.Zero);
-  }
-}
-'@;` +
         `[InFuKeys]::Paste();[System.Windows.Forms.Clipboard]::Clear();`;
     }
     execFileSync("powershell", ["-NoProfile", "-Command", script], { timeout: 15000, windowsHide: true });

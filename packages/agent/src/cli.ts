@@ -40,6 +40,8 @@ import { agentCli } from "./agent/agent-cli.js";
 import { abortBackgroundAgentsByDepth } from "./agent/subagent.js";
 import { abortJobsByDepth } from "./tools/jobs.js";
 import { closeShellSession } from "./tools/persistent-shell.js";
+import { clearObservedFiles } from "./tools/index.js";
+import { clearApprovalMemory, clearSessionBypass } from "./approval/cache.js";
 import type { ChatMessageLike } from "./providers/chat.js";
 
 const require = createRequire(import.meta.url);
@@ -698,6 +700,12 @@ async function main() {
       try { abortJobsByDepth(sessionId, -1); } catch { /* 忽略 */ }
       // v3.0 审计修复（S3）：任务结束关闭持久 shell 会话
       try { closeShellSession(sessionId); } catch { /* 忽略 */ }
+      // v3.2：任务结束清理会话级运行时状态（read-before-edit 观察 / 已批准记忆 / 全权放行）
+      if (sessionId) {
+        try { clearObservedFiles(sessionId); } catch { /* 忽略 */ }
+        try { clearApprovalMemory(sessionId); } catch { /* 忽略 */ }
+        try { clearSessionBypass(sessionId); } catch { /* 忽略 */ }
+      }
     });
 }
 

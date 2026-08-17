@@ -39,6 +39,38 @@ import { loadIndex } from "../index/index.js";
 import { fsTools } from "./fs-tools.js";
 import { envTools } from "./env-tools.js";
 
+/**
+ * v3.2 read-before-edit 机制（对齐 harness fs-observation-policy / opencode Edit「必须先读」）：
+ * 按会话跟踪已读取/已写入的文件，edit_file 与 write_file（覆盖已存在文件）必须先
+ * read_file 该文件，否则返回恢复指引——防止模型基于过期缓存/猜测盲目编辑。
+ * read/edit/write 成功都会刷新观察（对齐 harness fs/observed 语义：本会话刚写过也算已知）。
+ */
+const observedFiles = new Map<string, Set<string>>();
+function normAbs(abs: string): string {
+  const r = path.resolve(abs);
+  return process.platform === "win32" ? r.toLowerCase() : r;
+}
+function markObserved(sessionId: string, abs: string): void {
+  let set = observedFiles.get(sessionId);
+  if (!set) {
+    set = new Set();
+    observedFiles.set(sessionId, set);
+  }
+  set.add(normAbs(abs));
+}
+function isObserved(sessionId: string, abs: string): boolean {
+  const set = observedFiles.get(sessionId);
+  return !!set && set.has(normAbs(abs));
+}
+/** 测试/调试：清空观察；会话结束调用（防长驻服务内存增长） */
+export function clearObservedFiles(sessionId: string): void {
+  observedFiles.delete(sessionId);
+}
+/** 测试/调试：清空全部观察 */
+export function resetObservedFiles(): void {
+  observedFiles.clear();
+}
+
 // ─────────────────────────── 工具定义 ───────────────────────────
 
 /**
@@ -98,7 +130,7 @@ export const TOOLS: Record<string, ToolDef> = {
   read_file: {
     name: "read_file",
     description:
-      "读取文件内容。用于查看源代码、配置、文档。返回纯文本；二进制或超大文件会被截断。",
+      "读取文件内容。用于查看源代码、配置、文档。返回纯文本；二进制或超大文件会被截断。注意：edit_file/write_file 要求先读后改——本工具读取过的文件才允许编辑（对齐主流 read-before-edit）。",
     risk: "low",
     schema: z.object({
       path: z.string().describe("相对项目根的文件路径"),
@@ -121,6 +153,8 @@ export const TOOLS: Record<string, ToolDef> = {
       const limit = (args.limit as number) || 200;
       const lines = all.slice(offset, offset + limit);
       const head = `文件 ${rel}（共 ${all.length} 行，显示 ${offset + 1}-${offset + lines.length} 行）`;
+      // v3.2：读取成功 → 记录观察（read-before-edit 依据）
+      markObserved(ctx.sessionId ?? "", abs);
       return clip(
         head + "\n```\n" + lines.map((l, i) => `${offset + i + 1}\t${l}`).join("\n") + "\n```"
       );
@@ -130,7 +164,7 @@ export const TOOLS: Record<string, ToolDef> = {
   write_file: {
     name: "write_file",
     description:
-      "写入文件（覆盖）。创建新文件或整体重写已有文件。注意：此操作会覆盖目标文件，需用户确认。",
+      "写入文件（覆盖）。创建新文件或整体重写已有文件。注意：此操作会覆盖目标文件，需用户确认；覆盖已存在文件前必须先 read_file 该文件（先读后改机制）。",
     // v2.10：文件编辑降 low（对齐主流：主流 默认模式写文件自动执行；
     // 安全不降级——敏感路径/只读容器/工作树隔离等写保护仍在）
     risk: "low",
@@ -153,10 +187,15 @@ export const TOOLS: Record<string, ToolDef> = {
       // v3 默认会话根目录只读（自由会话容器）
       const roBlock = sessionRootReadOnlyBlock(ctx);
       if (roBlock) return `错误：${roBlock}`;
+      // v3.2 read-before-edit：覆盖已存在文件必须先读（防止基于过期内容整体覆写）
+      if (fs.existsSync(abs) && !isObserved(ctx.sessionId ?? "", abs)) {
+        return "错误：覆盖已有文件前必须先 read_file 该文件——请先 read_file 再重试（先读后改机制：确认当前内容后再整体重写）";
+      }
       const desc = `写入文件 ${rel}（${(args.content as string).length} 字符）`;
       if (!(await guard(ctx, "write_file", "low", desc))) return "用户拒绝：未写入";
       fs.mkdirSync(path.dirname(abs), { recursive: true });
       fs.writeFileSync(abs, args.content as string, "utf-8");
+      markObserved(ctx.sessionId ?? "", abs);
       const lines = (args.content as string).split("\n").length;
       return `已写入 ${rel}（${(args.content as string).length} 字符，${lines} 行）`;
     },
@@ -165,7 +204,7 @@ export const TOOLS: Record<string, ToolDef> = {
   edit_file: {
     name: "edit_file",
     description:
-      "精确替换文件中的一段文本（第一次匹配）。用于局部修改，比 write_file 更安全。",
+      "精确替换文件中的一段文本（第一次匹配）。用于局部修改，比 write_file 更安全。要求：必须先 read_file 该文件（本工具拒绝编辑未读取过的文件——先读后改机制，防止基于过期缓存修改）。",
     // v2.10：文件编辑降 low（对齐主流自动执行；安全不降级——写保护/只读容器/工作树隔离仍在）
     risk: "low",
     schema: z.object({
@@ -186,6 +225,10 @@ export const TOOLS: Record<string, ToolDef> = {
       // v3 默认会话根目录只读（自由会话容器）
       const roBlock = sessionRootReadOnlyBlock(ctx);
       if (roBlock) return `错误：${roBlock}`;
+      // v3.2 read-before-edit：必须先读（对齐 harness FS_NOT_OBSERVED / opencode Edit 先读后改）
+      if (!isObserved(ctx.sessionId ?? "", abs)) {
+        return "错误：编辑前必须先 read_file 该文件——请先 read_file 再重试（先读后改机制：确认当前内容与行号后再修改）";
+      }
       if (!fs.existsSync(abs)) return `错误：文件不存在 ${rel}`;
       const content = fs.readFileSync(abs, "utf-8");
       const oldText = args.old_text as string;
@@ -196,6 +239,8 @@ export const TOOLS: Record<string, ToolDef> = {
       if (!(await guard(ctx, "edit_file", "low", desc))) return "用户拒绝：未修改";
       const updated = content.replace(oldText, args.new_text as string);
       fs.writeFileSync(abs, updated, "utf-8");
+      // v3.2：编辑成功也刷新观察（本会话后续可继续改，无需重读）
+      markObserved(ctx.sessionId ?? "", abs);
       // 行数 diff 统计（+N -M 行）
       const oldLines = oldText.split("\n").length;
       const newLines = (args.new_text as string).split("\n").length;

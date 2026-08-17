@@ -49,6 +49,32 @@ export function clearApprovalMemory(sessionId: string): void {
   memory.delete(sessionId);
 }
 
+/**
+ * v3.2 会话级全权放行（用户拍板：审批弹窗加「本会话全部放行」按钮）：
+ * 开启后本会话内所有审批请求（含 requireExplicit 红线）直接放行——对齐 opencode --auto
+ * 真全权语义，但作用域仅当前会话（CLI -y/定时任务无人值守不受影响——无人值守没有按钮可点，
+ * 其 requireExplicit 拒绝语义保持不变）。
+ * 安全边界：
+ * - 显式禁用（toolOverrides disabled）仍拒绝——对齐 opencode 显式 deny 不覆盖
+ * - 命令审计/事件流照常全量（放行 ≠ 静默）
+ * - 会话结束/删除自动清除
+ */
+const sessionBypass = new Set<string>();
+
+export function setSessionBypass(sessionId: string, enabled: boolean): void {
+  if (enabled) sessionBypass.add(sessionId);
+  else sessionBypass.delete(sessionId);
+}
+
+export function isSessionBypassed(sessionId: string): boolean {
+  return sessionBypass.has(sessionId);
+}
+
+/** 会话结束/删除时释放 */
+export function clearSessionBypass(sessionId: string): void {
+  sessionBypass.delete(sessionId);
+}
+
 /** 测试/调试：清空全部 */
 export function resetApprovalMemory(): void {
   memory.clear();

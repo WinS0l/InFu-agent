@@ -63,7 +63,7 @@ export const visionTools: Record<string, ToolDef> = {
   "screen_capture": {
     name: "screen_capture",
     description:
-      "截取当前屏幕并注入视觉上下文（computer-use：视觉模型据此决定下一步操作）。仅桌面版可用。截图保存在项目 .infu/screenshots/ 目录，**返回的完整文件路径是唯一事实——不要猜测/拼接路径，需要重新读取时用返回的绝对路径**。minimize=true 时先最小化 InFu 窗口再截（InFu 挡在最前会截到自己；截完自动恢复）。何时用：需要观察桌面/应用状态时（与浏览器工具互补——browser_snapshot 管网页，screen_capture 管桌面）。",
+      "截取当前屏幕并注入视觉上下文（computer-use：视觉模型据此决定下一步操作）。仅桌面版可用。截图保存在项目 .infu/screenshots/ 目录，**返回的完整文件路径是唯一事实——不要猜测/拼接路径，需要重新读取时用返回的绝对路径**。minimize=true 时先最小化 InFu 窗口再截（InFu 挡在最前会截到自己；截完自动恢复）。多显示器时截取全部屏幕的合并区域（点击/移动坐标以该合并图为基准）。何时用：需要观察桌面/应用状态时（与浏览器工具互补——browser_snapshot 管网页，screen_capture 管桌面）。",
     risk: "low",
     schema: z.object({
       minimize: z.boolean().optional().describe("true = 先最小化 InFu 窗口再截（操作桌面时建议；默认 false 截当前屏幕全貌）"),
@@ -120,6 +120,63 @@ export const visionTools: Record<string, ToolDef> = {
       if (typeof input !== "function") return "错误：桌面输入通道不可用（主进程未接线）";
       const r = input("type", args.text as string);
       return r.startsWith("OK") ? `已输入 ${(args.text as string).slice(0, 40)}` : `输入失败：${r}`;
+    },
+  },
+  "screen_scroll": {
+    name: "screen_scroll",
+    description:
+      "滚动当前鼠标位置的页面/列表（computer-use：配合 screen_capture 观察后滚动）。仅桌面版可用。direction=up/down 垂直、left/right 水平（Shift+滚轮语义）；amount=格数（1 格 ≈ 3-5 行，默认 1）。何时用：页面超出截图范围需要查看更多内容时（比反复截图+点击更精准）。",
+    risk: "medium",
+    schema: z.object({
+      direction: z.enum(["up", "down", "left", "right"]).optional().describe("滚动方向（默认 down）"),
+      amount: z.number().int().min(1).max(20).optional().describe("滚动格数（默认 1；1 格 ≈ 3-5 行）"),
+    }),
+    async execute(args, ctx) {
+      if (!isDesktop()) return "错误：screen_scroll 仅桌面版可用";
+      const dir = String(args.direction ?? "down");
+      const amount = Number(args.amount ?? 1);
+      if (!(await ctx.requestApproval(`桌面滚动：${dir} ×${amount}`, "medium"))) return "用户拒绝：未滚动";
+      const g = globalThis as Record<string, unknown>;
+      const input = g.__infuScreenInput as ((action: string, ...params: Array<string | number>) => string) | undefined;
+      if (typeof input !== "function") return "错误：桌面输入通道不可用（主进程未接线）";
+      const r = input("scroll", dir, amount);
+      return r.startsWith("OK") ? `已滚动 ${dir} ${amount} 格` : `滚动失败：${r}`;
+    },
+  },
+  "screen_key": {
+    name: "screen_key",
+    description:
+      "向系统发送按键/组合键（computer-use：操作快捷键——Ctrl+C 复制、Ctrl+V 粘贴、Enter 确认、Alt+Tab 切窗、F5 刷新、方向键导航等）。仅桌面版可用。格式：用 + 组合，如 \"ctrl+c\"、\"alt+tab\"、\"enter\"、\"f5\"、\"shift+up\"。支持 a-z/0-9/enter/tab/esc/space/方向键/f1-f12/ctrl/alt/shift/win。何时用：点击/输入之外需要快捷键操作的场景。",
+    risk: "medium",
+    schema: z.object({
+      keys: z.string().describe("按键组合（+ 分隔：ctrl+c、alt+tab、enter、f5、shift+up）"),
+    }),
+    async execute(args, ctx) {
+      if (!isDesktop()) return "错误：screen_key 仅桌面版可用";
+      if (!(await ctx.requestApproval(`桌面按键：${(args.keys as string).slice(0, 40)}`, "medium"))) return "用户拒绝：未按键";
+      const g = globalThis as Record<string, unknown>;
+      const input = g.__infuScreenInput as ((action: string, ...params: Array<string | number>) => string) | undefined;
+      if (typeof input !== "function") return "错误：桌面输入通道不可用（主进程未接线）";
+      const r = input("key", args.keys as string);
+      return r.startsWith("OK") ? `已按键 ${args.keys}` : `按键失败：${r}`;
+    },
+  },
+  "screen_move": {
+    name: "screen_move",
+    description:
+      "移动鼠标到屏幕坐标（不点击）——computer-use：悬停预览/准备点击前定位。仅桌面版可用。坐标 = 屏幕像素（截图同坐标系）。",
+    risk: "low",
+    schema: z.object({
+      x: z.number().describe("屏幕 x 坐标（像素）"),
+      y: z.number().describe("屏幕 y 坐标（像素）"),
+    }),
+    async execute(args, ctx) {
+      if (!isDesktop()) return "错误：screen_move 仅桌面版可用";
+      const g = globalThis as Record<string, unknown>;
+      const input = g.__infuScreenInput as ((action: string, ...params: Array<string | number>) => string) | undefined;
+      if (typeof input !== "function") return "错误：桌面输入通道不可用（主进程未接线）";
+      const r = input("move", args.x as number, args.y as number);
+      return r.startsWith("OK") ? `鼠标已移动到 (${args.x}, ${args.y})` : `移动失败：${r}`;
     },
   },
 };

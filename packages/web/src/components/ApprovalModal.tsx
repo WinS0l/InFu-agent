@@ -1,6 +1,7 @@
-import { ShieldAlert, ShieldCheck, Shield } from "lucide-react";
+import { ShieldAlert, ShieldCheck, Shield, Zap } from "lucide-react";
 import { useStore } from "../store";
 import { Modal, CapsuleButton } from "./ui";
+import { setApprovalBypass } from "../api";
 
 const RISK_META: Record<string, { label: string; Icon: typeof Shield; cls: string }> = {
   low: { label: "低风险", Icon: Shield, cls: "text-sub" },
@@ -11,11 +12,16 @@ const RISK_META: Record<string, { label: string; Icon: typeof Shield; cls: strin
 /**
  * 审批弹窗（v3：统一 Modal 原语）：Agent 请求执行中/高风险操作时出现（支持队列逐个处理）。
  * 关键操作：遮罩/Esc 均不可关闭，只能显式允许/拒绝。
+ * v3.2：新增「本会话全部放行」——本会话内所有后续审批（含联网/自注册/高危命令红线）直接
+ * 放行，直到会话结束（对齐 opencode --auto 真全权语义；显式禁用工具仍拒绝；命令审计照常）。
  */
 export default function ApprovalModal() {
   const approvals = useStore((s) => s.approvals);
   const resolveApproval = useStore((s) => s.resolveApproval);
   const resolveAllApprovals = useStore((s) => s.resolveAllApprovals);
+  const activeSessionId = useStore((s) => s.activeSessionId);
+  const setBypassFor = useStore((s) => s.setBypassFor);
+  const bypassActive = useStore((s) => (activeSessionId ? s.bypassBySession[activeSessionId] === true : false));
 
   const approval = approvals[0]; // 队列头部，处理完自动显示下一个
   if (!approval) return null;
@@ -23,6 +29,20 @@ export default function ApprovalModal() {
   const meta = RISK_META[approval.risk] ?? RISK_META.medium;
   const { Icon, label, cls } = meta;
   const queued = approvals.length - 1;
+
+  /** 开启/关闭本会话全权放行（开启时当前积压审批一并全部批准） */
+  const toggleBypass = async () => {
+    const sid = activeSessionId;
+    if (!sid) return;
+    const next = !bypassActive;
+    try {
+      await setApprovalBypass(sid, next);
+      setBypassFor(sid, next);
+    } catch {
+      return;
+    }
+    if (next && approvals.length > 0) resolveAllApprovals(true);
+  };
 
   return (
     <Modal
@@ -39,6 +59,9 @@ export default function ApprovalModal() {
       }
       footer={
         <>
+          <CapsuleButton variant="ghost" size="md" onClick={() => void toggleBypass()} title={bypassActive ? "关闭后恢复逐项审批" : "本会话内所有后续审批（含红线）直接放行，直到会话结束"} className={bypassActive ? "border-accent/50 text-accent" : ""}>
+            {bypassActive ? "已放行·点击关闭" : "本会话全部放行"}
+          </CapsuleButton>
           {queued > 0 && (
             <CapsuleButton variant="ghost" size="md" onClick={() => resolveAllApprovals(false)}>
               全部拒绝（{approvals.length}）
@@ -73,6 +96,12 @@ export default function ApprovalModal() {
           </>
         )}
       </div>
+      {!bypassActive && (
+        <div className="mt-2 flex items-center gap-1.5 rounded-lg border border-line/60 bg-elevated px-2.5 py-1.5 text-[11px] leading-4 text-sub">
+          <Zap className="h-3 w-3 shrink-0 text-accent" />
+          「本会话全部放行」= 本会话内所有后续审批（含联网/自注册/高危命令）直接放行，直到会话结束；命令审计照常记录。
+        </div>
+      )}
     </Modal>
   );
 }

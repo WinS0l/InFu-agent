@@ -10,6 +10,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import type { McpServerConfig } from "@infu/shared";
+import { sanitizeEnv } from "../sandbox/index.js";
 
 /** MCP 工具信息（listTools 返回） */
 export interface McpToolInfo {
@@ -37,10 +38,13 @@ export async function connectMcp(cfg: McpServerConfig): Promise<McpConnection> {
     transport = new StreamableHTTPClientTransport(new URL(cfg.url));
   } else {
     if (!cfg.command) throw new Error(`MCP 服务器「${cfg.name}」：stdio 类型需要 command`);
+    // v3.1 审计修复：env 以 sanitizeEnv() 为基底——SDK 的 env 传 undefined 会继承完整
+    // process.env（含 INFU_*_API_KEY），MCP 子进程可 echo 读走全部凭据；sanitizeEnv
+    // 剔除敏感键后合并用户显式配置（配置即信任，但凭据不随之泄漏）
     transport = new StdioClientTransport({
       command: cfg.command,
       args: cfg.args ?? [],
-      env: cfg.env ? { ...process.env, ...cfg.env } as Record<string, string> : undefined,
+      env: { ...sanitizeEnv(), ...(cfg.env ?? {}) } as Record<string, string>,
     });
   }
 

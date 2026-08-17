@@ -85,6 +85,15 @@ export function rebuildMessages(events: StoredEvent[], opts: RebuildOptions = {}
     // 内部工具调用/步骤不进入父上下文（防孤儿 tool-result 误配对与上下文爆炸）
     if (event && "subagentId" in event && event.subagentId) continue;
     switch (event.type) {
+      case "rewind": {
+        // v2.14 批 9：回滚标记 → 注入 system 消息（AI 意识到历史被截断、知道回滚位置）
+        const rw = event as Extract<import("@infu/shared").AgentEvent, { type: "rewind" }>;
+        messages.push({
+          role: "system",
+          content: `（系统提示：对话历史曾在 seq ${rw.to} 处被回滚截断——该点之后的内容已被删除，之前的对话仍有效；请基于当前可见历史继续，不要提及已删除的内容）`,
+        });
+        break;
+      }
       case "user-message":
         flush();
         messages.push({ role: "user", content: event.text });

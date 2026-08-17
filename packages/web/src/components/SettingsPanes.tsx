@@ -6,50 +6,52 @@
  *  - PluginsPane：插件管理（添加/启停/加载探测/删除）
  *  - SkillsPane：技能管理（SKILL.md 发现列表/添加显式引用/移除）
  *  - HooksPane：钩子总览（插件属性：preToolUse/postToolUse 聚合展示）
- *  - ComingSoonPane：规划中功能的占位页（禁用态 + 徽标）
+ *  - 各能力面板：MCP/插件/技能/子智能体/钩子/浏览器/记忆/统计/索引
  */
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
-  Plus, Trash2, Loader2, Plug, Puzzle, RefreshCw, ChevronDown, ChevronRight, Check, Blocks, Pencil,
+  Plus, Trash2, Loader2, RefreshCw, ChevronDown, ChevronRight, Check, Blocks, Pencil,
+  Coins, MessageSquare, MessagesSquare, CalendarCheck, Flame, Sparkles,
 } from "lucide-react";
 import {
   fetchMcpServers, addMcpServer, updateMcpServer, deleteMcpServer, probeMcpTools,
   fetchPlugins, addPlugin, updatePlugin, deletePlugin, probePlugin, generatePlugin,
   fetchSkills, addSkill, deleteSkill,
   fetchAgents, saveAgent, deleteAgent, type AgentInfo,
+  fetchBrowserStatus, fetchMemory, updateConfig, clearBrowserData, fetchConfig, fetchStats, fetchIndexStatus, rebuildIndex,
   type McpServerInfo, type McpToolProbe, type PluginInfo, type PluginProbeResult, type SkillInfo,
+  type BrowserStatus, type MemoryInfo, type UsageStats, type IndexStatus,
 } from "../api";
 import { useStore } from "../store";
+import { apiFetch } from "../api";
+import { Toggle } from "./ui";
 
-/** 风险徽标颜色（low 绿 / medium 黄 / high 红，与运行绿设计一致；全站统一） */
+/** 风险徽标颜色（low 绿 / medium 黄 / high 红；v3 语义色 token 化） */
 export const RISK_STYLE: Record<string, string> = {
-  low: "border-accent/40 bg-accent/10 text-accent",
-  medium: "border-warn/40 bg-warn/10 text-warn",
-  high: "border-danger/40 bg-danger/10 text-danger",
+  low: "border-success/40 bg-success-soft text-success",
+  medium: "border-warn/40 bg-warn-soft text-warn",
+  high: "border-danger/40 bg-danger-soft text-danger",
 };
 
 const inputCls =
-  "h-8 w-full rounded-md border border-line bg-muted px-2 font-mono text-xs text-text placeholder:text-sub/60 focus:border-accent focus:outline-none";
+  "h-8 w-full rounded-lg border border-line bg-input px-2 font-mono text-xs text-text placeholder:text-caption focus:border-info/60 focus:outline-none";
 const dashedAddCls =
-  "flex w-full cursor-pointer items-center justify-center gap-1 rounded-lg border border-dashed border-line py-2 text-xs text-sub transition-colors hover:border-accent hover:text-accent";
+  "flex w-full cursor-pointer items-center justify-center gap-1 rounded-xl border border-dashed border-line py-2 text-[13px] text-sub transition-colors hover:border-info/60 hover:text-info";
 
 /** 错误横幅（面板内） */
 export function PaneError({ error }: { error: string }) {
   if (!error) return null;
-  return <div className="mb-2 rounded-md border border-danger/30 bg-danger/10 px-3 py-1.5 text-xs text-danger">{error}</div>;
+  return <div className="mb-2 rounded-lg border border-danger/30 bg-danger-soft px-3 py-1.5 text-xs text-danger">{error}</div>;
 }
 
-/** 手写开关（与设置弹窗同款） */
-function Toggle({ on, onChange, title }: { on: boolean; onChange: () => void; title?: string }) {
+/** 分组标题（设置面板内） */
+function SectionTitle({ title, desc }: { title: string; desc: string }) {
   return (
-    <button
-      className={`relative h-4 w-8 cursor-pointer rounded-full transition-colors ${on ? "bg-accent/70" : "bg-muted"}`}
-      onClick={onChange}
-      title={title}
-    >
-      <span className={`absolute top-0.5 h-3 w-3 rounded-full bg-text transition-all ${on ? "left-[18px]" : "left-0.5"}`} />
-    </button>
+    <div className="mb-2">
+      <div className="text-sm font-semibold text-text">{title}</div>
+      <div className="mt-0.5 text-[11px] text-sub">{desc}</div>
+    </div>
   );
 }
 
@@ -230,7 +232,7 @@ export function McpPane() {
                     {s.enabled ? "已启用" : "已禁用"}
                   </span>
                   <div className="ml-auto flex items-center gap-1">
-                    <Toggle on={s.enabled} onChange={() => toggleEnabled(s)} title={s.enabled ? "禁用（不再注入工具）" : "启用"} />
+                    <Toggle checked={s.enabled} onChange={() => toggleEnabled(s)} title={s.enabled ? "禁用（不再注入工具）" : "启用"} />
                     <button
                       className="flex h-6 cursor-pointer items-center gap-1 rounded-md border border-line px-2 text-[11px] text-sub transition-colors hover:border-accent hover:text-accent disabled:opacity-50"
                       onClick={() => runProbe(s)} disabled={!s.enabled || p?.busy}
@@ -409,7 +411,12 @@ export function PluginsPane() {
                   >
                     {isOpen ? <ChevronDown className="h-3.5 w-3.5" /> : <ChevronRight className="h-3.5 w-3.5" />}
                   </button>
-                  <span className="text-sm font-medium text-text">{p.id}</span>
+                  <span className="text-sm font-medium text-text">{p.name ?? p.id}</span>
+                  {p.builtin && (
+                    <span className="rounded border border-accent/40 bg-accent/5 px-1.5 py-px text-[10px] text-accent" title="随 InFu 分发的官方插件">
+                      内置{p.version ? ` v${p.version}` : ""}
+                    </span>
+                  )}
                   <span className={`rounded px-1.5 py-px text-[10px] ${enabled ? "border border-accent/40 bg-accent/10 text-accent" : "border border-line bg-muted text-sub"}`}>
                     {enabled ? "已启用" : "已禁用"}
                   </span>
@@ -419,7 +426,7 @@ export function PluginsPane() {
                     </span>
                   )}
                   <div className="ml-auto flex items-center gap-1">
-                    <Toggle on={enabled} onChange={() => togglePlugin(p)} title={enabled ? "禁用" : "启用"} />
+                    <Toggle checked={enabled} onChange={() => togglePlugin(p)} title={enabled ? "禁用" : "启用"} />
                     <button
                       className="flex h-6 cursor-pointer items-center gap-1 rounded-md border border-line px-2 text-[11px] text-sub transition-colors hover:border-accent hover:text-accent disabled:opacity-50"
                       onClick={() => runProbe(p)} disabled={!enabled || pr?.busy}
@@ -427,17 +434,19 @@ export function PluginsPane() {
                     >
                       {pr?.busy ? <Loader2 className="h-3 w-3 animate-spin" /> : <RefreshCw className="h-3 w-3" />}加载
                     </button>
-                    {confirmId === p.id ? (
-                      <button
-                        className="h-6 cursor-pointer rounded-md border border-danger/50 bg-danger/10 px-2 text-[11px] text-danger"
-                        onClick={() => doDelete(p)} disabled={busy}
-                      >
-                        确认删除？
-                      </button>
-                    ) : (
-                      <button className="cursor-pointer rounded p-1 text-sub transition-colors hover:text-danger" onClick={() => setConfirmId(p.id)} title="删除插件">
-                        <Trash2 className="h-3.5 w-3.5" />
-                      </button>
+                    {p.builtin ? null : (
+                      confirmId === p.id ? (
+                        <button
+                          className="h-6 cursor-pointer rounded-md border border-danger/50 bg-danger/10 px-2 text-[11px] text-danger"
+                          onClick={() => doDelete(p)} disabled={busy}
+                        >
+                          确认删除？
+                        </button>
+                      ) : (
+                        <button className="cursor-pointer rounded p-1 text-sub transition-colors hover:text-danger" onClick={() => setConfirmId(p.id)} title="删除插件">
+                          <Trash2 className="h-3.5 w-3.5" />
+                        </button>
+                      )
                     )}
                   </div>
                 </div>
@@ -480,11 +489,13 @@ export function PluginsPane() {
 // ─────────────────────────── 技能 ───────────────────────────
 
 const LEVEL_STYLE: Record<string, string> = {
-  user: "border-accent/40 bg-accent/10 text-accent",
-  project: "border-line bg-muted text-sub",
-  config: "border-warn/40 bg-warn/10 text-warn",
+  user: "border-success/40 bg-success-soft text-success",
+  project: "border-line bg-hover text-sub",
+  config: "border-warn/40 bg-warn-soft text-warn",
+  plugin: "border-info/40 bg-info-soft text-info",
+  builtin: "border-info/40 bg-info-soft/60 text-info",
 };
-const LEVEL_LABEL: Record<string, string> = { user: "用户级", project: "项目级", config: "显式引用" };
+const LEVEL_LABEL: Record<string, string> = { user: "用户级", project: "项目级", config: "显式引用", plugin: "插件", builtin: "内置" };
 
 export function SkillsPane() {
   const [skills, setSkills] = useState<SkillInfo[]>([]);
@@ -601,7 +612,7 @@ export function SkillsPane() {
 // ─────────────────────────── 子智能体（v2.5）───────────────────────────
 
 const AGENT_LEVEL_STYLE: Record<string, string> = {
-  builtin: "border-[#38bdf8]/40 bg-[#38bdf8]/10 text-[#38bdf8]",
+  builtin: "border-info/40 bg-info-soft text-info",
   user: "border-accent/40 bg-accent/10 text-accent",
   project: "border-warn/40 bg-warn/10 text-warn",
 };
@@ -1063,7 +1074,7 @@ export function HooksPane() {
           <div className="rounded-lg border border-line bg-muted/30 p-3 text-[11px] leading-relaxed text-sub">
             <span className="text-text">共 {totalPre} 个 preToolUse · {totalPost} 个 postToolUse</span>
             <br />
-            钩子是插件属性（opencode 式函数钩子）：preToolUse 可在工具执行前拦截/改参，postToolUse 可改写工具结果；抛错放行不阻塞。
+            钩子是插件属性（函数式函数钩子）：preToolUse 可在工具执行前拦截/改参，postToolUse 可改写工具结果；抛错放行不阻塞。
           </div>
           {list.map((i) => (
             <div key={i.plugin} className="rounded-lg border border-line bg-muted/30 p-3">
@@ -1089,27 +1100,685 @@ export function HooksPane() {
         </div>
       )}
       <div className="mt-3 border-t border-line pt-2 text-[11px] text-sub/70">
-        「零插件配钩子」的独立 config 通道不在规划内（opencode 式统一：钩子 = 插件内 JS 函数）。
+        「零插件配钩子」的独立 config 通道不在规划内（函数式统一：钩子 = 插件内 JS 函数）。
       </div>
     </div>
   );
 }
 
-// ─────────────────────────── 规划中占位 ───────────────────────────
+// ─────────────────────────── 浏览器（browser-use）───────────────────────────
 
-export function ComingSoonPane({ name, desc, roadmap }: { name: string; desc: string; roadmap: string }) {
+export function BrowserPane() {
+  const [status, setStatus] = useState<BrowserStatus | null>(null);
+  const [headless, setHeadless] = useState(true);
+  const [path, setPath] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const [saved, setSaved] = useState("");
+  const [confirmClear, setConfirmClear] = useState<"cache" | "all" | null>(null);
+
+  const load = async () => {
+    const s = await fetchBrowserStatus();
+    setStatus(s); setHeadless(s.headless); setPath(s.executablePath);
+  };
+  useEffect(() => { load().catch((e) => setError((e as Error).message)); }, []);
+
+  const togglePlugin = async () => {
+    setBusy(true); setError("");
+    try { await updatePlugin("browser-use", { enabled: !(status?.pluginEnabled ?? true) }); await load(); }
+    catch (e) { setError((e as Error).message); } finally { setBusy(false); }
+  };
+
+  const save = async (next: { headless?: boolean; executablePath?: string }) => {
+    setBusy(true); setError(""); setSaved("");
+    try {
+      await updateConfig({ browser: { headless: next.headless ?? headless, executablePath: next.executablePath ?? path } });
+      await load(); setSaved("已保存"); setTimeout(() => setSaved(""), 2000);
+    } catch (e) { setError((e as Error).message); } finally { setBusy(false); }
+  };
+
+  const doClear = async (scope: "cache" | "all") => {
+    setBusy(true); setError(""); setConfirmClear(null);
+    try { const msg = await clearBrowserData(scope); setSaved(msg); setTimeout(() => setSaved(""), 3000); }
+    catch (e) { setError((e as Error).message); } finally { setBusy(false); }
+  };
+
+  const enabled = status?.pluginEnabled ?? true;
+
   return (
-    <div className="flex h-full flex-col items-center justify-center gap-3 py-16 text-center">
-      <div className="rounded-full border border-line bg-muted px-2.5 py-1 text-[10px] text-sub">
-        <span className="mr-1 inline-block h-1.5 w-1.5 rounded-full bg-warn align-middle" />
-        规划中
+    <div>
+      <PaneError error={error} />
+      {saved && <div className="mb-2 rounded-md border border-accent/40 bg-accent/10 px-3 py-1.5 text-xs text-accent">{saved}</div>}
+
+      <SectionTitle title="浏览器控制" desc="启用 Browser Use 插件，让新会话可通过内置浏览器访问和操作网页" />
+
+      <div className="space-y-2">
+        <div className="flex items-center justify-between rounded-lg border border-line bg-muted/30 px-3 py-2.5">
+          <div>
+            <div className="text-xs text-text">开启内置浏览器控制</div>
+            <div className="mt-0.5 text-[11px] text-sub">启用 browser-use 插件（browser_navigate / snapshot / click / fill / screenshot 等 7 个工具）</div>
+          </div>
+          <Toggle checked={enabled} onChange={() => void togglePlugin()} title={enabled ? "已开启" : "已关闭"} />
+        </div>
+
+        <div className="flex items-center justify-between rounded-lg border border-line bg-muted/30 px-3 py-2.5">
+          <div>
+            <div className="text-xs text-text">无头模式</div>
+            <div className="mt-0.5 text-[11px] text-sub">关闭后有头可见（调试用）；开启则后台无头运行</div>
+          </div>
+          <Toggle checked={headless} onChange={() => { const v = !headless; setHeadless(v); save({ headless: v }); }} title={headless ? "无头" : "有头"} />
+        </div>
+
+        <div className="rounded-lg border border-line bg-muted/30 px-3 py-2.5">
+          <div className="text-xs text-text">浏览器可执行文件路径</div>
+          <div className="mt-0.5 text-[11px] text-sub">留空则自动探测（ms-playwright 缓存）；当前：{status?.chromiumPath ? (status.available ? "已找到" : "未找到") : "未探测"}</div>
+          <div className="mt-2 flex gap-2">
+            <input className={inputCls} value={path} placeholder="留空自动探测" onChange={(e) => setPath(e.target.value)} />
+            <button className="h-8 shrink-0 cursor-pointer rounded-md border border-accent/50 bg-accent/10 px-3 text-xs text-accent transition-colors hover:bg-accent/20 disabled:opacity-50" onClick={() => save({ executablePath: path.trim() })} disabled={busy}>
+              {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : "保存"}
+            </button>
+          </div>
+        </div>
       </div>
-      <div className="text-sm font-semibold text-text">{name}</div>
-      <div className="max-w-sm text-[11px] leading-relaxed text-sub">{desc}</div>
-      <div className="max-w-sm font-mono text-[10px] text-sub/60">{roadmap}</div>
+
+      <div className="mt-5"><SectionTitle title="浏览器数据" desc="清除内置浏览器缓存与站点数据" /></div>
+
+      <div className="space-y-2">
+        <div className="flex items-center justify-between rounded-lg border border-line bg-muted/30 px-3 py-2.5">
+          <div>
+            <div className="text-xs text-text">清除内置浏览器缓存</div>
+            <div className="mt-0.5 text-[11px] text-sub">清除 HTTP 缓存、Cache Storage 和 Service Worker，保留 Cookie 和本地站点数据</div>
+          </div>
+          <button className="h-8 cursor-pointer rounded-md border border-line px-3 text-xs text-text transition-colors hover:border-accent hover:text-accent disabled:opacity-50" onClick={() => doClear("cache")} disabled={busy}>
+            {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : "清除缓存"}
+          </button>
+        </div>
+
+        <div className="flex items-center justify-between rounded-lg border border-line bg-muted/30 px-3 py-2.5">
+          <div>
+            <div className="text-xs text-text">清除全部浏览器数据</div>
+            <div className="mt-0.5 text-[11px] text-sub">删除 Cookie、站点数据和缓存。此操作不可撤销</div>
+          </div>
+          {confirmClear === "all" ? (
+            <div className="flex gap-1">
+              <button className="h-8 cursor-pointer rounded-md border border-danger/50 bg-danger/10 px-3 text-xs text-danger" onClick={() => doClear("all")} disabled={busy}>确认清除？</button>
+              <button className="h-8 cursor-pointer rounded-md border border-line px-2 text-xs text-sub hover:text-text" onClick={() => setConfirmClear(null)}>取消</button>
+            </div>
+          ) : (
+            <button className="h-8 cursor-pointer rounded-md border border-danger/40 px-3 text-xs text-danger transition-colors hover:bg-danger/10 disabled:opacity-50" onClick={() => setConfirmClear("all")} disabled={busy}>清除全部</button>
+          )}
+        </div>
+      </div>
+
+      <div className="mt-3 border-t border-line pt-2 text-[11px] text-sub/70">
+        安全说明：browser_navigate 走联网门禁（默认断网，需人工审批放行）；click/type/fill 有页面副作用 → medium 审批；截图存 .infu/browser/ 目录。
+      </div>
     </div>
   );
 }
 
-/** 顶部导航图标汇总（供设置弹窗使用） */
-export { Plug, Puzzle };
+// ─────────────────────────── 记忆 ───────────────────────────
+
+export function MemoryPane() {
+  const [mem, setMem] = useState<MemoryInfo | null>(null);
+  const [error, setError] = useState("");
+  const [open, setOpen] = useState<string | null>(null);
+  const [autoSediment, setAutoSediment] = useState(true);
+  useEffect(() => {
+    fetchMemory().then(setMem).catch((e) => setError((e as Error).message));
+    fetchConfig().then((c) => setAutoSediment(c.memory?.autoSediment !== false)).catch(() => {});
+  }, []);
+
+  const toggleSediment = async () => {
+    const v = !autoSediment;
+    setAutoSediment(v);
+    try { await updateConfig({ memory: { autoSediment: v } }); }
+    catch (e) { setError((e as Error).message); setAutoSediment(!v); }
+  };
+
+  const renderGroup = (label: string, dir: string, topics: MemoryInfo["global"]) => (
+    <div className="rounded-lg border border-line bg-muted/30 p-3">
+      <div className="flex items-center justify-between">
+        <span className="text-xs font-semibold text-text">{label}</span>
+        <span className="text-[10px] text-sub">{topics.length} 个主题</span>
+      </div>
+      <div className="mt-1 break-all font-mono text-[10px] text-sub/60">{dir}</div>
+      {topics.length === 0 ? (
+        <div className="mt-2 text-[11px] text-sub/60">暂无记忆（Agent 用 memory_write 写入后在此出现）</div>
+      ) : (
+        <div className="mt-2 space-y-1">
+          {topics.map((t) => (
+            <div key={t.name} className="rounded-md border border-line bg-muted/20">
+              <button className="flex w-full cursor-pointer items-center gap-1 px-2 py-1.5 text-left text-xs text-text hover:bg-muted/40" onClick={() => setOpen(open === t.name ? null : t.name)}>
+                {open === t.name ? <ChevronDown className="h-3 w-3 text-sub" /> : <ChevronRight className="h-3 w-3 text-sub" />}
+                <span className="font-mono">{t.name}</span>
+                <span className="truncate text-[10px] text-sub/70">{t.hint}</span>
+              </button>
+              {open === t.name && (
+                <pre className="max-h-48 overflow-auto border-t border-line px-3 py-2 text-[11px] leading-relaxed whitespace-pre-wrap text-text/80">{t.content}</pre>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+
+  return (
+    <div>
+      <PaneError error={error} />
+      <div className="mb-3 rounded-lg border border-accent/30 bg-accent/5 px-3 py-2 text-[11px] leading-relaxed text-sub">
+        四层记忆：「必须遵守」INFU.md 指令 →「下次怎么干」全局/项目记忆（memory_read/write）→「总结」项目历史（.infu/history/ 自动沉淀）→「发生的事」会话历史。记忆由 Agent 在任务中主动读写。
+      </div>
+
+      <div className="mb-3 flex items-center justify-between rounded-lg border border-line bg-muted/30 px-3 py-2.5">
+        <div>
+          <div className="text-xs text-text">自动沉淀项目历史</div>
+          <div className="mt-0.5 text-[11px] text-sub">任务完成后自动归档 .infu/history/（报告 + 改动概览）；关闭后不再自动记录</div>
+        </div>
+        <Toggle checked={autoSediment} onChange={() => void toggleSediment()} title={autoSediment ? "已开启" : "已关闭"} />
+      </div>
+
+      {mem?.instruction && (
+        <div className="mb-3 rounded-lg border border-line bg-muted/30 p-3">
+          <div className="text-xs font-semibold text-text">项目指令（INFU.md / AGENTS.md）</div>
+          <div className="mt-1 break-all font-mono text-[10px] text-sub/60">{mem.instruction.path}</div>
+          <pre className="mt-2 max-h-40 overflow-auto text-[11px] leading-relaxed whitespace-pre-wrap text-text/80">{mem.instruction.content}</pre>
+        </div>
+      )}
+      <div className="space-y-3">
+        {renderGroup("全局记忆（跨项目）", mem?.globalDir ?? "~/.infu/memory/", mem?.global ?? [])}
+        {renderGroup("项目记忆（当前项目）", mem?.projectDir ?? "<root>/.infu/memory/", mem?.project ?? [])}
+      </div>
+      <div className="mt-3 border-t border-line pt-2 text-[11px] text-sub/70">
+        memory_read / memory_write 工具：Agent 在任务中按需读记忆、把「值得下次复用」的稳定约定写入记忆（敏感凭据自动拦截）。
+      </div>
+    </div>
+  );
+}
+
+// ─────────────────────────── 使用统计 ───────────────────────────
+
+function fmtTokens(n: number): string {
+  if (n >= 1e8) return (n / 1e8).toFixed(1) + " 亿";
+  if (n >= 1e4) return (n / 1e4).toFixed(1) + " 万";
+  return String(n);
+}
+
+// v3.0 UI 审查：模型调色板（横向条形图同日多模型并列条 + 底部图例；按模型名哈希稳定分配）
+const MODEL_COLORS = ["#22C55E", "#679EFE", "#F5A623", "#A78BFA", "#F472B6", "#34D399", "#F87171", "#38BDF8", "#FBBF24", "#E879F9"];
+function modelColor(model: string): string {
+  let h = 0;
+  for (let i = 0; i < model.length; i++) h = (h * 31 + model.charCodeAt(i)) >>> 0;
+  return MODEL_COLORS[h % MODEL_COLORS.length];
+}
+
+export function StatsPane() {
+  const [stats, setStats] = useState<UsageStats | null>(null);
+  const [days, setDays] = useState(30);
+  const [error, setError] = useState("");
+  useEffect(() => { fetchStats(days).then(setStats).catch((e) => setError((e as Error).message)); }, [days]);
+
+  // v3.0 UI 审查批 2：统计卡片改 ZCode 同款（图标 + label + value + sub）
+  const card = (label: string, value: string, icon: React.ReactNode, sub?: string) => (
+    <div className="min-w-0 rounded-lg border border-line bg-muted/30 px-3 py-2.5">
+      <div className="flex min-w-0 items-center gap-1.5 text-[11px] text-sub">
+        {icon}
+        <span className="truncate">{label}</span>
+      </div>
+      <div className="mt-0.5 truncate text-lg font-semibold text-text">{value}</div>
+      {sub && <div className="mt-0.5 truncate text-[10px] text-sub/70">{sub}</div>}
+    </div>
+  );
+
+  // v3.0 UI 审查批 2：横向条形图归一化基准 = 各日总量最大值（byModel 真实数据优先）
+  const maxDayTotal = Math.max(1, ...(stats?.dailyTrend.map((d) => Math.max(d.tokens, d.byModel.reduce((s, m) => s + m.tokens, 0))) ?? [1]));
+  // 图例模型列表（去重，保持出现顺序，最多 6 个——ZCode 同款）
+  const allModels = [...new Set(stats?.dailyTrend.flatMap((d) => d.byModel.map((m) => m.model)) ?? [])].slice(0, 6);
+  const hasEstimated = stats?.dailyTrend.some((d) => d.estimated) ?? false;
+
+  return (
+    <div>
+      <PaneError error={error} />
+      <div className="mb-3 flex items-center justify-between">
+        <SectionTitle title="时间范围" desc="" />
+        <div className="flex gap-1">
+          {[7, 30].map((d) => (
+            <button key={d} className={days === d ? "h-7 cursor-pointer rounded-md border border-accent/50 bg-accent/10 px-3 text-xs text-accent" : "h-7 cursor-pointer rounded-md border border-line px-3 text-xs text-sub hover:text-text"} onClick={() => setDays(d)}>
+              最近 {d} 天
+            </button>
+          ))}
+        </div>
+      </div>
+
+      <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
+        {card("tokens 用量", stats ? fmtTokens(stats.tokens) : "—", <Coins className="h-3.5 w-3.5 shrink-0" />)}
+        {card("会话数量", stats ? String(stats.sessions) : "—", <MessagesSquare className="h-3.5 w-3.5 shrink-0" />)}
+        {card("消息数量", stats ? String(stats.messages) : "—", <MessageSquare className="h-3.5 w-3.5 shrink-0" />)}
+        {card("活跃天数", stats ? String(stats.activeDays) : "—", <CalendarCheck className="h-3.5 w-3.5 shrink-0" />)}
+        {card("当前连续天数", stats ? String(stats.streak) : "—", <Flame className="h-3.5 w-3.5 shrink-0" />)}
+        {card("最常用模型", stats?.topModel ? stats.topModel.model : "—", <Sparkles className="h-3.5 w-3.5 shrink-0" />, stats?.topModel ? "占比 " + stats.topModel.share + "%" : undefined)}
+      </div>
+
+      {stats && stats.dailyTrend.length > 0 && (
+        <>
+        {/* v3.0 审计后重写：活跃热力图改 ZCode 同款（GitHub 贡献图式）——
+           横向周列（时间从左到右）、纵向周一~周日；5 级绿色色阶；
+           色阶图例在标题行右侧横排「少 → 多」；hover 放大 + 提示；自动滚动到最新 */}
+        <div className="mt-4">
+          <div className="mb-2 flex items-start justify-between gap-3">
+            <div>
+              <div className="text-sm font-semibold text-text">活跃热力图</div>
+              <div className="mt-0.5 text-[11px] text-sub">方格颜色越深代表当日 Token 消耗越高</div>
+            </div>
+            {/* 色阶图例（ZCode 同款：标题右侧横排 少→多） */}
+            <div className="flex shrink-0 items-center gap-1 pt-0.5 text-[10px] text-sub">
+              <span className="mr-0.5">少</span>
+              {[0.15, 0.35, 0.55, 0.75, 0.95].map((a) => (
+                <span key={a} className="size-3.5 rounded-[4px] border border-line" style={{ background: `rgba(34,197,94,${a})` }} />
+              ))}
+              <span className="ml-0.5">多</span>
+            </div>
+          </div>
+          <div className="rounded-lg border border-line bg-muted/30 p-3">
+            {(() => {
+              const fmtDate = (d: Date) =>
+                `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+              const byDate = new Map(stats.dailyTrend.map((d) => [d.date, d.tokens]));
+              // 用户定稿：热力图固定最近 30 天（不受右上角 7/30 切换控制）；
+              // 30 列 × 7 行矩阵铺满卡片：列 = 天（从左到右 = 旧 → 新，今天 8/16 在最右列），
+              // 行 = 星期几；当天格子 = 数据格（有调用绿色深浅 / 无调用空框），同列其余 6 格 = 浅底占位
+              const HM_DAYS = 30;
+              const now = new Date();
+              const start = new Date(now.getFullYear(), now.getMonth(), now.getDate() - (HM_DAYS - 1));
+              const maxTok = Math.max(1, ...stats.dailyTrend.map((d) => d.tokens));
+              const daysArr = Array.from({ length: HM_DAYS }, (_, i) => {
+                const d = new Date(start.getFullYear(), start.getMonth(), start.getDate() + i);
+                return { date: d, tokens: byDate.get(fmtDate(d)) ?? 0, row: (d.getDay() + 6) % 7 };
+              });
+              // ZCode 同款 5 级色阶：按当日 token / 最大值离散分级
+              const levelBg = (tokens: number) => {
+                if (tokens <= 0) return null;
+                const lvl = Math.min(4, Math.ceil((tokens / maxTok) * 5) - 1);
+                return `rgba(34,197,94,${[0.15, 0.35, 0.55, 0.75, 0.95][lvl]})`;
+              };
+              return <HeatmapGrid days={daysArr} levelBg={levelBg} fmtDate={fmtDate} />;
+            })()}
+          </div>
+        </div>
+
+        {/* v3.0 审计后重写：按天 Token 趋势（竖向堆叠柱状图）——
+            用户定稿：日期轴完整显现（范围天数每天一个标签，今天最右）；
+            柱 = 按范围天数均分槽位（30 天细柱 / 7 天粗柱），有数据的天在对应槽位出柱；
+            柱内按模型分段着色；Y 轴隐藏（网格虚线分档）；图例在图表下方 3 列网格 */}
+        <div className="mt-4">
+          <SectionTitle
+            title="按天 Token 趋势（模型色标区分）"
+            desc={stats.dailyTrend.some((d) => !d.estimated) ? "真实模型返回用量（模型色板区分）" : "字符数/4 估算（无 usage 数据的旧会话）"}
+          />
+          <div className="rounded-lg border border-line bg-muted/30 p-3">
+            {(() => {
+              const gapCls = days <= 14 ? "gap-2" : "gap-px";
+              const fmtShort = (date: string) => `${+date.slice(5, 7)}/${+date.slice(8, 10)}`;
+              // 范围日期轴：i=0 最早 → days-1 = 今天（最右）
+              const now = new Date();
+              const rangeDates = Array.from({ length: days }, (_, i) => {
+                const d = new Date(now.getFullYear(), now.getMonth(), now.getDate() - (days - 1 - i));
+                return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+              });
+              const byDate = new Map(stats.dailyTrend.map((d) => [d.date, d]));
+              return (
+                <>
+                  <div className="relative h-60">
+                    {/* 水平网格虚线（0/25/50/75/100%） */}
+                    {[0, 0.25, 0.5, 0.75, 1].map((f) => (
+                      <div key={f} className="absolute inset-x-0 border-t border-dashed border-line/50" style={{ bottom: `${f * 100}%` }} />
+                    ))}
+                    {/* 柱区：槽位 = 范围天数均分（30 天细柱 / 7 天粗柱），有数据的天出柱 */}
+                    <div className={`absolute inset-0 flex items-end px-1 ${gapCls}`}>
+                      {rangeDates.map((date) => {
+                        const d = byDate.get(date);
+                        if (!d) return <div key={date} className="h-full min-w-0 flex-1" />;
+                        const models = d.byModel.length > 0 ? d.byModel : [{ model: "", tokens: d.tokens }];
+                        const dayTotal = models.reduce((s, m) => s + m.tokens, 0);
+                        const tip =
+                          `${d.date}：${fmtTokens(dayTotal)} tokens${d.estimated ? "（估算）" : ""}` +
+                          models.filter((m) => m.model).map((m) => `\n${m.model}：${fmtTokens(m.tokens)} tokens`).join("");
+                        return (
+                          <div key={date} className="flex h-full min-w-0 flex-1 flex-col justify-end" title={tip}>
+                            <div
+                              className="flex w-full flex-col overflow-hidden rounded-t-[3px]"
+                              style={{ height: `${Math.max(0.5, (dayTotal / maxDayTotal) * 100)}%` }}
+                            >
+                              {models.map((m, i) => (
+                                <div
+                                  key={i}
+                                  style={{
+                                    height: `${(m.tokens / dayTotal) * 100}%`,
+                                    background: m.model ? modelColor(m.model) : "var(--color-accent)",
+                                    opacity: m.model ? 1 : 0.65,
+                                  }}
+                                />
+                              ))}
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                  {/* 日期轴：7 天模式每天显示；30 天模式每隔 5 天一个（今天 8/16 必有，往前 8/11/8/6/8/1…） */}
+                  <div className={`mt-1.5 flex px-1 ${gapCls}`}>
+                    {rangeDates.map((date, i) => {
+                      // i = 从最早往今天数；从今天往回数 = days-1-i；30 天模式 (days-1-i)%5===0（今天必显示）
+                      const show = days <= 7 || (days - 1 - i) % 5 === 0;
+                      return (
+                        <div key={date} className="min-w-0 flex-1 text-center">
+                          {show && (
+                            <span className="whitespace-nowrap font-mono text-[9px] text-sub/60">{fmtShort(date)}</span>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                </>
+              );
+            })()}
+            {/* 底部图例（3 列网格 色块 + 模型名；估算单条单独标注） */}
+            <div className="mt-2 grid grid-cols-3 gap-x-3 gap-y-1">
+              {allModels.map((m) => (
+                <div key={m} className="flex min-w-0 items-center gap-1.5 text-[11px] text-sub">
+                  <span className="size-2.5 shrink-0 rounded-sm" style={{ background: modelColor(m) }} />
+                  <span className="truncate">{m}</span>
+                </div>
+              ))}
+              {hasEstimated && (
+                <div className="flex min-w-0 items-center gap-1.5 text-[11px] text-sub">
+                  <span className="size-2.5 shrink-0 rounded-sm" style={{ background: "var(--color-accent)", opacity: 0.65 }} />
+                  <span className="truncate">估算（旧数据）</span>
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+        </>
+      )}
+
+      {stats && stats.modelUsage.length > 0 && (
+        <div className="mt-4">
+          <SectionTitle title="模型用量" desc="" />
+          <div className="space-y-1.5">
+            {stats.modelUsage.map((m) => (
+              <div key={m.model} className="rounded-lg border border-line bg-muted/30 px-3 py-2">
+                <div className="flex items-center justify-between">
+                  <span className="font-mono text-xs text-text">{m.model}</span>
+                  <span className="text-[11px] text-sub">{fmtTokens(m.tokens)} tokens · {m.share}%</span>
+                </div>
+                <div className="mt-1 h-1.5 rounded-full bg-muted">
+                  <div className="h-1.5 rounded-full bg-accent" style={{ width: Math.min(100, m.share) + "%" }} />
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** 热力图矩阵（用户定稿：30 列 × 7 行铺满卡片——列 = 天（从左到右 = 旧 → 新，今天最右），
+ *  行 = 星期几；左端星期标签；当天格子 = 数据格（绿色深浅 / 空框），同列其余 6 格 = 浅底占位） */
+function HeatmapGrid({ days, levelBg, fmtDate }: {
+  days: Array<{ date: Date; tokens: number; row: number }>;
+  levelBg: (tokens: number) => string | null;
+  fmtDate: (d: Date) => string;
+}) {
+  const weekdays = ["一", "二", "三", "四", "五", "六", "日"];
+  return (
+    <div className="flex items-stretch gap-[2px]">
+      {/* 左侧星期标签（周一~周日，与格子同高） */}
+      <div className="flex shrink-0 flex-col gap-[2px]">
+        {weekdays.map((w) => (
+          <span key={w} className="flex w-5 items-center justify-center text-[10px] leading-none text-sub" style={{ height: "auto", aspectRatio: "1" }}>
+            {w}
+          </span>
+        ))}
+      </div>
+      {/* 30 列 × 7 行矩阵（列 = 天，铺满卡片宽） */}
+      {days.map((day) => (
+        <div key={fmtDate(day.date)} className="flex min-w-0 flex-1 flex-col gap-[2px]">
+          {Array.from({ length: 7 }, (_, r) => {
+            if (r !== day.row) {
+              // 占位格（该列非当天）：淡边框 + 浅底——30×7 全网格可见（用户要求矩阵所有方格都显示）
+              return <div key={r} className="aspect-square w-full rounded-[4px] border border-line/40 bg-muted/15" />;
+            }
+            const bg = levelBg(day.tokens);
+            return (
+              <div
+                key={r}
+                className={`aspect-square w-full rounded-[4px] border transition-transform duration-150 hover:scale-110 ${
+                  bg ? "border-line/70" : "border-line/60 bg-muted/40"
+                }`}
+                style={bg ? { background: bg } : undefined}
+                title={`${fmtDate(day.date)}：${fmtTokens(day.tokens)} tokens`}
+              />
+            );
+          })}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// ─────────────────────────── 索引库 ───────────────────────────
+
+export function IndexPane() {
+  const [status, setStatus] = useState<IndexStatus | null>(null);
+  const [error, setError] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState("");
+  const load = () => fetchIndexStatus().then(setStatus).catch((e) => setError((e as Error).message));
+  useEffect(() => { load(); }, []);
+
+  const rebuild = async () => {
+    setBusy(true); setError(""); setMsg("");
+    try {
+      const r = await rebuildIndex();
+      setMsg("已重建索引：" + r.fileCount + " 个文件");
+      await load();
+    } catch (e) { setError((e as Error).message); } finally { setBusy(false); }
+  };
+
+  const fmtTime = (t: number | null) => (t ? new Date(t).toLocaleString() : "—");
+  const fmtSize = (b: number) => (b > 1024 * 1024 ? (b / 1024 / 1024).toFixed(2) + " MB" : (b / 1024).toFixed(1) + " KB");
+
+  return (
+    <div>
+      <PaneError error={error} />
+      {msg && <div className="mb-2 rounded-md border border-accent/40 bg-accent/10 px-3 py-1.5 text-xs text-accent">{msg}</div>}
+      <div className="mb-3 rounded-lg border border-accent/30 bg-accent/5 px-3 py-2 text-[11px] leading-relaxed text-sub">
+        索引库：为项目建一份文件清单缓存（跳过 node_modules/.git/dist 等噪音目录），search_code 搜索时优先复用，大幅加速。语义检索（embedding）留待后续。
+      </div>
+
+      <div className="rounded-lg border border-line bg-muted/30 p-3">
+        <div className="flex items-center justify-between">
+          <span className="text-xs font-semibold text-text">索引状态</span>
+          <span className={status?.built ? "rounded border border-accent/40 bg-accent/10 px-1.5 py-px text-[10px] text-accent" : "rounded border border-warn/40 bg-warn/10 px-1.5 py-px text-[10px] text-warn"}>
+            {status?.built ? "已构建" : "未构建"}
+          </span>
+        </div>
+        <div className="mt-2 grid grid-cols-2 gap-2 text-[11px] text-sub">
+          <div>文件数：<span className="text-text">{status?.fileCount ?? "—"}</span></div>
+          <div>大小：<span className="text-text">{status ? fmtSize(status.sizeBytes) : "—"}</span></div>
+          <div>构建时间：<span className="text-text">{fmtTime(status?.builtAt ?? null)}</span></div>
+        </div>
+        {status?.path && <div className="mt-2 break-all font-mono text-[10px] text-sub/60">{status.path}</div>}
+      </div>
+
+      <button className="mt-3 flex h-8 cursor-pointer items-center gap-1 rounded-md border border-accent/50 bg-accent/10 px-3 text-xs text-accent transition-colors hover:bg-accent/20 disabled:opacity-50" onClick={rebuild} disabled={busy}>
+        {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5" />}
+        {status?.built ? "重建索引" : "构建索引"}
+      </button>
+    </div>
+  );
+}
+
+
+// ─────────────────────────── 定时任务（v3.0 批 11） ───────────────────────────
+
+interface ScheduleItem {
+  id: string;
+  cron: string;
+  prompt: string;
+  root: string;
+  enabled: boolean;
+  lastRun?: string;
+  lastStatus?: string;
+  nextRun?: string;
+}
+
+/** 定时任务管理：列表 / 添加（cron + 任务描述）/ 启停 / 删除。
+ *  无人值守审批语义：等价 CLI -y——low/medium 自动批准，联网/自注册等安全红线一律拒绝 */
+export function SchedulePane() {
+  const [items, setItems] = useState<ScheduleItem[]>([]);
+  const [error, setError] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [cron, setCron] = useState("");
+  const [prompt, setPrompt] = useState("");
+  const [notice, setNotice] = useState("");
+  // v3.0 UI 审查：删除两段式（替代原生 window.confirm，与全站一致）
+  const [confirmId, setConfirmId] = useState<string | null>(null);
+
+  const load = () => {
+    apiFetch("/api/schedules")
+      .then((r) => r.json())
+      .then((list) => setItems(list as ScheduleItem[]))
+      .catch((e) => setError((e as Error).message));
+  };
+  useEffect(() => { load(); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, []);
+
+  const add = async () => {
+    if (!cron.trim() || !prompt.trim()) { setError("cron 与任务描述必填"); return; }
+    setBusy(true);
+    setError("");
+    try {
+      const r = await apiFetch("/api/schedules", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ cron: cron.trim(), prompt: prompt.trim() }),
+      });
+      const j = (await r.json()) as { ok: boolean; message: string };
+      if (!j.ok) setError(j.message);
+      else { setNotice(j.message); setCron(""); setPrompt(""); load(); }
+    } catch (e) { setError((e as Error).message); }
+    setBusy(false);
+  };
+
+  const toggle = async (it: ScheduleItem) => {
+    await apiFetch(`/api/schedules/${it.id}`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ enabled: !it.enabled }),
+    });
+    load();
+  };
+  const remove = async (it: ScheduleItem) => {
+    try {
+      await apiFetch(`/api/schedules/${it.id}`, { method: "DELETE" });
+      load();
+    } catch (e) {
+      setError((e as Error).message);
+    }
+    setConfirmId(null);
+  };
+
+  return (
+    <div>
+      <SectionTitle
+        title="定时任务"
+        desc="按 cron 周期自动运行 Agent 任务。无人值守语义 = 等价 CLI -y：普通操作自动批准，联网 / 自注册等安全红线一律拒绝。"
+      />
+      <PaneError error={error} />
+      {notice && <div className="mb-2 rounded-lg border border-success/30 bg-success-soft px-3 py-1.5 text-xs text-success">{notice}</div>}
+
+      {/* 添加表单 */}
+      <div className="mb-3 rounded-xl border border-line bg-hover/30 p-2.5">
+        <div className="mb-2 text-xs font-medium text-text">添加任务</div>
+        <div className="space-y-1.5">
+          <input
+            className="h-8 w-full rounded-lg border border-line bg-elevated px-2.5 text-xs text-text outline-none placeholder:text-caption focus:border-info/60"
+            value={cron}
+            onChange={(e) => setCron(e.target.value)}
+            placeholder="cron 表达式，如 */30 * * * *（每 30 分钟）/ 0 9 * * 1-5（工作日 9 点）"
+            spellCheck={false}
+          />
+          <input
+            className="h-8 w-full rounded-lg border border-line bg-elevated px-2.5 text-xs text-text outline-none placeholder:text-caption focus:border-info/60"
+            value={prompt}
+            onChange={(e) => setPrompt(e.target.value)}
+            placeholder="任务描述，如：检查项目健康状态并汇报"
+            spellCheck={false}
+            onKeyDown={(e) => { if (e.key === "Enter") void add(); }}
+          />
+          <button
+            className="h-8 w-full cursor-pointer rounded-lg bg-primary text-xs font-medium text-primary-fg transition-colors hover:bg-primary-hover disabled:cursor-not-allowed disabled:opacity-40"
+            onClick={() => void add()}
+            disabled={busy}
+          >
+            {busy ? "添加中…" : "添加定时任务"}
+          </button>
+        </div>
+      </div>
+
+      {/* 列表 */}
+      {items.length === 0 ? (
+        <div className="rounded-xl border border-line bg-hover/30 px-3 py-4 text-center text-xs text-caption">
+          暂无定时任务——添加后服务自动按 cron 执行（需服务运行中）
+        </div>
+      ) : (
+        <div className="space-y-1.5">
+          {items.map((it) => (
+            <div key={it.id} className="rounded-xl border border-line bg-hover/30 p-2.5">
+              <div className="flex items-center gap-2">
+                <Toggle checked={it.enabled} onChange={() => void toggle(it)} title={it.enabled ? "暂停" : "启用"} />
+                <span className="min-w-0 flex-1 truncate text-xs font-medium text-text">{it.prompt}</span>
+                {confirmId === it.id ? (
+                  <span className="flex shrink-0 items-center gap-1.5 text-[11px]">
+                    <span className="text-warn">确认删除？</span>
+                    <button
+                      className="cursor-pointer rounded-md border border-danger/40 bg-danger-soft px-1.5 py-0.5 text-danger transition-colors hover:bg-danger/15"
+                      onClick={() => void remove(it)}
+                    >
+                      确定
+                    </button>
+                    <button
+                      className="cursor-pointer rounded-md border border-line px-1.5 py-0.5 text-sub transition-colors hover:bg-hover hover:text-text"
+                      onClick={() => setConfirmId(null)}
+                    >
+                      取消
+                    </button>
+                  </span>
+                ) : (
+                  <button
+                    className="shrink-0 cursor-pointer rounded-md px-1.5 py-0.5 text-[11px] text-sub transition-colors hover:bg-hover hover:text-danger"
+                    onClick={() => setConfirmId(it.id)}
+                  >
+                    删除
+                  </button>
+                )}
+              </div>
+              <div className="mt-1.5 pl-10 text-[11px] leading-4 text-sub">
+                <span className="font-mono text-info">{it.cron}</span>
+                <span className="ml-2">{it.enabled ? "启用" : "暂停"}</span>
+                <div className="truncate">
+                  下次：{it.nextRun ? new Date(it.nextRun).toLocaleString("zh-CN") : "—"}
+                  {it.lastRun ? ` · 上次：${new Date(it.lastRun).toLocaleString("zh-CN")}（${it.lastStatus ?? ""}）` : ""}
+                </div>
+                <div className="truncate text-caption">{it.root}</div>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}

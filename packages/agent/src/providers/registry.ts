@@ -7,7 +7,7 @@
  *      DeepSeek / 智谱 GLM / 通义千问 / Ollama / 任意自定义网关
  *      （One API、New API、vLLM、本地代理等）
  *
- * 与 ZCode 差异：ZCode 固化国内模型目录；InFu 完全开放，用户配置即接入。
+ * 与 InFu 差异：InFu 固化国内模型目录；InFu 完全开放，用户配置即接入。
  */
 
 import { createOpenAI } from "@ai-sdk/openai";

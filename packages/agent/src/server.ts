@@ -8,32 +8,43 @@
  *   GET  /api/health         健康检查
  */
 
+import { createRequire } from "node:module";
+const _require = createRequire(import.meta.url);
 import { Hono } from "hono";
 import { streamSSE } from "hono/streaming";
 import { randomUUID } from "node:crypto";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { Readable } from "node:stream";
-import { appendFileSync, mkdirSync, writeFileSync, readFileSync, existsSync, statSync } from "node:fs";
+import { appendFileSync, mkdirSync, writeFileSync, readFileSync, existsSync, statSync, readdirSync } from "node:fs";
 import * as fs from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { join, dirname } from "node:path";
+import { inflateRawSync } from "node:zlib";
 import path from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import type { ModelConfig, AgentEvent, RiskLevel, InfuConfig, PhaseId, ProviderConfig, SessionMeta } from "@infu/shared";
+import type { ModelConfig, AgentEvent, RiskLevel, InfuConfig, PhaseId, ProviderConfig, SessionMeta, AttachmentMeta } from "@infu/shared";
 import { loadConfig, saveConfig, resolveFallbackModels, resolveRoleModel, resolveRoleThinking, toRuntimeModel, resolveBaseURL, CONFIG_PATH } from "./providers/registry.js";
-import { parseInfuConfig, approvalPolicySchema, sandboxConfigSchema, generalConfigSchema, appearanceConfigSchema } from "@infu/shared";
+import { autoNameSession } from "./session-naming.js";
+import { parseInfuConfig, approvalPolicySchema, sandboxConfigSchema, generalConfigSchema, appearanceConfigSchema, browserConfigSchema, memoryConfigSchema } from "@infu/shared";
 import { TOOLS } from "./tools/index.js";
+import { isPathInside } from "./tools/util.js";
 import { DEFAULT_SYSTEM_PROMPT } from "./agent/loop.js";
 import { runOrchestratedTask, type OrchestratedRunOptions } from "./agent/orchestrator.js";
 import { inferResumePhase } from "./agent/resume.js";
 import { loadMcpTools } from "./mcp/index.js";
 import { loadPlugins } from "./plugin/index.js";
+import { listBuiltinPlugins, isBuiltinPlugin } from "./plugin/marketplace.js";
 import { registerPlugin } from "./plugin/register.js";
 import { listSkills, buildSkillsPrompt } from "./plugin/skills.js";
+import { listTopics as _listTopics, readMemory as _readMemory, globalMemoryDir as _globalMemoryDir, projectMemoryDir as _projectMemoryDir } from "./memory/store.js";
+import { findInstructionFile as _findInstructionFile } from "./memory/infu.js";
 import { buildInfuPrompt, buildMemoryPrompt, findInstructionFile, parseScopeRules, sedimentTask } from "./memory/index.js";
 import { listProjects, createProject, removeProject, resolveProjectByName } from "./projects.js";
 import { listAgents, buildAgentsPrompt, writeAgentFile, deleteAgentFile } from "./agent/agents.js";
+import { abortBackgroundAgentsByDepth } from "./agent/subagent.js";
+import { abortJobsByDepth } from "./tools/jobs.js";
+import { closeShellSession } from "./tools/persistent-shell.js";
 import { TASK_TEMPLATES } from "./templates.js";
 import { getStore } from "./db/store.js";
 import { rebuildMessages } from "./db/rebuild.js";
@@ -82,6 +93,7 @@ const LOG_FILE = join(LOG_DIR, "agent.log");
 function ensureLogDir() {
   try { mkdirSync(LOG_DIR, { recursive: true }); } catch { /* 忽略 */ }
 }
+
 function logEvent(e: AgentEvent) {
   const brief =
     e.type === "text"
@@ -106,6 +118,10 @@ export interface ServerOptions {
   host?: string;
   /** 默认项目根目录（无 root 时使用） */
   defaultRoot?: string;
+  /** 静态托管目录（桌面端传 web dist：同端口托管 → 前端相对路径 fetch 零改动；缺省不托管，Web/CLI 模式不变） */
+  staticDir?: string;
+  /** 监听成功回调（桌面端拿实际端口加载主窗口；端口冲突自动递增后回调真实端口） */
+  onListening?: (port: number) => void;
 }
 
 /**
@@ -186,9 +202,50 @@ function maskSecret(s: string): string {
 
 export function createApp(opts: ServerOptions = {}) {
   const app = new Hono();
+  // v3.1 审计修复：本地令牌鉴权——托管前端（staticDir 存在）时启用：随机 token 注入
+  // index.html（window.__INFU_TOKEN__），前端 apiFetch 统一带 X-InFu-Token header；
+  // 无 staticDir（纯 API / vite dev）不启用（CORS + Host 白名单已构成 CSRF 防线）。
+  // 本机网页可读 token（同源页面自身），但任意来源网页无法预知随机 token → 无法
+  // 以浏览器会话为跳板操纵 Agent（防「浏览器打开恶意页面 → fetch 本机 API」）。
+  const localToken = opts.staticDir ? randomUUID().replace(/-/g, "") : null;
+  // v3.0 桌面端：dev 模式前端（vite 5199）与后端（agent 端口）跨域 → 放开 CORS。
+  // 安全边界（v3.0 审计修复）：仅放行本机来源（localhost/127.0.0.1/[::1] 任意端口），
+  // 其余 Origin 一律 403——防止任意网页 fetch 本机 API 操纵 Agent（CSRF/远程执行）。
+  const ALLOWED_ORIGIN = /^https?:\/\/(localhost|127\.0\.0\.1|\[::1\])(:\d+)?$/;
+  const ALLOWED_HOST = /^(localhost|127\.0\.0\.1|\[::1\])(:\d+)?$/;
+  app.use("*", async (c, next) => {
+    const origin = c.req.header("origin");
+    if (origin) {
+      if (!ALLOWED_ORIGIN.test(origin)) {
+        return c.json({ ok: false, message: "跨域来源不被允许" }, 403);
+      }
+      c.header("Access-Control-Allow-Origin", origin);
+    }
+    if (c.req.method === "OPTIONS") {
+      c.header("Access-Control-Allow-Methods", "GET,POST,PUT,PATCH,DELETE,OPTIONS");
+      c.header("Access-Control-Allow-Headers", "Content-Type");
+      return c.body(null, 204);
+    }
+    // Host 校验：防 DNS rebinding（本机服务只接受本机主机名）
+    const host = c.req.header("host") ?? "";
+    if (host && !ALLOWED_HOST.test(host)) {
+      return c.json({ ok: false, message: "非法 Host" }, 403);
+    }
+    await next();
+  });
+  if (localToken) {
+    app.use("/api/*", async (c, next) => {
+      if (c.req.header("x-infu-token") !== localToken) {
+        return c.json({ ok: false, message: "未授权：缺少本地令牌" }, 401);
+      }
+      await next();
+    });
+  }
   const pendingApprovals = new Map<string, (approved: boolean) => void>();
   // 计划确认挂起队列（M4 计划卡片：POST /api/plan/:id 决策）
   const pendingPlans = new Map<string, (d: { plan?: string; feedback?: string; cancelled?: boolean }) => void>();
+/** v2.6 收尾：Agent 执行中提问（ask_user 工具）挂起队列——emit ask-user 事件 → 等 POST /api/ask/:id 回答 */
+const pendingQuestions = new Map<string, (answer: string | null) => void>();
 
   // ── v2 供应商凭据（模型管理重构：一份 key 挂多个模型）──
 
@@ -459,7 +516,7 @@ export function createApp(opts: ServerOptions = {}) {
     if (!body || typeof body !== "object") {
       return c.json({ ok: false, message: "请求体必须为 JSON 对象" }, 400);
     }
-    const ALLOWED = ["approvalPolicy", "sandbox", "general", "appearance", "defaultModelId"] as const;
+    const ALLOWED = ["approvalPolicy", "sandbox", "general", "appearance", "browser", "memory", "defaultModelId"] as const;
     const bad = Object.keys(body).filter((k) => !(ALLOWED as readonly string[]).includes(k));
     if (bad.length) {
       return c.json({ ok: false, message: `不允许写入的配置节: ${bad.join(", ")}` }, 400);
@@ -471,6 +528,8 @@ export function createApp(opts: ServerOptions = {}) {
         key === "approvalPolicy" ? approvalPolicySchema
         : key === "sandbox" ? sandboxConfigSchema
         : key === "general" ? generalConfigSchema
+        : key === "browser" ? browserConfigSchema
+        : key === "memory" ? memoryConfigSchema
         : appearanceConfigSchema;
       // strip 模式：拒绝未知字段落盘（防通过设置接口混入敏感字段）
       const r = schema.strip().safeParse(body[key]);
@@ -493,7 +552,321 @@ export function createApp(opts: ServerOptions = {}) {
       return c.json({ ok: false, message: `配置校验失败: ${validated.error}` }, 400);
     }
     saveConfig(validated.config);
+    // v3.0 批 12：autoLaunch 变化 → 通知桌面主进程（app.setLoginItemSettings；Web 版无桥忽略）
+    if (typeof clean.general?.autoLaunch === "boolean") {
+      const setAuto = (globalThis as Record<string, unknown>).__infuSetAutoLaunch as
+        | ((on: boolean) => void)
+        | undefined;
+      try { setAuto?.(clean.general.autoLaunch); } catch { /* 忽略 */ }
+    }
     return c.json({ ok: true });
+  });
+
+  // ── v2.10 批 7 附件文本提取（docx 零依赖：zip 条目 + XML 去标签）──
+
+  /** 极简 zip 读取（docx 文本提取用）：返回指定条目解压后的内容 */
+  function readZipEntry(buf: Buffer, target: string): Buffer | null {
+    try {
+      const eocd = buf.lastIndexOf(Buffer.from([0x50, 0x4b, 0x05, 0x06]));
+      if (eocd < 0) return null;
+      const cdOffset = buf.readUInt32LE(eocd + 16);
+      const cdCount = buf.readUInt16LE(eocd + 10);
+      let p = cdOffset;
+      for (let i = 0; i < cdCount; i++) {
+        if (buf.readUInt32LE(p) !== 0x02014b50) break;
+        const nameLen = buf.readUInt16LE(p + 28);
+        const extraLen = buf.readUInt16LE(p + 30);
+        const commentLen = buf.readUInt16LE(p + 32);
+        const localOffset = buf.readUInt32LE(p + 42);
+        const compMethod = buf.readUInt16LE(p + 10);
+        const compSize = buf.readUInt32LE(p + 20);
+        const name = buf.subarray(p + 46, p + 46 + nameLen).toString("utf-8");
+        if (name === target) {
+          const lNameLen = buf.readUInt16LE(localOffset + 26);
+          const lExtraLen = buf.readUInt16LE(localOffset + 28);
+          const data = buf.subarray(localOffset + 30 + lNameLen + lExtraLen, localOffset + 30 + lNameLen + lExtraLen + compSize);
+          if (compMethod === 0) return data;
+          if (compMethod === 8) return inflateRawSync(data);
+          return null;
+        }
+        p += 46 + nameLen + extraLen + commentLen;
+      }
+      return null;
+    } catch {
+      return null;
+    }
+  }
+
+  /** docx → 纯文本（zip 读 word/document.xml，段落转行、去 XML 标签） */
+  function extractDocxText(buf: Buffer): string | null {
+    try {
+      const xml = readZipEntry(buf, "word/document.xml");
+      if (!xml) return null;
+      const s = xml.toString("utf-8");
+      const text = s
+        .replace(/<w:tab[^>]*\/>/g, "\t")
+        .replace(/<\/w:p>/g, "\n")
+        .replace(/<[^>]+>/g, "")
+        .replace(/\s+/g, " ")
+        .trim();
+      return text && text.length > 20 ? text.slice(0, 200000) : null;
+    } catch {
+      return null;
+    }
+  }
+
+  // ── v2.9 代码界面（项目代码浏览器：文件树 + 内容预览）──
+
+  /** 文件树：git 仓库 = 已跟踪 + 未跟踪 + 改动统计；非 git = 递归扫描（跳过大目录） */
+  app.get("/api/fs/tree", async (c) => {
+    const root = String(c.req.query("root") ?? "");
+    if (!root || !fs.existsSync(root) || !fs.statSync(root).isDirectory()) {
+      return c.json({ ok: false, message: "root 无效" }, 400);
+    }
+    type F = { path: string; added: number; removed: number; untracked: boolean };
+    const files: F[] = [];
+    if (await isGitRepo(root)) {
+      const tracked = await gitQuiet(root, ["ls-files"]);
+      const stats = new Map<string, { added: number; removed: number }>();
+      const numstat = await gitQuiet(root, ["diff", "--numstat", "HEAD"]);
+      for (const line of numstat.split("\n")) {
+        const m = /^(\d+|-)\t(\d+|-)\t(.+)$/.exec(line.trim());
+        if (m && m[3] !== "-") stats.set(m[3], { added: m[1] === "-" ? 0 : +m[1], removed: m[2] === "-" ? 0 : +m[2] });
+      }
+      for (const p of tracked.split("\n").map((s) => s.trim()).filter(Boolean)) {
+        const s = stats.get(p);
+        files.push({ path: p, added: s?.added ?? 0, removed: s?.removed ?? 0, untracked: false });
+      }
+      const untracked = await gitQuiet(root, ["ls-files", "--others", "--exclude-standard"]);
+      for (const p of untracked.split("\n").map((s) => s.trim()).filter(Boolean)) {
+        files.push({ path: p, added: 0, removed: 0, untracked: true });
+      }
+    } else {
+      // 非 git 仓库：递归扫描（跳过常见大目录/生成物）
+      const SKIP = new Set(["node_modules", ".git", ".infu", "dist", "build", ".next", "coverage", "target"]);
+      const walk = (dir: string, rel: string) => {
+        let entries: fs.Dirent[] = [];
+        try {
+          entries = fs.readdirSync(dir, { withFileTypes: true });
+        } catch { return; }
+        for (const e of entries) {
+          if (e.isDirectory()) {
+            if (!SKIP.has(e.name)) walk(join(dir, e.name), rel ? `${rel}/${e.name}` : e.name);
+          } else if (e.isFile()) {
+            files.push({ path: rel ? `${rel}/${e.name}` : e.name, added: 0, removed: 0, untracked: false });
+          }
+        }
+      };
+      walk(root, "");
+    }
+    files.sort((a, b) => a.path.localeCompare(b.path));
+    return c.json({ ok: true, files });
+  });
+
+  /** 文件内容（文本；超大/二进制提示；限 300KB 预览） */
+  app.get("/api/fs/file", async (c) => {
+    const root = String(c.req.query("root") ?? "");
+    const rel = String(c.req.query("path") ?? "");
+    const abs = path.resolve(root, rel);
+    if (!root || !fs.existsSync(root) || !isPathInside(root, abs)) {
+      return c.json({ ok: false, message: "路径越界" }, 400);
+    }
+    try {
+      if (!fs.statSync(abs).isFile()) return c.json({ ok: false, message: "不是文件" }, 400);
+      const size = fs.statSync(abs).size;
+      const buf = fs.readFileSync(abs);
+      if (buf.includes(0)) return c.json({ ok: true, content: "", binary: true, size });
+      const MAX = 300 * 1024;
+      const truncated = size > MAX;
+      const content = buf.subarray(0, MAX).toString("utf-8");
+      return c.json({ ok: true, content, binary: false, size, truncated });
+    } catch {
+      return c.json({ ok: false, message: "读取失败" }, 400);
+    }
+  });
+
+  // ── v2.9 审查（审查式：文件列表 +N/-M → 点击查看行级 diff 着色）──
+
+  /** git 命令静默执行（失败返回空；审查只读） */
+  async function gitQuiet(root: string, args: string[]): Promise<string> {
+    try {
+      return await git(root, args);
+    } catch {
+      return "";
+    }
+  }
+
+  // 审查文件列表：git diff --numstat（改动文件 + 增删行数）+ 未跟踪新文件（全新增）
+  app.get("/api/review/files", async (c) => {
+    const root = String(c.req.query("root") ?? "");
+    if (!root || !fs.existsSync(root) || !fs.statSync(root).isDirectory()) {
+      return c.json({ ok: false, message: "root 无效" }, 400);
+    }
+    if (!(await isGitRepo(root))) return c.json({ ok: true, files: [] }); // 非 git 仓库无审查
+    const files: Array<{ path: string; added: number; removed: number }> = [];
+    const numstat = await gitQuiet(root, ["diff", "--numstat", "HEAD"]);
+    for (const line of numstat.split("\n")) {
+      const m = /^(\d+|-)\t(\d+|-)\t(.+)$/.exec(line.trim());
+      if (m && m[3] !== "-") {
+        files.push({ path: m[3], added: m[1] === "-" ? 0 : +m[1], removed: m[2] === "-" ? 0 : +m[2] });
+      }
+    }
+    // 未跟踪文件（新文件 → 全新增行）
+    const untracked = await gitQuiet(root, ["ls-files", "--others", "--exclude-standard"]);
+    for (const p of untracked.split("\n").map((s) => s.trim()).filter(Boolean)) {
+      const abs = path.resolve(root, p);
+      if (!isPathInside(root, abs)) continue;
+      let added = 0;
+      try {
+        if (fs.statSync(abs).isFile()) added = fs.readFileSync(abs, "utf-8").split("\n").length - 1;
+      } catch { /* 忽略读取失败 */ }
+      if (added < 0) added = 0;
+      files.push({ path: p, added, removed: 0 });
+    }
+    return c.json({ ok: true, files });
+  });
+
+  // 单文件 diff（unified 文本；前端行级着色）；未跟踪文件 = 全新增行
+  app.get("/api/review/file", async (c) => {
+    const root = String(c.req.query("root") ?? "");
+    const rel = String(c.req.query("path") ?? "");
+    const abs = path.resolve(root, rel);
+    if (!root || !fs.existsSync(root) || !isPathInside(root, abs)) {
+      return c.json({ ok: false, message: "路径越界" }, 400);
+    }
+    // 未跟踪（新文件）
+    const tracked = await gitQuiet(root, ["ls-files", "--error-unmatch", "--", rel]);
+    let diff = "";
+    if (!tracked) {
+      try {
+        const content = fs.readFileSync(abs, "utf-8");
+        diff = content.split("\n").map((l) => `+${l}`).join("\n");
+      } catch { /* 空 diff */ }
+    } else {
+      diff = await gitQuiet(root, ["diff", "HEAD", "--", rel]);
+    }
+    return c.json({ ok: true, diff });
+  });
+
+  // ── v2.7 浏览器状态（browser-use 插件：chromium 探测 + 插件状态）──
+  app.get("/api/browser/status", async (c) => {
+    const { resolveChromiumPath } = await import("./plugin/browser/runtime.js");
+    const { isBuiltinPlugin } = await import("./plugin/marketplace.js");
+    const cfg = readConfigRaw();
+    const chromiumPath = resolveChromiumPath();
+    // browser-use 是否被禁用（config.plugins[] 里 enabled:false 标记）
+    const disabled = (cfg.plugins ?? []).some((p) => p.id === "browser-use" && p.enabled === false);
+    return c.json({
+      available: !!chromiumPath,
+      chromiumPath,
+      headless: cfg.browser?.headless !== false,
+      executablePath: cfg.browser?.executablePath ?? "",
+      pluginEnabled: isBuiltinPlugin("browser-use") && !disabled,
+    });
+  });
+
+  // 清除浏览器数据（cache=保留 Cookie 与站点数据；all=全部清除，不可撤销）
+  app.post("/api/browser/clear", async (c) => {
+    const body = await c.req.json().catch(() => ({}));
+    const scope = body.scope === "all" ? "all" : "cache";
+    const { clearBrowserData } = await import("./plugin/browser/runtime.js");
+    const msg = await clearBrowserData(scope);
+    return c.json({ ok: true, scope, message: msg });
+  });
+
+  // ── v3.0 computer-use：截图目录列表 + 文件（ComputerUsePane 实时扫描）──
+  app.get("/api/screenshots", (c) => {
+    const root = String(c.req.query("root") ?? "");
+    const dir = join(root, ".infu", "screenshots");
+    if (!root || !existsSync(dir)) return c.json([]);
+    try {
+      return c.json(readdirSync(dir).filter((f) => f.endsWith(".png")).sort().reverse());
+    } catch {
+      return c.json([]);
+    }
+  });
+  app.get("/api/screenshots/file", (c) => {
+    const root = String(c.req.query("root") ?? "");
+    const name = String(c.req.query("name") ?? "");
+    const dir = join(root, ".infu", "screenshots");
+    const file = join(dir, name);
+    if (!root || !name || !isPathInside(dir, file) || !existsSync(file)) return c.notFound();
+    try {
+      return c.body(readFileSync(file), 200, { "content-type": "image/png" });
+    } catch {
+      return c.notFound();
+    }
+  });
+
+  // ── v3.0 批 11 定时任务 CRUD（Web UI；无人值守审批语义见 schedule.ts 注释）──
+  app.get("/api/schedules", (c) => {
+    const { listSchedules } = _require("./schedule.js");
+    return c.json(listSchedules());
+  });
+  app.post("/api/schedules", async (c) => {
+    const { addSchedule } = _require("./schedule.js");
+    const body = await c.req.json().catch(() => ({}));
+    const cron = String(body.cron ?? "");
+    const prompt = String(body.prompt ?? "");
+    const root = String(body.root ?? opts.defaultRoot ?? process.cwd());
+    if (!cron.trim() || !prompt.trim()) return c.json({ ok: false, message: "cron 与任务描述必填" });
+    const r = addSchedule(cron.trim(), prompt.trim(), root);
+    return c.json(r);
+  });
+  app.patch("/api/schedules/:id", async (c) => {
+    const { setScheduleEnabled } = _require("./schedule.js");
+    const body = await c.req.json().catch(() => ({}));
+    if (typeof body.enabled !== "boolean") return c.json({ ok: false, message: "enabled 必填" });
+    return c.json(setScheduleEnabled(c.req.param("id"), body.enabled));
+  });
+  app.delete("/api/schedules/:id", (c) => {
+    const { removeSchedule } = _require("./schedule.js");
+    return c.json(removeSchedule(c.req.param("id")));
+  });
+
+  // ── v2.7 记忆查看（四层记忆：指令 INFU.md / 全局 / 项目 / 历史）──
+  app.get("/api/memory", (c) => {
+    const root = opts.defaultRoot || process.cwd();
+    const global = _listTopics("global", root);
+    const project = _listTopics("project", root);
+    const instr = _findInstructionFile(root);
+    return c.json({
+      globalDir: _globalMemoryDir(),
+      projectDir: _projectMemoryDir(root),
+      global: global.map((t) => ({ ...t, content: _readMemory("global", t.name, root).text })),
+      project: project.map((t) => ({ ...t, content: _readMemory("project", t.name, root).text })),
+      instruction: instr ? { path: instr.path, content: instr.content.slice(0, 4000) } : null,
+    });
+  });
+
+  // ── v2.7 使用统计（会话事件流聚合；days 默认 30）──
+  app.get("/api/stats", (c) => {
+    const days = Math.min(Math.max(parseInt(String(c.req.query("days") ?? "30"), 10) || 30, 7), 365);
+    const store = getStore();
+    try {
+      return c.json(store.getStats(days));
+    } catch (e) {
+      return c.json({ ok: false, message: (e as Error).message }, 500);
+    }
+  });
+
+  // ── v2.7 索引库（文件索引状态 + 重建）──
+  app.get("/api/index/status", async (c) => {
+    const { indexStatus } = await import("./index/index.js");
+    // v2.14 批 18：root 参数（前端传当前项目；缺省回退启动目录）——修复面板与实际项目错位
+    const root = String(c.req.query("root") ?? "") || opts.defaultRoot || process.cwd();
+    return c.json(indexStatus(root));
+  });
+  app.post("/api/index/rebuild", async (c) => {
+    const { buildIndex } = await import("./index/index.js");
+    const body = await c.req.json().catch(() => ({}));
+    const root = String(body.root ?? "") || opts.defaultRoot || process.cwd();
+    try {
+      const idx = buildIndex(root);
+      return c.json({ ok: true, fileCount: idx.files.length, builtAt: idx.builtAt });
+    } catch (e) {
+      return c.json({ ok: false, message: (e as Error).message }, 500);
+    }
   });
 
   // ── v2.4 批 2 Web 交互式终端（node-pty；高危命令审批 + 全量审计）──
@@ -501,9 +874,18 @@ export function createApp(opts: ServerOptions = {}) {
   // 创建终端会话（cwd = 项目根；shell 可选 cmd/powershell/bash）
   app.post("/api/terminal", async (c) => {
     const body = await c.req.json().catch(() => ({}));
+    // v3.0 批 12：显式 shell > config.general.terminalShell > auto
+    // auto = 优先 Git Bash（探测存在即用），找不到回退 cmd.exe（同语义）
+    let shell = typeof body.shell === "string" && body.shell ? body.shell : undefined;
+    if (!shell) shell = loadConfig()?.general?.terminalShell;
+    if (!shell || shell === "auto") {
+      const { resolveShell } = await import("./terminal/session.js");
+      const bash = resolveShell("bash");
+      shell = bash !== "bash" ? "bash" : undefined; // resolveShell("bash") 找不到时返回 "bash"（PATH 兜底）
+    }
     const session = createTerminalSession(
       typeof body.cwd === "string" ? body.cwd : undefined,
-      typeof body.shell === "string" ? body.shell : undefined
+      shell
     );
     return c.json({ ok: true, id: session.id, cwd: session.cwd, shell: session.shell, pid: session.pid });
   });
@@ -607,8 +989,22 @@ export function createApp(opts: ServerOptions = {}) {
       // v2.2 动态步数：模板任务 id（启发式参考）
       const templateId: string | undefined =
         typeof body.templateId === "string" && body.templateId ? body.templateId : undefined;
-      // 计划默认需用户确认（-y / 设置档位可自动）
-      const planApproval: boolean = body.planApproval !== false;
+      // v2.6 主流式流程：默认单一循环直接执行；orchestrate=true 显式启用分层编排
+      // （计划确认默认只在编排模式开启；body.planApproval=false 可强制关闭）
+      const orchestrate: boolean = body.orchestrate === true;
+      const planApproval: boolean = orchestrate ? body.planApproval !== false : false;
+      // v3.1 附件原始数据（文件内容在 sessionId 确定后写入暂存目录）
+      const rawAttachments: Array<{ name?: string; path?: string; kind?: string; size?: number }> = Array.isArray(body.attachments)
+        ? body.attachments
+        : [];
+      const rawFiles: Array<{ name?: string; rel?: string; data?: string }> = Array.isArray(body.files) ? body.files : [];
+      // v3.0 批 12：桌面版附件「路径引用」——真实绝对路径（不复制内容）；Agent 直接读原文件
+      const rawPaths: string[] = Array.isArray(body.paths)
+        ? body.paths.filter((x: unknown): x is string => typeof x === "string" && x.trim().length > 0)
+        : [];
+      const attachmentImages: string[] = Array.isArray(body.images)
+        ? body.images.filter((x: unknown): x is string => typeof x === "string" && x.startsWith("data:image/"))
+        : [];
 
       // 停止支持：客户端断开连接时中止 Agent 循环
       const controller = new AbortController();
@@ -618,6 +1014,11 @@ export function createApp(opts: ServerOptions = {}) {
         // 中断/停止（用户停止/连接断流）：会话标记 stopped（正常收尾由 finally 处理，不覆盖）
         if (sessionId && store.getSession(sessionId)?.status === "running") {
           store.updateStatus(sessionId, "stopped");
+          // v2.13：停止反馈落库（重放/刷新后仍能看到「已手动停止」——原来只在前端内存，
+          // 收尾重放整体替换缓存时被抹掉）
+          try {
+            store.appendEvent(sessionId, { type: "error", message: "任务已手动停止" });
+          } catch { /* 落库失败忽略 */ }
         }
       });
 
@@ -630,14 +1031,22 @@ export function createApp(opts: ServerOptions = {}) {
       const store = getStore();
       let sessionId: string | undefined =
         typeof body.sessionId === "string" && body.sessionId ? body.sessionId : undefined;
+      // v2.9 修复：root = 会话归属目录（落库/项目匹配/记忆）；execRoot = 执行目录
+      //（worktree 模式 = 临时工作树路径；Agent 实际操作边界）。此前 worktree 路径被落库为
+      // 会话 root → 项目归属匹配失败 → 新建会话全部落入自由会话区。
       let root: string = body.root || opts.defaultRoot || process.cwd();
+      // v3.0 UI 审查：落库 root 只用显式值（body.root，续跑沿用历史值）——
+      // 隐式回退（defaultRoot/cwd）仅用于本次执行，不写回会话。前端 root 保持为空 →
+      // 自由会话的「代码/审查」按钮禁用，不再显示无关目录的所有文件
+      let persistRoot: string | undefined = body.root;
+      const execRoot: string = body.execRoot || root;
       // v2.6.2 修复：root 必须为已存在目录——不存在/为空直接报错，避免 Agent 在错误目录静默空转
-      if (!root.trim()) {
+      if (!execRoot.trim()) {
         await stream.writeSSE({ event: "error", data: JSON.stringify({ message: "请先在侧栏选择/创建项目（root 为空）" }) });
         return;
       }
-      if (!fs.existsSync(root) || !fs.statSync(root).isDirectory()) {
-        await stream.writeSSE({ event: "error", data: JSON.stringify({ message: `项目根目录不存在：${root}——请先在侧栏选择/创建项目` }) });
+      if (!fs.existsSync(execRoot) || !fs.statSync(execRoot).isDirectory()) {
+        await stream.writeSSE({ event: "error", data: JSON.stringify({ message: `项目根目录不存在：${execRoot}——请先在侧栏选择/创建项目` }) });
         return;
       }
       let effectivePrompt = prompt;
@@ -652,21 +1061,118 @@ export function createApp(opts: ServerOptions = {}) {
           await stream.writeSSE({ event: "error", data: JSON.stringify({ message: `会话不存在: ${sessionId}` }) });
           return;
         }
-        if (!body.root && s.root) root = s.root;
+        // v3.1 多会话并行：仅禁止同一会话并发双流（不同会话可同时跑任务）；
+        // 残留 running（服务重启）由启动时的 status 清理兜底
+        if (s.status === "running") {
+          await stream.writeSSE({
+            event: "error",
+            data: JSON.stringify({
+              message: `该会话的任务仍在运行中——请先停止它（或等任务结束后）再发送；如需并行任务请切换到其他会话`,
+            }),
+          });
+          return;
+        }
+        // v2.13：双发 TOCTOU 修复——检查通过后**立即**置 running（检查与置位之间隔着
+        // loadMcpTools 等 await，两个并发请求会同时通过检查；同步置位后第二个请求
+        // 看到 running 被拒）
+        store.updateStatus(sessionId, "running");
+        if (!body.root && s.root) {
+          root = s.root;
+          persistRoot = s.root;
+        }
         initialMessages = rebuildMessages(store.getEvents(sessionId));
         resumePoint = inferResumePhase(store.getEvents(sessionId));
       } else {
         // 新会话：SSE 首帧回传会话 id（Web 绑定 activeSessionId）
         const title = prompt.slice(0, 40);
-        sessionId = store.createSession({ title, root, modelId, mode: "orchestrate" });
+        sessionId = store.createSession({ title, root: persistRoot ?? "", modelId });
         await stream.writeSSE({ event: "session", data: JSON.stringify({ type: "session", id: sessionId }) });
       }
       // 用户消息落库（检查点之一：Rewind 锚点）
       store.appendEvent(sessionId, { type: "user-message", text: prompt });
 
+      // ── v3.1 附件处理（sessionId 已定）：文件内容写入暂存目录 ~/.infu/attachments/<sid>/ ──
+      // 浏览器 Web 安全限制拿不到文件绝对路径 → 内容上传，服务端暂存后给 Agent 绝对路径引用；
+      // 图片 dataURL 直接走视觉（不落库字节）。暂存目录任务结束时统一清理。
+      const attachmentItems: AttachmentMeta[] = [];
+      const attachDir = join(homedir(), ".infu", "attachments", sessionId);
+      try {
+        if (rawFiles.length) {
+          fs.mkdirSync(attachDir, { recursive: true });
+          for (const f of rawFiles) {
+            const name = String(f.name ?? "file").replace(/[\\/:*?"<>|]/g, "_").slice(0, 120);
+            const rel = String(f.rel ?? name).replace(/[\\/]+/g, "/");
+            // 防目录穿越：只保留文件名
+            const safeRel = rel.split("/").pop() ?? name;
+            const target = join(attachDir, safeRel);
+            if (f.data) fs.writeFileSync(target, Buffer.from(f.data, "base64"));
+            // v2.10 批 7：docx 附件自动提取文本（零依赖 zip 解析）→ Agent 直接 read_file 即可，
+            // 不必跑 python-docx 命令（避免无谓的命令审批弹窗）；原文件保留可查
+            let readablePath = target;
+            if (/\.docx$/i.test(name) && f.data) {
+              try {
+                const text = extractDocxText(Buffer.from(f.data, "base64"));
+                if (text) {
+                  const txtPath = join(attachDir, `${safeRel}.txt`);
+                  fs.writeFileSync(txtPath, text, "utf-8");
+                  readablePath = txtPath;
+                }
+              } catch { /* 提取失败用原文件 */ }
+            }
+            attachmentItems.push({ name, path: readablePath, kind: "file", size: f.data ? Math.round((f.data.length * 3) / 4) : undefined });
+          }
+        }
+        for (const a of rawAttachments) {
+          const kind = a.kind === "dir" ? "dir" : "file";
+          const name = String(a.name ?? "附件");
+          if (kind === "dir") {
+            // 文件夹：引用暂存目录下该文件夹（files 的 rel 若带目录结构，已含层级）
+            attachmentItems.push({ name, path: join(attachDir, name), kind: "dir" });
+          }
+        }
+      } catch (e) {
+        await stream.writeSSE({ event: "error", data: JSON.stringify({ message: `附件暂存失败：${(e as Error).message}` }) });
+        return;
+      }
+      // v3.0 批 12：桌面版路径引用——校验存在后直接引用原路径（不复制）
+      for (const p of rawPaths) {
+        try {
+          const st = statSync(p);
+          if (st.isDirectory()) {
+            attachmentItems.push({ name: p.split(/[\/]/).filter(Boolean).pop() ?? p, path: p, kind: "dir" });
+          } else if (st.isFile()) {
+            attachmentItems.push({ name: p.split(/[\/]/).filter(Boolean).pop() ?? p, path: p, kind: "file", size: st.size });
+          }
+        } catch { /* 路径不存在/不可读：跳过 */ }
+      }
+      // 图片（视觉；不落库字节）
+      for (const img of attachmentImages) {
+        const name = `图片 ${attachmentImages.indexOf(img) + 1}`;
+        attachmentItems.push({ name, kind: "image" });
+      }
+      // 只读白名单：暂存目录（上传）或原路径集合（桌面路径引用）；Agent 可读不可写
+      const extraReadDirs = attachmentItems.some((a) => a.kind !== "image")
+        ? [...new Set([attachDir, ...rawPaths.map((p) => (p.endsWith("/") || p.endsWith("\\") ? p : dirname(p)))])]
+        : [];
+      // 附件引用文本（注入所有阶段 prompt；图片在 Executor 阶段走视觉）
+      const attachmentText = attachmentItems.length
+        ? `📎 用户附加了以下附件，需要时请用 read_file 读取（绝对路径）：\n` +
+          attachmentItems
+            .map((a) => `- ${a.name}${a.path ? `（${a.path}）` : "（图片，已发送给你查看）"}${a.kind === "dir" ? "——文件夹，可读取其中的文件" : ""}`)
+            .join("\n")
+        : "";
+      // 附件事件落库（重放展示；图片字节不落库）
+      if (attachmentItems.length) {
+        store.appendEvent(sessionId, { type: "attachments", items: attachmentItems });
+      }
+
       // 项目根目录校验：路径不存在/不是目录时直接报明确错误（避免 AI 根据工具报错瞎猜路径）
       if (!existsSync(root) || !statSync(root).isDirectory()) {
         store.updateStatus(sessionId, "error");
+        // v2.13：早退路径同样清理附件暂存（防 base64 内容残留）
+        try {
+          if (rawFiles.length) fs.rmSync(attachDir, { recursive: true, force: true });
+        } catch { /* 清理失败忽略 */ }
         await stream.writeSSE({
           event: "error",
           data: JSON.stringify({ message: `项目根目录不存在或不是目录: ${root}（请检查输入框里的路径是否正确，使用绝对路径）` }),
@@ -678,13 +1184,29 @@ export function createApp(opts: ServerOptions = {}) {
       const models = config?.models ?? [];
       if (!models.length) {
         store.updateStatus(sessionId, "error");
+        try {
+          if (rawFiles.length) fs.rmSync(attachDir, { recursive: true, force: true });
+        } catch { /* 清理失败忽略 */ }
         await stream.writeSSE({ event: "error", data: JSON.stringify({ message: "未配置模型，请先配置 ~/.infu/config.json" }) });
         return;
       }
-      const modelCfg =
-        (modelId ? models.find((m) => m.id === modelId && m.apiKey) ?? models.find((m) => m.id === modelId) : undefined) ||
-        models.find((m) => m.apiKey) ||
-        models[0];
+      // v3.0 批 12 修复：v2 供应商凭据迁移后 `m.apiKey` 恒为 undefined（key 在 provider 层）
+      // → 旧逻辑永远落 models[0]，无视 defaultModelId（Web 端「默认模型」死配置）。
+      // 修正：显式 modelId → defaultModelId → 第一个有凭据的模型（providerId 查 providers[]）→ models[0]
+      const modelCfg = (() => {
+        const pick = (id?: string) => models.find((m) => m.id === id);
+        const withKey = (m?: ModelConfig) => {
+          if (!m) return undefined;
+          const p = m.providerId ? config?.providers?.find((x) => x.id === m.providerId) : undefined;
+          return (p?.apiKey ?? m.apiKey) ? m : undefined;
+        };
+        const explicit = modelId ? pick(modelId) : undefined;
+        if (explicit) return explicit;
+        const def = pick(config?.defaultModelId);
+        if (withKey(def)) return def as ModelConfig;
+        if (def) return def;
+        return withKey(models[0]) ?? models[0] ?? (models as ModelConfig[])[0];
+      })();
       // v2.2 降级链：显式指定优先，否则用模型自身 fallbackModelIds（去重/跳过自身/未知 id）
       const fallbackModels = resolveFallbackModels(config, modelCfg, fallbackModelIds);
       // v2.2 角色路由：各角色独立模型 + 各自降级链（未指定角色 → 默认模型）
@@ -727,6 +1249,27 @@ export function createApp(opts: ServerOptions = {}) {
         });
       };
 
+      // v2.6 收尾：Agent 执行中提问（ask_user 工具）：emit ask-user 事件 → 挂 pending →
+      // 等 POST /api/ask/:id 回答；连接中断（停止）时视为跳过（返回 null）
+      // v2.10：选项结构化（label/desc/recommended）；description/multiSelect 透传事件
+      const askUser = async (
+        question: string,
+        options?: Array<string | { label: string; desc?: string; recommended?: boolean }>
+      ) => {
+        const id = randomUUID();
+        emit({ type: "ask-user", id, question, options: options as Array<string | { label: string; desc?: string; recommended?: boolean }> | undefined });
+        return new Promise<string | null>((resolve) => {
+          pendingQuestions.set(id, resolve);
+          controller.signal.addEventListener(
+            "abort",
+            () => {
+              if (pendingQuestions.delete(id)) resolve(null);
+            },
+            { once: true }
+          );
+        });
+      };
+
       // 计划确认（Web 计划卡片 v2.3）：emit plan 事件 → 挂 pending → 等 POST /api/plan/:id
       // 返回 { plan?, feedback } 或 null（用户取消 = 中止任务）；连接中断（停止）时视为取消
       const confirmPlan = async (planText: string) => {
@@ -752,13 +1295,13 @@ export function createApp(opts: ServerOptions = {}) {
         const mcp = await loadMcpTools(config?.mcpServers, emit);
         const plugin = await loadPlugins(config?.plugins, emit);
         // skill 发现层：可用技能 name+description 追加到 Executor system（progressive disclosure）
-        const skillsPrompt = buildSkillsPrompt(listSkills(config, root));
+        const skillsPrompt = buildSkillsPrompt(listSkills(config, execRoot));
         // v2.5 子智能体发现层：可用 agent 角色 name+description（delegate_task 委派参考）
-        const agentsPrompt = buildAgentsPrompt(listAgents(root));
+        const agentsPrompt = buildAgentsPrompt(listAgents(execRoot));
         // v2.6 记忆系统：项目指令（INFU.md 全量注入所有阶段）+ 记忆引导（Executor）+ 路径作用域
-        const infuPrompt = buildInfuPrompt(root);
+        const infuPrompt = buildInfuPrompt(execRoot);
         const memoryPrompt = buildMemoryPrompt();
-        const scopeRules = parseScopeRules(findInstructionFile(root)?.content ?? "");
+        const scopeRules = parseScopeRules(findInstructionFile(execRoot)?.content ?? "");
         try {
           // 阶段级续跑提示（emit 已就绪；跳过规划阶段直接续执行）
           if (resumePoint.startPhase) {
@@ -772,15 +1315,20 @@ export function createApp(opts: ServerOptions = {}) {
             initialMessages,
             thinkingLevel,
             prompt,
-            root,
+            root: execRoot,
             emit,
             requestApproval,
             abortSignal: controller.signal,
             maxSteps,
+            askUser,
           };
+          // v3.1：任务启动置 running（新会话默认即 running；续跑会话恢复运行态，
+          // 侧栏徽标 + 同会话双发保护）
+          store.updateStatus(sessionId, "running");
           const final = await runOrchestratedTask({
             ...modelRun,
             planApproval,
+            orchestrate,
             confirmPlan,
             templateId,
             // v2.3：MCP 工具 + 插件工具只进 Executor（Planner/Reviewer 架构级只读不暴露）；
@@ -793,14 +1341,34 @@ export function createApp(opts: ServerOptions = {}) {
             infuPrompt,
             memoryPrompt,
             scopeRules,
+            // v3.1 附件：文件/文件夹引用文本（所有阶段）+ 图片视觉（Executor）+ 只读白名单
+            attachmentText,
+            attachmentImages,
+            extraReadDirs,
+            // v2.9：会话 id（per-session 子 Agent 上限计数）
+            sessionId,
             // 阶段级续跑：跳过已完成的规划阶段（计划沿用上次确认的）
             startPhase: resumePoint.startPhase,
             resumePlanText: resumePoint.planText,
           });
           await stream.writeSSE({ event: "done", data: JSON.stringify({ final: final.text }) });
           store.updateStatus(sessionId, "done");
+          // v3 自动命名（fire-and-forget；模型生成简短标题，失败保留原文截断）
+          autoNameSession(store, sessionId, prompt, final.text, modelCfg).catch(() => {});
         } finally {
           if (mcp) await mcp.close();
+          // v3.1：任务结束清理附件暂存目录（会话重放只保留元数据）
+          try {
+            if (rawFiles.length) fs.rmSync(attachDir, { recursive: true, force: true });
+          } catch {
+            /* 清理失败忽略 */
+          }
+          // v2.11：父任务结束 → 中止会话内全部后台子智能体与后台任务（子任务随父结束；
+          // v2.13：depth -1 = 全深度——后台子智能体内部启动的 job 也一并终止）
+          try { abortBackgroundAgentsByDepth(sessionId, -1); } catch { /* 忽略 */ }
+          try { abortJobsByDepth(sessionId, -1); } catch { /* 忽略 */ }
+          // v3.0 审计修复（S3）：任务结束关闭持久 shell 会话（此前永不清理，泄漏带凭据的常驻进程）
+          try { closeShellSession(sessionId); } catch { /* 忽略 */ }
         }
       } catch (e) {
         store.updateStatus(sessionId, "error");
@@ -824,7 +1392,7 @@ export function createApp(opts: ServerOptions = {}) {
       return c.json({ ok: false, message: "该目录不是 Git 仓库，无法创建工作树；将在当前目录直接执行" });
     }
     const name = `infu-task-${Date.now().toString(36)}`;
-    const wtPath = path.join(root, ".infu-worktrees", name);
+    const wtPath = path.join(root, ".infu", "worktrees", name);
     try {
       await git(root, ["worktree", "add", wtPath, "-b", name]);
       return c.json({ ok: true, name, path: wtPath, branch: name });
@@ -838,7 +1406,7 @@ export function createApp(opts: ServerOptions = {}) {
     const name = c.req.param("name");
     const body = await c.req.json().catch(() => ({}));
     const root: string = body.root || opts.defaultRoot || process.cwd();
-    const wtPath = path.join(root, ".infu-worktrees", name);
+    const wtPath = path.join(root, ".infu", "worktrees", name);
     try {
       // 1) 先把 worktree 里的改动提交（Agent 的改动是未提交状态，直接 merge 会丢失）
       try {
@@ -863,7 +1431,7 @@ export function createApp(opts: ServerOptions = {}) {
     const name = c.req.param("name");
     const body = await c.req.json().catch(() => ({}));
     const root: string = body.root || opts.defaultRoot || process.cwd();
-    const wtPath = path.join(root, ".infu-worktrees", name);
+    const wtPath = path.join(root, ".infu", "worktrees", name);
     try {
       await git(root, ["worktree", "remove", "--force", wtPath]);
       await git(root, ["branch", "-D", name]);
@@ -898,6 +1466,21 @@ export function createApp(opts: ServerOptions = {}) {
         plan: typeof body.plan === "string" && body.plan.trim() ? body.plan : undefined,
         feedback: typeof body.feedback === "string" && body.feedback.trim() ? body.feedback.trim() : "批准执行",
       });
+    }
+    return c.json({ ok: true });
+  });
+
+  // v2.6 收尾：Agent 提问回答入口（ask_user 工具；answer 字符串；cancelled=true 视为跳过）
+  app.post("/api/ask/:id", async (c) => {
+    const id = c.req.param("id");
+    const body = await c.req.json().catch(() => ({}));
+    const resolve = pendingQuestions.get(id);
+    if (!resolve) return c.json({ ok: false, message: "提问不存在或已过期" });
+    pendingQuestions.delete(id);
+    if (body.cancelled === true) {
+      resolve(null);
+    } else {
+      resolve(typeof body.answer === "string" ? body.answer : "");
     }
     return c.json({ ok: true });
   });
@@ -971,8 +1554,22 @@ export function createApp(opts: ServerOptions = {}) {
   app.delete("/api/sessions/:id", (c) => {
     const id = c.req.param("id");
     const store = getStore();
-    if (!store.getSession(id)) return c.json({ ok: false, message: "会话不存在" }, 404);
+    const sess = store.getSession(id);
+    if (!sess) return c.json({ ok: false, message: "会话不存在" }, 404);
     store.deleteSession(id);
+    // v3.0 批 12：会话删除 → 清理该会话的 computer use 截图（.infu/screenshots/screen-<sid8>-*.png）
+    // 项目文件夹整体删除时截图随文件夹消失；这里补「只删会话」场景的孤儿截图
+    try {
+      const sid8 = id.replace(/[^a-zA-Z0-9-]/g, "").slice(0, 8);
+      const shotsDir = join(sess.root, ".infu", "screenshots");
+      if (sid8 && existsSync(shotsDir)) {
+        for (const f of readdirSync(shotsDir)) {
+          if (f.startsWith(`screen-${sid8}-`)) {
+            try { fs.rmSync(join(shotsDir, f), { force: true }); } catch { /* 忽略单个失败 */ }
+          }
+        }
+      }
+    } catch { /* 清理失败不影响删除 */ }
     return c.json({ ok: true });
   });
 
@@ -982,7 +1579,8 @@ export function createApp(opts: ServerOptions = {}) {
     const body = await c.req.json().catch(() => ({}));
     const seq = parseInt(String(body.seq ?? ""), 10);
     if (!Number.isInteger(seq) || seq < 0) return c.json({ ok: false, message: "seq 必须是 >= 0 的整数" }, 400);
-    if (!getStore().rewind(id, seq)) return c.json({ ok: false, message: "会话不存在" }, 404);
+    // v2.14 批 10：marker=false = 编辑截断（不落回滚标记，AI 无需感知）；默认 true = 回滚（AI 感知）
+    if (!getStore().rewind(id, seq, { marker: body.marker !== false })) return c.json({ ok: false, message: "会话不存在" }, 404);
     return c.json({ ok: true });
   });
 
@@ -1167,7 +1765,21 @@ export function createApp(opts: ServerOptions = {}) {
   // 插件列表
   app.get("/api/plugins", (c) => {
     const cfg = readConfigRaw();
-    return c.json({ plugins: cfg.plugins ?? [] });
+    // v2.7：内置官方插件（默认启用，可禁用）+ 用户插件合并视图
+    const user = (cfg.plugins ?? []).filter((p) => p.source !== "builtin");
+    const disabledBuiltin = new Set(
+      (cfg.plugins ?? []).filter((p) => p.source === "builtin" && p.enabled === false).map((p) => p.id)
+    );
+    const builtin = listBuiltinPlugins().map((b) => ({
+      id: b.id,
+      name: b.name,
+      path: b.path,
+      version: b.version,
+      source: b.source,
+      builtin: true,
+      enabled: !disabledBuiltin.has(b.id),
+    }));
+    return c.json({ plugins: [...builtin, ...user] });
   });
 
   // 添加插件
@@ -1222,6 +1834,21 @@ export function createApp(opts: ServerOptions = {}) {
     const id = c.req.param("id");
     const body = await c.req.json().catch(() => ({}));
     const cfg = readConfigRaw();
+    if (isBuiltinPlugin(id)) {
+      // 内置插件：只能启用/禁用（写 config 标记），不可改 path
+      if (typeof body.enabled === "boolean") {
+        const rest = (cfg.plugins ?? []).filter((x) => x.id !== id);
+        if (body.enabled === false) {
+          const bp = listBuiltinPlugins().find((b) => b.id === id)!;
+          cfg.plugins = [...rest, { id, path: bp.path, source: "builtin", version: bp.version, enabled: false }];
+        } else {
+          cfg.plugins = rest; // 移除禁用标记 = 恢复默认启用
+        }
+        saveConfig(cfg);
+        return c.json({ ok: true });
+      }
+      return c.json({ ok: false, message: "内置插件只能启用/禁用，不可改 path" }, 400);
+    }
     const p = (cfg.plugins ?? []).find((x) => x.id === id);
     if (!p) return c.json({ ok: false, message: "插件不存在" }, 404);
     if (typeof body.path === "string" && body.path.trim()) p.path = body.path.trim();
@@ -1230,10 +1857,17 @@ export function createApp(opts: ServerOptions = {}) {
     return c.json({ ok: true });
   });
 
-  // 删除插件
+  // 删除插件（内置插件 = 禁用，保留默认启用能力）
   app.delete("/api/plugins/:id", (c) => {
     const id = c.req.param("id");
     const cfg = readConfigRaw();
+    if (isBuiltinPlugin(id)) {
+      const rest = (cfg.plugins ?? []).filter((x) => x.id !== id);
+      const bp = listBuiltinPlugins().find((b) => b.id === id)!;
+      cfg.plugins = [...rest, { id, path: bp.path, source: "builtin", version: bp.version, enabled: false }];
+      saveConfig(cfg);
+      return c.json({ ok: true, disabled: true });
+    }
     if (!(cfg.plugins ?? []).some((x) => x.id === id)) {
       return c.json({ ok: false, message: "插件不存在" }, 404);
     }
@@ -1246,11 +1880,12 @@ export function createApp(opts: ServerOptions = {}) {
   app.post("/api/plugins/:id/probe", async (c) => {
     const id = c.req.param("id");
     const cfg = readConfigRaw();
-    const p = (cfg.plugins ?? []).find((x) => x.id === id);
+    let p = (cfg.plugins ?? []).find((x) => x.id === id);
+    if (!p && isBuiltinPlugin(id)) p = listBuiltinPlugins().find((b) => b.id === id)!;
     if (!p) return c.json({ ok: false, message: "插件不存在" }, 404);
     try {
       const { loadPlugins } = await import("./plugin/index.js");
-      const r = await loadPlugins([p], () => {});
+      const r = await loadPlugins([p], () => {}, { mergeBuiltin: false });
       if (r.failures.length) {
         return c.json({ ok: false, message: `加载失败：${r.failures[0].message.slice(0, 200)}` }, 502);
       }
@@ -1267,9 +1902,15 @@ export function createApp(opts: ServerOptions = {}) {
   // ── v2.3 批 2 skill 管理（SKILL.md 社区标准；列表来自用户级/项目级/显式引用）──
 
   // 可用技能列表（含显式引用与来源层级）
-  app.get("/api/skills", (c) => {
+  app.get("/api/skills", async (c) => {
     const cfg = readConfigRaw();
     const root = opts.defaultRoot || process.cwd();
+    // v3.0 批 12：确保内置插件技能已注册（新用户未跑过任务时 pluginSkillDirs 为空
+    // → 设置界面看不到自带技能；这里先加载内置插件再列技能）
+    try {
+      const { loadPlugins } = _require("./plugin/index.js");
+      await loadPlugins(cfg?.plugins ?? [], () => {}, { mergeBuiltin: true }).catch(() => {});
+    } catch { /* 加载失败不影响列表 */ }
     const skills = listSkills(cfg, root).map((s) => ({
       name: s.name,
       description: s.description.slice(0, 200),
@@ -1364,6 +2005,63 @@ export function createApp(opts: ServerOptions = {}) {
 
   app.get("/api/health", (c) => c.json({ ok: true, name: "infu-agent", tools: Object.keys(TOOLS).length }));
 
+  // ── 静态托管（桌面端同端口托管 web dist：前端相对路径 fetch 零改动）──
+  if (opts.staticDir) {
+    const MIME: Record<string, string> = {
+      ".html": "text/html; charset=utf-8",
+      ".js": "text/javascript; charset=utf-8",
+      ".mjs": "text/javascript; charset=utf-8",
+      ".css": "text/css; charset=utf-8",
+      ".json": "application/json; charset=utf-8",
+      ".svg": "image/svg+xml",
+      ".png": "image/png",
+      ".jpg": "image/jpeg",
+      ".jpeg": "image/jpeg",
+      ".ico": "image/x-icon",
+      ".woff2": "font/woff2",
+      ".woff": "font/woff",
+      ".ttf": "font/ttf",
+      ".map": "application/json; charset=utf-8",
+    };
+    // v3.1：令牌注入（index.html 唯一载体）——前端 apiFetch 读取 window.__INFU_TOKEN__
+    const injectToken = (html: string): string => {
+      if (!localToken) return html;
+      const script = `<script>window.__INFU_TOKEN__="${localToken}";</script>`;
+      return html.includes("</head>") ? html.replace("</head>", script + "</head>") : script + html;
+    };
+    app.get("*", async (c) => {
+      const url = new URL(c.req.url);
+      if (c.req.method !== "GET" && c.req.method !== "HEAD") return c.notFound();
+      let pathname = decodeURIComponent(url.pathname);
+      if (pathname === "/") pathname = "/index.html";
+      const filePath = path.normalize(join(opts.staticDir!, pathname));
+      // 防路径穿越（.. 逃出静态目录）；isPathInside(root, abs) —— root 在前
+      if (!isPathInside(opts.staticDir!, filePath)) return c.notFound();
+      try {
+        const stat = statSync(filePath);
+        if (stat.isFile()) {
+          const ext = path.extname(filePath).toLowerCase();
+          const body = readFileSync(filePath);
+          // vite 产物带内容 hash → 长缓存；index.html 不缓存（SPA 更新即时生效）
+          const cacheable = /^\/assets\//.test(pathname);
+          const injected = ext === ".html" ? Buffer.from(injectToken(body.toString("utf-8")), "utf-8") : body;
+          return c.body(injected, 200, {
+            "content-type": MIME[ext] ?? "application/octet-stream",
+            "cache-control": cacheable ? "public, max-age=31536000, immutable" : "no-cache",
+          });
+        }
+      } catch { /* 文件不存在 → SPA fallback */ }
+      // SPA fallback：非文件请求回 index.html（仅 HTML 请求；资源请求 404 防误回）
+      if (!pathname.includes(".")) {
+        try {
+          const html = readFileSync(join(opts.staticDir!, "index.html"));
+          return c.html(injectToken(html.toString("utf-8")));
+        } catch { /* 无 index.html → 404 */ }
+      }
+      return c.notFound();
+    });
+  }
+
   return app;
 }
 
@@ -1405,6 +2103,12 @@ export function startServer(opts: ServerOptions = {}) {
   const host = opts.host ?? "127.0.0.1";
   const basePort = opts.port ?? 4317;
   const app = createApp(opts);
+  // v3.1：启动时清理上次残留的 running 会话（服务重启后旧任务已死，防续跑被误拦）
+  try {
+    getStore().resetStaleRunning();
+  } catch {
+    /* DB 未就绪忽略 */
+  }
 
   const tryListen = (port: number, attemptsLeft: number) => {
     const server = createServer((incoming, outgoing) => void handleNodeRequest(app, incoming, outgoing));
@@ -1414,6 +2118,7 @@ export function startServer(opts: ServerOptions = {}) {
       console.log(`[infu-agent] 服务已启动: http://${host}:${listeningPort}`);
       console.log(`[infu-agent] 工具数: ${Object.keys(TOOLS).length}`);
       checkConfigHealth();
+      opts.onListening?.(listeningPort);
       console.log(`[infu-agent] Ctrl+C 停止服务`);
     });
     server.on("error", (err: NodeJS.ErrnoException) => {
@@ -1429,6 +2134,17 @@ export function startServer(opts: ServerOptions = {}) {
   tryListen(basePort, 5);
   // v2.4 批 2：服务退出统一清理终端子进程（防残留 PTY；与 MCP 连接清理同模式）
   process.on("exit", () => closeAllTerminalSessions());
+
+  // ── v3.0 批 11 定时任务调度器（无人值守 = 等价 CLI -y：low/medium 自动批准，
+  //    requireExplicit 安全红线（联网/自注册）一律拒绝，绝不自动放行）──
+  try {
+    const { startScheduler } = _require("./schedule.js");
+    const { runScheduledTask } = _require("./scheduler-runner.js");
+    startScheduler(runScheduledTask);
+    console.log("[infu-agent] 定时任务调度器已启动（infu schedule add 添加）");
+  } catch (e) {
+    console.log(`[infu-agent] 定时任务调度器启动跳过: ${(e as Error).message}`);
+  }
 }
 
 // 直接运行时入口：tsx src/server.ts / node dist/server.js

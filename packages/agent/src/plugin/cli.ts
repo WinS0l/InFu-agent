@@ -5,13 +5,14 @@
  * 行迭代器为模块级单例（与 mcp/cli.ts 同构；同一进程同一时刻只有一个向导）。
  */
 
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, writeFileSync, cpSync, existsSync, rmSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import type { InfuConfig } from "@infu/shared";
 import { loadConfig, CONFIG_PATH } from "../providers/registry.js";
 import { loadPlugins } from "./index.js";
 import { listSkills, readSkillMeta } from "./skills.js";
+import { listMarketplacePlugins, findMarketplacePlugin } from "./marketplace.js";
 
 // ── 终端着色（与 cli.ts 一致）──
 const C = {
@@ -49,13 +50,17 @@ function saveConfig(cfg: InfuConfig) {
 export async function pluginCli(args: string[]): Promise<void> {
   const cmd = args[0];
   if (cmd === "add") return pluginAdd(args.slice(1));
+  if (cmd === "install") return pluginInstall(args[1]);
+  if (cmd === "marketplace") return pluginMarketplace();
   if (cmd === "list") return pluginList();
   if (cmd === "remove") return pluginRemove(args[1]);
   if (cmd === "status") return pluginStatus(args[1]);
   console.log(`InFu 插件管理（v2.3 批 2：JS 模块插件 = 工具/钩子/技能）
 
 用法：
-  infu plugin add <id> [--path <模块路径>]   添加插件（默认导出 PluginDef；交互向导）
+  infu plugin marketplace                     列出官方市场可安装插件
+  infu plugin install <id>                    从市场一键安装（如 infu plugin install browser-use）
+  infu plugin add <id> [--path <模块路径>]   手动添加插件（默认导出 PluginDef；交互向导）
   infu plugin list                            列出已配置的插件
   infu plugin remove <id>                     删除插件
   infu plugin status [id]                     探测加载，列出工具/钩子数
@@ -96,6 +101,45 @@ async function pluginAdd(args: string[]): Promise<void> {
   saveConfig(cfg);
   console.log(C.green(`✅ 已添加插件 ${id}（${resolve(path)}）`));
   console.log(C.dim(`   可用 infu plugin status ${id} 探测加载；下一任务执行阶段自动加载其工具/钩子`));
+}
+
+/** 从官方市场安装插件（写 config.plugins[] + source/version 元数据） */
+async function pluginInstall(id?: string): Promise<void> {
+  if (!id) {
+    pluginMarketplace();
+    console.log(C.dim("\n用法：infu plugin install <id>"));
+    return;
+  }
+  const mp = findMarketplacePlugin(id);
+  if (!mp) {
+    console.error(C.red(`市场无插件 "${id}"（infu plugin marketplace 查看可安装插件）`));
+    return;
+  }
+  const cfg = loadConfig() ?? { models: [], providers: [] };
+  if ((cfg.plugins ?? []).some((p) => p.id === mp.id)) {
+    console.error(C.red(`插件 "${mp.id}" 已安装（infu plugin list 查看）`));
+    return;
+  }
+  cfg.plugins = [...(cfg.plugins ?? []), { id: mp.id, path: mp.path, source: mp.source, version: mp.version }];
+  saveConfig(cfg);
+  console.log(C.green(`✅ 已从市场安装插件 ${mp.id} v${mp.version}`));
+  console.log(C.dim(`   ${mp.description.slice(0, 80)}`));
+  console.log(C.dim(`   下一任务执行阶段自动加载其工具/钩子/技能（infu plugin status ${mp.id} 探测）`));
+}
+
+/** 列出官方市场插件 */
+function pluginMarketplace(): void {
+  const plugins = listMarketplacePlugins();
+  if (!plugins.length) {
+    console.log("官方市场暂无插件");
+    return;
+  }
+  console.log(C.cyan(`\n═══ InFu 官方插件市场（${plugins.length}）═══`));
+  plugins.forEach((p, i) => {
+    console.log(` ${String(i + 1).padStart(2)}. ${p.name} v${p.version}  [${p.id}]`);
+    console.log(C.dim(`     ${p.description}`));
+  });
+  console.log(C.dim(`\n安装：infu plugin install <id>`));
 }
 
 function pluginList(): void {
@@ -171,12 +215,16 @@ export async function skillCli(args: string[]): Promise<void> {
   if (cmd === "add") return skillAdd(args.slice(1));
   if (cmd === "list") return skillList();
   if (cmd === "remove") return skillRemove(args[1]);
+  if (cmd === "export") return skillExport(args.slice(1));
+  if (cmd === "import") return skillImport(args[1]);
   console.log(`InFu 技能管理（v2.3 批 2：SKILL.md 社区标准，progressive disclosure）
 
 用法：
   infu skill add <name> [--path <skill目录>]   添加技能引用（缺省按 name 在 ~/.infu/skills 或项目 .infu/skills 查找）
-  infu skill list                               列出可用技能（用户级/项目级/显式引用）
+  infu skill list                               列出可用技能（用户级/项目级/显式引用/内置）
   infu skill remove <name>                      移除显式引用（不删除文件）
+  infu skill export <name> [--to <目录>]        导出技能目录（复制 SKILL.md + references/scripts/assets）
+  infu skill import <技能目录路径>               导入技能到 ~/.infu/skills/<name>/（校验 SKILL.md 合法）
 
 SKILL.md 标准：技能目录下必须有 SKILL.md（frontmatter：name=目录名 + description），
 可选 references/ scripts/ assets/ 子目录。任务匹配描述时 Agent 会调用 use_skill 读取全文。`);
@@ -234,6 +282,58 @@ function skillList(): void {
     console.log(C.dim(`     ${s.path}`));
   });
   console.log(C.dim(`\n移除显式引用：infu skill remove <name>`));
+}
+
+/** v2.7：导出技能——复制技能目录（含 SKILL.md + references/scripts/assets）到指定位置 */
+async function skillExport(args: string[]): Promise<void> {
+  const name = args[0] ?? (await ask("技能名（infu skill list 查看）"));
+  if (!name) return;
+  const meta = listSkills(loadConfig(), process.cwd()).find((s) => s.name === name);
+  if (!meta) {
+    console.error(C.red(`未找到技能 "${name}"（infu skill list 查看可用技能）`));
+    return;
+  }
+  const srcDir = meta.path.replace(/[\\/]SKILL\.md$/, "");
+  const toArg = argValue(args, "--to");
+  const to = resolve(toArg ?? (await ask("导出目录（默认当前目录）", ".")));
+  const dest = join(to, `${name}-skill`);
+  if (existsSync(dest)) {
+    const ok = await ask(`目标 ${dest} 已存在，覆盖？(y/N)`, "n");
+    if (!/^y/i.test(ok)) { console.log("已取消"); return; }
+    rmSync(dest, { recursive: true, force: true });
+  }
+  try {
+    cpSync(srcDir, dest, { recursive: true });
+    console.log(C.green(`✅ 已导出技能 "${name}" 到 ${dest}`));
+    console.log(C.dim(`   （含 SKILL.md + references/scripts/assets；分享整个目录，对方 infu skill import ${dest} 即可）`));
+  } catch (e) {
+    console.error(C.red(`导出失败：${(e as Error).message}`));
+  }
+}
+
+/** v2.7：导入技能——从目录复制到 ~/.infu/skills/<name>/（校验 SKILL.md 合法） */
+async function skillImport(pathArg?: string): Promise<void> {
+  const src = pathArg ?? (await ask("技能目录路径（含 SKILL.md）"));
+  if (!src) return;
+  const dir = resolve(src);
+  const meta = readSkillMeta(dir, "user");
+  if (!meta) {
+    console.error(C.red(`"${dir}" 下未找到合法 SKILL.md（需 frontmatter name=目录名 + description）`));
+    return;
+  }
+  const dest = join(homedir(), ".infu", "skills", meta.name);
+  if (existsSync(dest)) {
+    const ok = await ask(`~/.infu/skills/${meta.name} 已存在，覆盖？(y/N)`, "n");
+    if (!/^y/i.test(ok)) { console.log("已取消"); return; }
+    rmSync(dest, { recursive: true, force: true });
+  }
+  try {
+    cpSync(dir, dest, { recursive: true });
+    console.log(C.green(`✅ 已导入技能 "${meta.name}" 到 ${dest}`));
+    console.log(C.dim("   下一任务自动发现（描述注入 system，use_skill 读取全文）"));
+  } catch (e) {
+    console.error(C.red(`导入失败：${(e as Error).message}`));
+  }
 }
 
 async function skillRemove(name?: string): Promise<void> {

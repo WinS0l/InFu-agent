@@ -1,0 +1,80 @@
+{
+  "name": "@infu/desktop",
+  "version": "0.1.0",
+  "private": true,
+  "description": "InFu 桌面端（Electron 壳：宿主 agent 后端 + 嵌入式真浏览器）",
+  "type": "module",
+  "main": "dist/main.js",
+  "scripts": {
+    "build": "tsc -p tsconfig.json && node -e \"require('fs').copyFileSync('src/preload.cjs','dist/preload.cjs')\"",
+    "start": "npm run build && cross-env INFU_DESKTOP_DEV=1 electron .",
+    "dev": "electron .",
+    "pack": "npm run build && electron-builder --win nsis"
+  },
+  "dependencies": {
+    "@infu/agent": "*",
+    "cross-env": "^7.0.3"
+  },
+  "devDependencies": {
+    "electron": "^43.4.0",
+    "electron-builder": "^26.15.3",
+    "typescript": "^5.6.0"
+  },
+  "build": {
+    "appId": "com.infu.desktop",
+    "productName": "InFu",
+    "electronVersion": "43.4.0",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "dist/**",
+      "package.json",
+      "!node_modules/@infu/agent/.infu/**",
+      "!node_modules/@infu/agent/.infu-sandbox-profile",
+      "!node_modules/@infu/agent/.infu/**",
+      "!node_modules/@infu/agent/src/**",
+      "!node_modules/@infu/agent/tests/**",
+      "!node_modules/@infu/agent/docs/**",
+      "!node_modules/@infu/agent/scripts/**",
+      "!node_modules/@infu/agent/.infu-worktrees/**",
+      "!node_modules/@infu/agent/AGENTS.md",
+      "!node_modules/@infu/agent/README.md",
+      "!node_modules/@infu/agent/tsconfig*.json",
+      "!node_modules/@infu/shared/src/**",
+      "!node_modules/@infu/sandbox-rs/target/**",
+      "!node_modules/@infu/sandbox-rs/src/**",
+      "!node_modules/@infu/sandbox-rs/scripts/**",
+      "!node_modules/@infu/sandbox-rs/Cargo.toml",
+      "!node_modules/@infu/sandbox-rs/Cargo.lock",
+      "!node_modules/@infu/sandbox-rs/build.rs"
+    ],
+    "extraResources": [
+      {
+        "from": "../web/dist",
+        "to": "web/dist"
+      }
+    ],
+    "asarUnpack": [
+      "node_modules/@infu/sandbox-rs/**",
+      "node_modules/node-pty/**"
+    ],
+    "npmRebuild": false,
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": ["x64"]
+        }
+      ],
+      "icon": "build/icon.png"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "InFu"
+    }
+  }
+}

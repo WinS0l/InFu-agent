@@ -168,6 +168,41 @@ try {
     check("version 字段存在", typeof raw.version === "number");
     check("JSON 合法", typeof raw.approvalPolicy === "object");
   }
+
+  // ── 9. browser 节 + /api/browser/status + /api/memory（v2.7）──
+  console.log("▶ browser 节 + 浏览器/记忆端点");
+  {
+    const res = await put("/api/config", { browser: { headless: false, executablePath: "C:\\chromium\\chrome.exe" } });
+    check("browser 节写入 200", res.status === 200, JSON.stringify(await res.json()));
+    const cfg = loadConfig()!;
+    check("browser.headless 落盘", cfg.browser?.headless === false);
+    check("browser.executablePath 落盘", cfg.browser?.executablePath === "C:\\chromium\\chrome.exe");
+
+    const bs = await (await app.request("/api/browser/status")).json();
+    check("browser status 含 available 布尔", typeof bs.available === "boolean", JSON.stringify(bs));
+    check("browser status 反映 headless=false", bs.headless === false);
+    check("browser status 反映 executablePath", bs.executablePath === "C:\\chromium\\chrome.exe");
+    check("browser status pluginEnabled 布尔", typeof bs.pluginEnabled === "boolean");
+
+    const mem = await (await app.request("/api/memory")).json();
+    check("memory 含 globalDir", typeof mem.globalDir === "string");
+    check("memory 含 global 数组", Array.isArray(mem.global));
+    check("memory 含 project 数组", Array.isArray(mem.project));
+
+    // memory 节（自动沉淀开关）
+    const mres = await put("/api/config", { memory: { autoSediment: false } });
+    check("memory.autoSediment 写入 200", mres.status === 200, JSON.stringify(await mres.json()));
+    check("memory.autoSediment 落盘", loadConfig()?.memory?.autoSediment === false);
+
+    // v2.7 使用统计 + 索引库端点
+    const stats = await (await app.request("/api/stats?days=7")).json();
+    check("stats 含 tokens 数字", typeof stats.tokens === "number", JSON.stringify(stats));
+    check("stats 含 sessions/messages/activeDays", typeof stats.sessions === "number" && typeof stats.messages === "number" && typeof stats.activeDays === "number");
+    check("stats 含 modelUsage 数组", Array.isArray(stats.modelUsage));
+    check("stats 含 dailyTrend 数组", Array.isArray(stats.dailyTrend));
+    const idx = await (await app.request("/api/index/status")).json();
+    check("index status 含 built 布尔", typeof idx.built === "boolean", JSON.stringify(idx));
+  }
 } finally {
   // 恢复用户配置
   if (had) {

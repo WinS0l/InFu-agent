@@ -29,14 +29,35 @@ const EGRESS_TOOLS = [
   "aria2c",
   "axel",
   "openssl", // 仅 s_client/s_server 组合命中（见 EGRESS_PATTERNS）
+  // v3.1 审计修复：补全绕过面——Windows 自带下载器 / DNS 外传 / 云存储同步。
+  // python3/py 不加入工具名单（本地脚本运行会误报），由 EGRESS_PATTERNS 组合模式覆盖
+  "certutil",
+  "bitsadmin",
+  "mshta",
+  "regsvr32",
+  "nslookup",
+  "rclone",
+  "s3cmd",
+  "gsutil",
+  "azcopy",
+  "iperf",
+  "iperf3",
+  "lwp-request",
+  "lwp-download",
 ];
 
 /** 语言/脚本网络调用的高置信组合（避免单个工具名误报） */
 const EGRESS_PATTERNS: RegExp[] = [
   /openssl\s+s_(client|server)/i,
-  /(powershell|pwsh).{0,120}(Invoke-WebRequest|Invoke-RestMethod|DownloadFile|DownloadString|Net\.WebClient|WebRequest|Start-BitsTransfer|System\.Net\.Sockets)/i,
-  /(python|py)(\s+-c|\s+-m\s+http|\s+[a-zA-Z_]+\.py).{0,120}(urllib|requests|http\.client|socket|ftplib|paramiko)/i,
-  /(node|npx).{0,120}(\bhttps?\b|\bnet\b|\bhttp\b|\bws\b)\.(get|request|createConnection|connect)/i,
+  /(powershell|pwsh).{0,120}(Invoke-WebRequest|Invoke-RestMethod|DownloadFile|DownloadString|Net\.WebClient|WebRequest|Start-BitsTransfer|System\.Net\.Sockets|curl|wget)/i,
+  /(python|python3|py)(\s+-c|\s+-m\s+http|\s+[a-zA-Z_]+\.py).{0,120}(urllib|requests|http\.client|socket|ftplib|paramiko)/i,
+  /(node|npx|deno|bun).{0,120}(\bhttps?\b|\bnet\b|\bhttp\b|\bws\b)\.(get|request|createConnection|connect)/i,
+  // Windows 内置下载/外传通道（v3.1 补全）
+  /certutil\s+-(urlcache|decode\s+-f|download)/i,
+  /bitsadmin\s+\/transfer/i,
+  /regsvr32\s+\/(s|i):?https?:/i,
+  /mshta\s+https?:/i,
+  /curl\.exe|wget\.exe|powershell\.exe/i,
 ];
 
 /** 转义正则元字符（工具名来自固定白名单，防御性处理） */

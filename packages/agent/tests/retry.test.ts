@@ -4,7 +4,7 @@
  *
  * 覆盖：429 重试成功 / 5xx 耗尽抛错 / 401 不重试 / 网络错误重试 / 超时重试 / 流中断不重试
  */
-import { streamChat, ModelApiError } from "../src/providers/chat.js";
+import { streamChat, ModelApiError, isContextWindowExceeded } from "../src/providers/chat.js";
 import type { StreamChatOptions, ChatDelta } from "../src/providers/chat.js";
 
 let passed = 0;
@@ -139,6 +139,35 @@ try {
   check("中止时抛错（AbortError 语义）", e instanceof Error, String(e));
   check("中止不重试（1 次）", fetchCalls === 1, String(fetchCalls));
 }
+
+// 8. v3.2 onRetry 回调（断网可见性：前端倒计时数据源）
+console.log("\n▶ onRetry 回调");
+installFetch((call) => {
+  if (call === 1) throw new TypeError("fetch failed");
+  return sse('data: {"choices":[{"delta":{"content":"r-ok"}}]}\n\ndata: [DONE]\n\n');
+});
+const retryEvents: Array<{ attempt: number; maxAttempts: number; delayMs: number; message: string }> = [];
+const t8 = await collect({
+  messages: [],
+  retry: { maxAttempts: 3, baseDelayMs: 1 },
+  onRetry: (r) => retryEvents.push(r),
+});
+check("onRetry 后重试拿到内容", t8 === "r-ok", t8);
+check("onRetry 触发 1 次", retryEvents.length === 1, String(retryEvents.length));
+check("onRetry 参数齐全", retryEvents[0]?.attempt === 1 && retryEvents[0]?.maxAttempts === 3 && retryEvents[0]?.delayMs > 0 && typeof retryEvents[0]?.message === "string", JSON.stringify(retryEvents[0]));
+
+// 9. v3.2 isContextWindowExceeded（400 上下文超限识别）
+console.log("\n▶ 上下文超限识别");
+const cwHit = new ModelApiError("模型 API 请求失败（400）：maximum context length exceeded，当前消息共 200000 tokens", { status: 400 });
+const cwHit2 = new ModelApiError("上下文长度超出限制，请缩短后重试", { status: 400 });
+const cwHit3 = new ModelApiError("request too large", { status: 400 });
+const cwMiss = new ModelApiError("bad request", { status: 400 });
+const cwMiss2 = new ModelApiError("模型 API 请求失败（500）：server boom", { status: 500 });
+check("400 英文命中", isContextWindowExceeded(cwHit), cwHit.message);
+check("400 中文命中", isContextWindowExceeded(cwHit2), cwHit2.message);
+check("400 too large 命中", isContextWindowExceeded(cwHit3), cwHit3.message);
+check("400 无关不命中", !isContextWindowExceeded(cwMiss), cwMiss.message);
+check("500 不命中", !isContextWindowExceeded(cwMiss2), cwMiss2.message);
 
 restoreFetch();
 console.log(`\n=== 结果：${passed} 通过 / ${failed} 失败 ===`);

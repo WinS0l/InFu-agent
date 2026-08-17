@@ -14,34 +14,61 @@ import { useEffect, useRef, useState } from "react";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import "@xterm/xterm/css/xterm.css";
-import { ShieldAlert, X, RefreshCw, Loader2, ChevronDown } from "lucide-react";
+import { ShieldAlert, Loader2, RefreshCw, ChevronDown } from "lucide-react";
 import { useStore } from "../store";
-import { terminalStart, terminalInput, terminalResize, terminalKill } from "../api";
+import { terminalStart, terminalInput, terminalResize, terminalKill, apiFetch } from "../api";
+import { CapsuleButton } from "./ui";
 
-/** Dark OLED 主题（与设计系统一致：ink 底 + 运行绿） */
-const XTERM_THEME = {
-  background: "#0f172a",
-  foreground: "#f8fafc",
-  cursor: "#22c55e",
-  cursorAccent: "#0f172a",
-  selectionBackground: "#33415588",
-  black: "#1e293b",
-  red: "#ef4444",
-  green: "#22c55e",
-  yellow: "#eab308",
-  blue: "#60a5fa",
-  magenta: "#c084fc",
-  cyan: "#22d3ee",
-  white: "#f8fafc",
-  brightBlack: "#64748b",
-  brightRed: "#f87171",
-  brightGreen: "#4ade80",
-  brightYellow: "#facc15",
-  brightBlue: "#93c5fd",
-  brightMagenta: "#d8b4fe",
-  brightCyan: "#67e8f9",
-  brightWhite: "#ffffff",
-};
+/** v3 xterm 配色（跟随设计系统：深色主题 主流 底；浅色主题用白底终端） */
+function xtermTheme(dark: boolean) {
+  return dark
+    ? {
+        background: "#151517",
+        foreground: "#f9fafb",
+        cursor: "#679efe",
+        cursorAccent: "#151517",
+        selectionBackground: "#35363888",
+        black: "#232325",
+        red: "#f25a5a",
+        green: "#22c55e",
+        yellow: "#f7ad31",
+        blue: "#679efe",
+        magenta: "#c084fc",
+        cyan: "#22d3ee",
+        white: "#f9fafb",
+        brightBlack: "#81858c",
+        brightRed: "#f87171",
+        brightGreen: "#4ade80",
+        brightYellow: "#facc15",
+        brightBlue: "#93c5fd",
+        brightMagenta: "#d8b4fe",
+        brightCyan: "#67e8f9",
+        brightWhite: "#ffffff",
+      }
+    : {
+        background: "#ffffff",
+        foreground: "#0f1115",
+        cursor: "#4176e6",
+        cursorAccent: "#ffffff",
+        selectionBackground: "#d3e2ff88",
+        black: "#0f1115",
+        red: "#ec1313",
+        green: "#1d9d4b",
+        yellow: "#dd8629",
+        blue: "#4176e6",
+        magenta: "#c026d3",
+        cyan: "#0e7490",
+        white: "#0f1115",
+        brightBlack: "#81858c",
+        brightRed: "#e5484d",
+        brightGreen: "#2f9e44",
+        brightYellow: "#f59e0b",
+        brightBlue: "#5686fe",
+        brightMagenta: "#a855f7",
+        brightCyan: "#22b8cf",
+        brightWhite: "#434446",
+      };
+}
 
 interface PendingApproval {
   command: string;
@@ -50,6 +77,11 @@ interface PendingApproval {
 
 export default function TerminalPanel() {
   const root = useStore((s) => s.root);
+  const theme = useStore((s) => s.theme);
+  // v3.0 批 12：theme=system → 解析系统实际深浅（xterm 配色跟随）
+  const resolvedDark = theme === "system"
+    ? (typeof window !== "undefined" && window.matchMedia("(prefers-color-scheme: dark)").matches)
+    : theme === "dark";
   const containerRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<Terminal | null>(null);
   const fitRef = useRef<FitAddon | null>(null);
@@ -62,6 +94,8 @@ export default function TerminalPanel() {
 
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [shell, setShell] = useState("");
+  // v3.0 批 12：集成终端 shell 选择（常规设置参考）——cmd / powershell / bash
+  const [chosenShell, setChosenShell] = useState<string>("");
   const [connecting, setConnecting] = useState(false);
   const [approval, setApproval] = useState<PendingApproval | null>(null);
   const [exited, setExited] = useState(false);
@@ -112,7 +146,7 @@ export default function TerminalPanel() {
     abortRef.current = controller;
     (async () => {
       try {
-        const res = await fetch(`/api/terminal/${encodeURIComponent(id)}/stream`, { signal: controller.signal });
+        const res = await apiFetch(`/api/terminal/${encodeURIComponent(id)}/stream`, { signal: controller.signal });
         if (!res.ok || !res.body) throw new Error(`终端流连接失败: ${res.status}`);
         const reader = res.body.getReader();
         const decoder = new TextDecoder();
@@ -154,7 +188,7 @@ export default function TerminalPanel() {
     setExited(false);
     setNote("");
     try {
-      const s = await terminalStart(root || undefined);
+      const s = await terminalStart(root || undefined, chosenShell || undefined);
       sessionIdRef.current = s.id;
       setSessionId(s.id);
       setShell(s.shell);
@@ -171,7 +205,7 @@ export default function TerminalPanel() {
   useEffect(() => {
     if (!containerRef.current) return;
     const term = new Terminal({
-      theme: XTERM_THEME,
+      theme: xtermTheme(resolvedDark),
       fontFamily: '"JetBrains Mono", "Cascadia Code", Consolas, monospace',
       fontSize: 12,
       cursorBlink: true,
@@ -257,6 +291,12 @@ export default function TerminalPanel() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // 主题切换时热更新 xterm 配色（不重建终端，保留缓冲）
+  useEffect(() => {
+    const t = termRef.current;
+    if (t) t.options.theme = xtermTheme(resolvedDark);
+  }, [theme]);
+
   // 首开自动建会话
   useEffect(() => {
     if (!sessionId && !connecting) newSession();
@@ -264,22 +304,36 @@ export default function TerminalPanel() {
   }, [sessionId, connecting]);
 
   return (
-    <div className="flex h-60 shrink-0 flex-col border-t border-line bg-ink">
+    <div className="flex h-60 shrink-0 flex-col border-t border-line bg-base">
       {/* 工具条 */}
       <div className="flex shrink-0 items-center gap-2 border-b border-line bg-panel px-3 py-1.5">
-        <span className="text-xs font-medium text-text">终端</span>
+        <span className="text-sm font-medium text-text">终端</span>
         {sessionId ? (
-          <span className="rounded border border-accent/40 bg-accent/10 px-1.5 py-px text-[10px] text-accent" title="PTY 会话">
+          <span className="rounded-lg border border-info/40 bg-info-soft px-1.5 py-px text-[11px] text-info" title="PTY 会话">
             {shell}
           </span>
         ) : (
-          <span className="rounded border border-line bg-muted px-1.5 py-px text-[10px] text-sub">未连接</span>
+          <>
+            <select
+              className="h-6 cursor-pointer rounded-lg border border-line bg-hover px-1.5 text-[11px] text-sub outline-none hover:text-text"
+              value={chosenShell}
+              onChange={(e) => setChosenShell(e.target.value)}
+              title="选择终端 shell（新建会话时生效）"
+            >
+              <option value="">跟随设置（自动）</option>
+              <option value="auto">自动（Git Bash 优先）</option>
+              <option value="cmd">CMD</option>
+              <option value="powershell">PowerShell</option>
+              <option value="bash">Git Bash</option>
+            </select>
+            <span className="rounded-lg border border-line bg-hover px-1.5 py-px text-[11px] text-sub">未连接</span>
+          </>
         )}
-        <span className="text-[11px] text-sub/70">工作目录：{root}</span>
-        {note && <span className="text-[11px] text-warn">{note}</span>}
+        <span className="min-w-0 truncate text-xs text-sub">工作目录：{root}</span>
+        {note && <span className="text-xs text-warn">{note}</span>}
         <div className="ml-auto flex items-center gap-1.5">
           <button
-            className="flex cursor-pointer items-center gap-1 rounded border border-line px-2 py-1 text-[11px] text-sub transition-colors hover:border-accent hover:text-accent"
+            className="flex h-7 cursor-pointer items-center gap-1 rounded-[14px] border border-line px-2.5 text-xs text-sub transition-colors hover:bg-hover hover:text-text"
             onClick={newSession}
             disabled={connecting}
             title="新建终端会话（旧会话将被终止）"
@@ -288,7 +342,7 @@ export default function TerminalPanel() {
             新建会话
           </button>
           {exited && (
-            <span className="rounded border border-warn/40 bg-warn/10 px-1.5 py-px text-[10px] text-warn">进程已退出</span>
+            <span className="rounded-lg border border-warn/40 bg-warn-soft px-1.5 py-px text-[11px] text-warn">进程已退出</span>
           )}
         </div>
       </div>
@@ -296,33 +350,23 @@ export default function TerminalPanel() {
       {/* xterm 容器 */}
       <div ref={containerRef} className="min-h-0 flex-1 px-1.5 py-1" />
 
-      {/* 高危命令确认（Dark OLED 风格覆盖层） */}
+      {/* 高危命令确认（统一弹窗风格覆盖层） */}
       {approval && (
-        <div className="absolute inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm">
-          <div className="w-[440px] rounded-xl border border-danger/40 bg-panel p-4 shadow-2xl">
+        <div className="absolute inset-0 z-50 flex items-center justify-center" style={{ background: "var(--mask)" }}>
+          <div className="w-[440px] rounded-3xl border border-line bg-elevated p-5 shadow-lv3">
             <div className="flex items-center gap-2">
               <ShieldAlert className="h-4 w-4 text-danger" />
-              <span className="text-sm font-semibold text-text">高危命令确认</span>
+              <span className="text-[15px] font-medium text-text">高危命令确认</span>
             </div>
-            <div className="mt-2 rounded-md border border-danger/30 bg-danger/10 px-3 py-2 font-mono text-xs text-danger">
+            <div className="mt-2.5 rounded-xl border border-danger/30 bg-danger-soft px-3 py-2 font-mono text-[13px] text-danger">
               {approval.command}
             </div>
-            <div className="mt-2 text-[11px] leading-relaxed text-sub">
+            <div className="mt-2 text-xs leading-5 text-sub">
               删除/格式化类命令存在不可逆风险，需人工确认后才执行。确认后该命令将立即执行。
             </div>
             <div className="mt-4 flex justify-end gap-2">
-              <button
-                className="cursor-pointer rounded border border-line px-3 py-1.5 text-xs text-sub transition-colors hover:bg-muted hover:text-text"
-                onClick={() => decideApproval(false)}
-              >
-                拒绝
-              </button>
-              <button
-                className="cursor-pointer rounded bg-danger px-4 py-1.5 text-xs font-medium text-white transition-colors hover:bg-danger/85"
-                onClick={() => decideApproval(true)}
-              >
-                允许执行
-              </button>
+              <CapsuleButton variant="outline" size="md" onClick={() => decideApproval(false)}>拒绝</CapsuleButton>
+              <CapsuleButton variant="dangerPrimary" size="md" onClick={() => decideApproval(true)}>允许执行</CapsuleButton>
             </div>
           </div>
         </div>
@@ -331,19 +375,19 @@ export default function TerminalPanel() {
   );
 }
 
-/** 终端入口按钮图标（供 App 右下角使用） */
+/** 终端开关按钮（v3：输入框右上方、右边界对齐；往下贴近输入框但不重合；仅对话界面显示） */
 export function TerminalToggleButton({ open, onClick }: { open: boolean; onClick: () => void }) {
   return (
     <button
-      className={`fixed bottom-4 right-4 z-40 flex h-9 cursor-pointer items-center gap-1.5 rounded-md border px-3 text-xs shadow-lg backdrop-blur transition-colors ${
+      className={`absolute -top-8 right-2 z-20 flex h-6 cursor-pointer items-center gap-1.5 rounded-[14px] border px-2.5 text-xs transition-colors ${
         open
-          ? "border-accent/60 bg-accent/15 text-accent"
-          : "border-line bg-panel/90 text-text hover:border-accent hover:text-accent"
+          ? "border-info/50 bg-info-soft text-info"
+          : "border-line bg-elevated/90 text-text hover:bg-hover"
       }`}
       onClick={onClick}
       title={open ? "收起终端" : "打开终端（v2.4：交互式终端，高危命令需确认）"}
     >
-      {open ? <ChevronDown className="h-4 w-4" /> : <TerminalIcon />}
+      {open ? <ChevronDown className="h-3.5 w-3.5" /> : <TerminalIcon />}
       {open ? "收起" : "终端"}
     </button>
   );
@@ -356,18 +400,5 @@ function TerminalIcon() {
       <path d="M6 8l4 4-4 4" strokeLinecap="round" strokeLinejoin="round" />
       <path d="M12 16h6" strokeLinecap="round" />
     </svg>
-  );
-}
-
-/** 面板右上角「收起」按钮（供工具条使用） */
-export function TerminalCollapseButton({ onClick }: { onClick: () => void }) {
-  return (
-    <button
-      className="cursor-pointer rounded p-1 text-sub hover:bg-muted hover:text-text"
-      onClick={onClick}
-      title="收起终端（会话保留）"
-    >
-      <X className="h-3.5 w-3.5" />
-    </button>
   );
 }

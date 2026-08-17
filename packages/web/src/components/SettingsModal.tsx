@@ -1,31 +1,30 @@
 /**
- * v2.4 设置界面 — 大弹窗 + 左侧分组导航（信息架构升级定稿 2026-08-13）
+ * v2.4 设置界面 — 大弹窗 + 左侧分组导航（v3：重构——r24 双栏、
+ * 188px 导航轨 / 54px 内容头 / 全屏高自适应；信息架构不变）
  *
  * 导航三组：
- *  - 基础设置：常规 / 外观 / 模型设置 / 浏览器（规划中）
- *  - Agent 能力：记忆（规划中）/ 插件 / 技能 / 子智能体（规划中）/ MCP 服务器 / 命令 / 钩子
- *  - 数据与统计：索引库（规划中）/ 使用统计（规划中）
+ *  - 基础设置：常规 / 外观 / 模型设置 / 浏览器
+ *  - Agent 能力：记忆 / 插件 / 技能 / 子智能体 / MCP 服务器 / 命令 / 钩子
+ *  - 数据与统计：索引库 / 使用统计
  *
  * 插件/技能/MCP/钩子从独立弹窗内嵌（SettingsPanes）；「命令」= 原权限 Tab 重组
- * （审批档位 + 工具覆盖/禁用 + 命令白名单 + 高危命令说明）；未实现功能显示占位 + 规划中徽标。
+ * （审批档位 + 工具覆盖/禁用 + 命令白名单 + 高危命令说明）。
  * 配置写 GET/PUT /api/config（服务端白名单只接受设置节，防提权）。
  */
 
 import { useEffect, useRef, useState } from "react";
 import {
-  X, Check, ShieldCheck, Palette, Cpu, SlidersHorizontal, Loader2,
+  X, Check, Palette, Cpu, SlidersHorizontal, Loader2, ChevronDown, Terminal,
   Blocks, Database, BarChart3, BrainCircuit, Bot, Globe, Plug, Trash2, Plus,
+  Moon, Sun, MonitorCog, FolderSearch, BookOpen, Workflow,
+  Clock,
 } from "lucide-react";
 import type { RiskLevel } from "@infu/shared";
-import { useStore } from "../store";
-import { fetchConfig, updateConfig, type ApprovalMode, type SettingsConfig, type ToolRiskOverrideInput } from "../api";
-import { McpPane, PluginsPane, SkillsPane, AgentsPane, HooksPane, ComingSoonPane } from "./SettingsPanes";
+import { useStore, type SettingsTab } from "../store";
+import { fetchConfig, updateConfig, apiFetch, type ApprovalMode, type SettingsConfig, type ToolRiskOverrideInput } from "../api";
+import { McpPane, PluginsPane, SkillsPane, AgentsPane, HooksPane, BrowserPane, MemoryPane, StatsPane, IndexPane, SchedulePane } from "./SettingsPanes";
 import ModelPane from "./ModelPane";
-
-export type SettingsTab =
-  | "general" | "appearance" | "model" | "browser"
-  | "memory" | "plugins" | "skills" | "subagent" | "mcp" | "commands" | "hooks"
-  | "index" | "stats";
+import { Toggle, CapsuleButton } from "./ui";
 
 interface Props {
   onClose: () => void;
@@ -57,81 +56,94 @@ const RISK_OPTIONS: Array<{ value: "" | RiskLevel; label: string }> = [
 ];
 
 const inputCls =
-  "h-8 rounded-md border border-line bg-muted px-2 font-mono text-xs text-text placeholder:text-sub/60 focus:border-accent focus:outline-none";
+  "h-8 rounded-lg border border-line bg-input px-2.5 font-mono text-xs text-text placeholder:text-caption focus:border-info/60 focus:outline-none";
 const selectCls =
-  "h-8 cursor-pointer rounded-md border border-line bg-muted px-2 text-xs text-text hover:border-accent focus:outline-none";
-
-/** 手写开关（与 McpManagerModal 同款） */
-function Toggle({ on, onChange }: { on: boolean; onChange: (v: boolean) => void }) {
-  return (
-    <button
-      type="button"
-      aria-pressed={on}
-      onClick={() => onChange(!on)}
-      className={`relative h-4 w-8 shrink-0 cursor-pointer rounded-full transition-colors ${on ? "bg-accent/70" : "bg-muted"}`}
-    >
-      <span
-        className={`absolute top-0.5 h-3 w-3 rounded-full transition-all ${on ? "left-[18px] bg-text" : "left-0.5 bg-sub"}`}
-      />
-    </button>
-  );
-}
+  "h-8 cursor-pointer rounded-lg border border-line bg-input px-2 text-xs text-text hover:border-info/60 focus:outline-none";
 
 /** 导航分组定义 */
-const NAV_GROUPS: Array<{ label: string; items: Array<{ id: SettingsTab; label: string; icon: typeof Cpu; planned?: boolean }> }> = [
+const NAV_GROUPS: Array<{ label: string; items: Array<{ id: SettingsTab; label: string; icon: typeof Cpu }> }> = [
   {
     label: "基础设置",
     items: [
       { id: "general", label: "常规", icon: SlidersHorizontal },
       { id: "appearance", label: "外观", icon: Palette },
       { id: "model", label: "模型设置", icon: Cpu },
-      { id: "browser", label: "浏览器", icon: Globe, planned: true },
+      { id: "browser", label: "浏览器", icon: Globe },
     ],
   },
   {
     label: "Agent 能力",
     items: [
-      { id: "memory", label: "记忆", icon: BrainCircuit, planned: true },
+      { id: "memory", label: "记忆", icon: BrainCircuit },
       { id: "plugins", label: "插件", icon: Blocks },
-      { id: "skills", label: "技能", icon: Bot },
+      { id: "skills", label: "技能", icon: BookOpen },
       { id: "subagent", label: "子智能体", icon: Bot },
       { id: "mcp", label: "MCP 服务器", icon: Plug },
-      { id: "commands", label: "命令", icon: ShieldCheck },
-      { id: "hooks", label: "钩子", icon: Blocks },
+      { id: "commands", label: "命令", icon: Terminal },
+      { id: "hooks", label: "钩子", icon: Workflow },
+      { id: "schedule", label: "定时任务", icon: Clock },
     ],
   },
   {
     label: "数据与统计",
     items: [
-      { id: "index", label: "索引库", icon: Database, planned: true },
-      { id: "stats", label: "使用统计", icon: BarChart3, planned: true },
+      { id: "index", label: "索引库", icon: Database },
+      { id: "stats", label: "使用统计", icon: BarChart3 },
     ],
   },
 ];
 
-/** 规划中功能的占位说明 */
-const PLANNED: Record<string, { name: string; desc: string; roadmap: string }> = {
-  browser: {
-    name: "浏览器",
-    desc: "浏览器自动化（browser-use 类工具）的设置：默认浏览器、视口、截图目录等。当前版本暂无浏览器工具，落地后在此配置。",
-    roadmap: "规划：随 browser-use 插件生态落地（v2.7 生态与数据）",
-  },
-  memory: {
-    name: "记忆",
-    desc: "三层记忆系统（项目记忆 / 任务总和记忆 / 全局记忆）的管理：启用开关、来源与检索。形态实施前需单独讨论定稿。",
-    roadmap: "规划：v2.6 记忆与任务",
-  },
-  index: {
-    name: "索引库",
-    desc: "代码索引/检索库：为 Agent 提供项目级语义检索。当前 search_code 为文件级搜索，索引库落地后在此配置。",
-    roadmap: "规划：随记忆系统一并评估（v2.6+）",
-  },
-  stats: {
-    name: "使用统计",
-    desc: "成本/用量追踪 + 审计可视化 + 任务回放：token 消耗、工具调用、会话统计。",
-    roadmap: "规划：v2.7 生态与数据",
-  },
-};
+/** v3.0 批 12：自定义模型下拉（与主题选择一致的面板样式；原生 select 视觉不统一） */
+function ModelDropdown({ value, models, onChange }: {
+  value: string;
+  models: Array<{ id: string; name?: string }>;
+  onChange: (id: string) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!open) return;
+    const onDoc = (e: MouseEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
+    };
+    document.addEventListener("mousedown", onDoc);
+    return () => document.removeEventListener("mousedown", onDoc);
+  }, [open]);
+  const current = models.find((m) => m.id === value);
+  return (
+    <div ref={ref} className="relative">
+      <button
+        className="flex h-8 w-full cursor-pointer items-center justify-between gap-2 rounded-lg border border-line bg-input px-2.5 text-xs text-text transition-colors hover:border-info/60"
+        onClick={() => setOpen(!open)}
+      >
+        <span className="truncate">{current ? `${current.name ?? current.id}（${current.id}）` : "— 未设置（自动选首个可用模型）—"}</span>
+        <ChevronDown className={`h-3.5 w-3.5 shrink-0 text-sub transition-transform ${open ? "rotate-180" : ""}`} />
+      </button>
+      {open && (
+        <div className="absolute left-0 right-0 top-full z-50 mt-1 max-h-56 overflow-y-auto rounded-xl border border-line bg-elevated p-1 shadow-lv3">
+          <button
+            className="flex h-8 w-full cursor-pointer items-center rounded-lg px-2.5 text-left text-xs text-sub transition-colors hover:bg-hover hover:text-text"
+            onClick={() => { onChange(""); setOpen(false); }}
+          >
+            — 未设置（自动选首个可用模型）—
+          </button>
+          {models.map((m) => (
+            <button
+              key={m.id}
+              className={`flex h-8 w-full cursor-pointer items-center justify-between gap-2 rounded-lg px-2.5 text-left text-xs transition-colors hover:bg-hover ${
+                m.id === value ? "text-info" : "text-text"
+              }`}
+              onClick={() => { onChange(m.id); setOpen(false); }}
+            >
+              <span className="min-w-0 truncate">{m.name ?? m.id}（{m.id}）</span>
+              {m.id === value && <Check className="h-3.5 w-3.5 shrink-0 text-info" />}
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
 
 export default function SettingsModal({ onClose, initialTab = "general" }: Props) {
   const { models, setAppearance, setRoot, root } = useStore();
@@ -143,7 +155,48 @@ export default function SettingsModal({ onClose, initialTab = "general" }: Props
   // 命令 Tab：新建命令（快速加入白名单，顶置）
   const [newCommandOpen, setNewCommandOpen] = useState(false);
   const [newCommandText, setNewCommandText] = useState("");
+  // v3：默认会话根目录「浏览」——目录选择器 → 服务端解析候选路径（浏览器拿不到绝对路径）
+  const fileRef = useRef<HTMLInputElement>(null);
+  const [browseHints, setBrowseHints] = useState("");
   const loaded = useRef(false);
+
+  /** v3.0 批 12：浏览文件夹——桌面版 = Electron 原生系统对话框（openDirectory）直接拿绝对路径；
+   *  Web 版回退 webkitdirectory → /api/projects/resolve 解析候选 */
+  const onBrowseDefaultRoot = async () => {
+    const d = window.infuDesktop;
+    if (d) {
+      const paths = await d.selectPaths({ directories: true });
+      if (paths.length) {
+        patch({ general: { ...cfg!.general, defaultRoot: paths[0] } });
+        setBrowseHints(`已填入：${paths[0]}`);
+      }
+      return;
+    }
+    fileRef.current?.click();
+  };
+
+  /** Web 兜底：webkitdirectory → 服务端解析候选路径 */
+  const onBrowseDefaultRootWeb = async (files: FileList | null) => {
+    const f = files?.[0];
+    if (!f) return;
+    const dirName = f.webkitRelativePath.split("/")[0] || f.name;
+    setBrowseHints(`已选择「${dirName}」，解析路径中…`);
+    try {
+      const res = await apiFetch(`/api/projects/resolve?name=${encodeURIComponent(dirName)}`);
+      const data = await res.json();
+      const candidates: string[] = data.candidates ?? [];
+      if (candidates.length === 1) {
+        patch({ general: { ...cfg!.general, defaultRoot: candidates[0] } });
+        setBrowseHints(`已填入：${candidates[0]}`);
+      } else if (candidates.length > 1) {
+        setBrowseHints(`找到 ${candidates.length} 个同名目录：${candidates.join("；")}——请手动确认路径`);
+      } else {
+        setBrowseHints("常见位置未找到同名目录，请手动填写路径");
+      }
+    } catch {
+      setBrowseHints("解析文件夹路径失败，请手动填写");
+    }
+  };
 
   useEffect(() => {
     if (loaded.current) return;
@@ -153,10 +206,17 @@ export default function SettingsModal({ onClose, initialTab = "general" }: Props
 
   if (!cfg) {
     return (
-      <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm" onClick={onClose}>
-        <div className="flex h-56 w-[820px] flex-col items-center justify-center gap-3 rounded-xl border border-line bg-panel shadow-2xl" onClick={(e) => e.stopPropagation()}>
-          <Loader2 className="h-6 w-6 animate-spin text-accent" />
-          <div className="text-xs text-sub">正在加载设置…</div>
+      <div
+        className="fixed inset-0 z-50 flex items-center justify-center"
+        style={{ background: "var(--mask)" }}
+        onClick={onClose}
+      >
+        <div
+          className="flex h-56 w-[420px] flex-col items-center justify-center gap-3 rounded-3xl border border-line bg-elevated shadow-lv3"
+          onClick={(e) => e.stopPropagation()}
+        >
+          <Loader2 className="h-6 w-6 animate-spin text-info" />
+          <div className="text-[13px] text-sub">正在加载设置…</div>
         </div>
       </div>
     );
@@ -167,6 +227,7 @@ export default function SettingsModal({ onClose, initialTab = "general" }: Props
   const sandboxMode = sandbox.mode ?? "auto";
   const fontSize = appearance.fontSize ?? "sm";
   const streamCursor = appearance.streamCursor ?? true;
+  const theme: "light" | "dark" | "system" = appearance.theme === "system" ? "system" : appearance.theme === "light" ? "light" : "dark";
 
   const patch = (p: Partial<SettingsConfig>) => setCfg((c) => (c ? { ...c, ...p } : c));
   const patchPolicy = (p: Partial<SettingsConfig["approvalPolicy"]>) =>
@@ -188,8 +249,9 @@ export default function SettingsModal({ onClose, initialTab = "general" }: Props
         appearance: cfg.appearance,
         defaultModelId: cfg.defaultModelId,
       });
-      setAppearance({ fontSize, streamCursor });
-      if (general.defaultRoot && root === "E:\\InFu(test)") setRoot(general.defaultRoot);
+      setAppearance({ fontSize, streamCursor, theme });
+      // v3 修复：仅当 root 为空时应用默认根目录
+      if (general.defaultRoot && !root) setRoot(general.defaultRoot);
       setSaved(true);
       setTimeout(() => setSaved(false), 2000);
     } catch (e) {
@@ -216,87 +278,132 @@ export default function SettingsModal({ onClose, initialTab = "general" }: Props
   const currentItem = NAV_GROUPS.flatMap((g) => g.items).find((i) => i.id === tab);
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm" onClick={onClose}>
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center"
+      style={{ background: "var(--mask)" }}
+      onClick={onClose}
+    >
       <div
-        className="flex h-[600px] w-[880px] flex-col overflow-hidden rounded-xl border border-line bg-panel shadow-2xl"
+        className="flex overflow-hidden rounded-3xl border border-line bg-elevated shadow-lv3"
+        style={{ width: "min(880px, 94vw)", height: "min(800px, calc(100vh - 48px))" }}
         onClick={(e) => e.stopPropagation()}
       >
-        {/* 头部 */}
-        <div className="flex shrink-0 items-center gap-2 border-b border-line px-4 py-3">
-          <ShieldCheck className="h-4 w-4 text-accent" />
-          <div className="text-sm font-semibold text-text">设置</div>
-          <div className="text-xs text-sub">基础设置 · Agent 能力 · 数据与统计</div>
-          <button className="ml-auto cursor-pointer rounded p-1 text-sub hover:bg-muted hover:text-text" onClick={onClose} title="关闭">
-            <X className="h-4 w-4" />
-          </button>
-        </div>
+        {/* 左侧导航轨（主流 188px：标题 + 分组 + 40px 单元格） */}
+        <nav className="w-[188px] shrink-0 overflow-y-auto border-r border-line px-3 py-5">
+          <div className="px-3 pb-2 text-base font-medium text-text">设置</div>
+          {NAV_GROUPS.map((g) => (
+            <div key={g.label} className="mb-1.5">
+              <div className="px-3 pb-1 pt-2 text-[11px] font-medium text-caption">{g.label}</div>
+              {g.items.map((item) => (
+                <button
+                  key={item.id}
+                  className={`flex h-10 w-full cursor-pointer items-center gap-2.5 rounded-xl px-3 text-left text-[13px] transition-colors ${
+                    tab === item.id ? "bg-hover font-medium text-text" : "text-sub hover:bg-hover/60 hover:text-text"
+                  }`}
+                  onClick={() => setTab(item.id)}
+                >
+                  <item.icon className="h-4 w-4 shrink-0" />
+                  <span className="flex-1 truncate">{item.label}</span>
+                </button>
+              ))}
+            </div>
+          ))}
+        </nav>
 
-        {error && (
-          <div className="shrink-0 border-b border-danger/30 bg-danger/10 px-4 py-2 text-xs text-danger">{error}</div>
-        )}
+        {/* 右侧内容列 */}
+        <div className="flex min-w-0 flex-1 flex-col">
+          {/* 内容头（54px：标题 + 关闭） */}
+          <div className="flex h-[54px] shrink-0 items-center gap-2 border-b border-line px-6">
+            <span className="text-base font-medium text-text">{currentItem?.label ?? "设置"}</span>
+            <span className="hidden text-xs text-caption sm:inline">基础设置 · Agent 能力 · 数据与统计</span>
+            <button
+              className="ml-auto flex h-9 w-9 cursor-pointer items-center justify-center rounded-xl text-sub transition-colors hover:bg-hover hover:text-text"
+              onClick={onClose}
+              title="关闭（Esc）"
+            >
+              <X className="h-5 w-5" />
+            </button>
+          </div>
 
-        <div className="flex min-h-0 flex-1">
-          {/* 左侧分组导航 */}
-          <nav className="w-44 shrink-0 overflow-y-auto border-r border-line p-2">
-            {NAV_GROUPS.map((g) => (
-              <div key={g.label} className="mb-2">
-                <div className="px-2 pb-1 pt-1.5 text-[10px] font-medium uppercase tracking-wide text-sub/60">{g.label}</div>
-                {g.items.map((item) => (
-                  <button
-                    key={item.id}
-                    disabled={item.planned}
-                    className={`flex w-full cursor-pointer items-center gap-2 rounded-md px-3 py-1.5 text-left text-xs transition-colors ${
-                      item.planned
-                        ? "cursor-not-allowed text-sub/40"
-                        : tab === item.id
-                          ? "bg-accent/10 text-accent"
-                          : "text-sub hover:bg-muted hover:text-text"
-                    }`}
-                    onClick={() => setTab(item.id)}
-                    title={item.planned ? `规划中（${PLANNED[item.id].roadmap}）` : item.label}
-                  >
-                    <item.icon className="h-3.5 w-3.5 shrink-0" />
-                    <span className="flex-1 truncate">{item.label}</span>
-                    {item.planned && (
-                      <span className="shrink-0 rounded border border-warn/30 bg-warn/5 px-1 py-px text-[9px] text-warn/80">
-                        规划中
-                      </span>
-                    )}
-                  </button>
-                ))}
-              </div>
-            ))}
-          </nav>
+          {error && (
+            <div className="shrink-0 border-b border-danger/30 bg-danger-soft px-6 py-2 text-xs text-danger">{error}</div>
+          )}
 
-          {/* 右侧内容区 */}
-          <div className="min-h-0 flex-1 overflow-y-auto px-5 py-4">
+          <div className="min-h-0 flex-1 overflow-y-auto px-6 py-4">
             {tab === "general" && (
               <div className="space-y-5">
                 <SectionTitle title="常规" desc="任务与界面默认值（写入 ~/.infu/config.json）" />
                 <div className="space-y-2">
-                  <Label text="默认项目根目录" />
-                  <input
-                    className={`${inputCls} w-full`}
-                    value={general.defaultRoot ?? ""}
-                    onChange={(e) => patch({ general: { ...general, defaultRoot: e.target.value } })}
-                    placeholder="如 E:\workspace\my-project（留空 = 不预设）"
-                    spellCheck={false}
-                  />
-                  <div className="text-[11px] text-sub">Web 输入框为空时的默认值；Agent 任务仍以每次输入为准</div>
+                  <Label text="默认会话根目录" hint="会话区「新建会话」默认落在这里；该目录为只读容器（自由会话不能修改其中任何内容，已注册项目豁免）" />
+                  <div className="flex items-center gap-2">
+                    <input
+                      className={`${inputCls} flex-1`}
+                      value={general.defaultRoot ?? ""}
+                      onChange={(e) => patch({ general: { ...general, defaultRoot: e.target.value } })}
+                      placeholder="如 E:\workspace\my-project（留空 = 不预设，回落当前目录）"
+                      spellCheck={false}
+                    />
+                    <button
+                      className="flex h-8 shrink-0 cursor-pointer items-center gap-1 rounded-lg border border-line bg-elevated px-2.5 text-xs font-medium text-text transition-colors hover:bg-hover"
+                      onClick={() => void onBrowseDefaultRoot()}
+                      title="选择文件夹（桌面版原生对话框，直接填入绝对路径）"
+                    >
+                      <FolderSearch className="h-3.5 w-3.5" />
+                      选择文件夹
+                    </button>
+                    <input
+                      ref={fileRef}
+                      type="file"
+                      className="hidden"
+                      {...({ webkitdirectory: "", directory: "" } as Record<string, string>)}
+                      onChange={(e) => void onBrowseDefaultRootWeb(e.target.files)}
+                    />
+                  </div>
+                  {browseHints && (
+                    <div className="text-xs leading-5 text-sub">
+                      {browseHints}
+                    </div>
+                  )}
+                  <div className="text-xs text-sub">自由会话的只读容器：Agent 任务必须绑定项目后才可写文件</div>
+                </div>
+                {/* v3.0 批 12：集成终端默认 shell（常规设置参考——自动/CMD/PowerShell/Git Bash） */}
+                <div className="space-y-2">
+                  <Label text="集成终端" hint="仅新会话生效；auto = 自动优先 Git Bash，找不到回退 cmd.exe（同语义）" />
+                  <div className="flex gap-1.5">
+                    {(["auto", "cmd", "powershell", "bash"] as const).map((sh) => (
+                      <button
+                        key={sh}
+                        className={`h-8 cursor-pointer rounded-lg border px-3 text-xs transition-colors ${
+                          (general.terminalShell ?? "auto") === sh
+                            ? "border-info/60 bg-info/10 text-info"
+                            : "border-line bg-elevated text-sub hover:text-text"
+                        }`}
+                        onClick={() => patch({ general: { ...general, terminalShell: sh } })}
+                      >
+                        {sh === "auto" ? "自动" : sh === "cmd" ? "CMD" : sh === "powershell" ? "PowerShell" : "Git Bash"}
+                      </button>
+                    ))}
+                  </div>
+                  <div className="text-xs text-sub">终端面板位于聊天输入框右上「终端」按钮；也可在面板内临时切换</div>
+                </div>
+                {/* v3.0 批 12：开机自启（默认关闭，用户主动开启；仅桌面版生效） */}
+                <div className="space-y-2">
+                  <Label text="开机自启" hint="登录 Windows 后自动启动 InFu（默认关闭，需手动开启）" />
+                  <div className="flex items-center gap-2.5">
+                    <Toggle checked={general.autoLaunch === true} onChange={(v) => patch({ general: { ...general, autoLaunch: v } })} title={general.autoLaunch === true ? "已开启（随系统启动）" : "未开启（默认）"} />
+                    <span className="text-xs text-sub">{general.autoLaunch === true ? "已开启（随系统启动）" : "未开启（默认）"}</span>
+                  </div>
+                  <div className="text-xs text-sub">仅桌面版生效；Web 版无此能力</div>
                 </div>
                 <div className="space-y-2">
                   <Label text="默认模型" />
-                  <select
-                    className={`${selectCls} w-full`}
+                  {/* v3.0 批 12：原生 select → 自定义下拉（与设置内其他下拉一致的面板样式） */}
+                  <ModelDropdown
                     value={cfgDefaultModel ?? ""}
-                    onChange={(e) => patch({ defaultModelId: e.target.value || null })}
-                  >
-                    <option value="">— 未设置（自动选首个可用模型）—</option>
-                    {models.map((m) => (
-                      <option key={m.id} value={m.id}>{m.name}（{m.id}）</option>
-                    ))}
-                  </select>
-                  <div className="text-[11px] text-sub">「模型设置」Tab 提供完整角色路由；此处为全局默认（可空）</div>
+                    models={models}
+                    onChange={(id) => patch({ defaultModelId: id || null })}
+                  />
+                  <div className="text-xs text-sub">「模型设置」Tab 提供完整角色路由；此处为全局默认（可空）</div>
                 </div>
               </div>
             )}
@@ -304,29 +411,67 @@ export default function SettingsModal({ onClose, initialTab = "general" }: Props
             {tab === "appearance" && (
               <div className="space-y-6">
                 <SectionTitle title="外观" desc="界面偏好（随配置持久化，跨浏览器一致）" />
+                {/* v3 主题切换（主题方块） */}
+                <div className="space-y-2">
+                  <Label text="主题" />
+                  <div className="flex gap-2">
+                    {([
+                      { id: "system", label: "跟随系统", Icon: MonitorCog },
+                      { id: "dark", label: "深色", Icon: Moon },
+                      { id: "light", label: "浅色", Icon: Sun },
+                    ] as const).map(({ id, label, Icon }) => (
+                      <button
+                        key={id}
+                        className={`flex w-[150px] cursor-pointer flex-col items-center gap-1.5 rounded-2xl border p-3.5 transition-colors ${
+                          theme === id ? "border-line bg-hover text-text" : "border-line text-sub hover:bg-hover/60 hover:text-text"
+                        }`}
+                        onClick={() => {
+                          patch({ appearance: { ...appearance, theme: id } });
+                          useStore.getState().setTheme(id); // 即时生效；保存后随配置持久化
+                        }}
+                      >
+                        <Icon className="h-5 w-5" />
+                        <span className="text-[13px] font-medium">{label}</span>
+                      </button>
+                    ))}
+                  </div>
+                  <div className="text-xs text-sub">深色默认；跟随系统 = 随操作系统深浅自动切换；点击即时生效，保存后持久化</div>
+                </div>
                 <div className="space-y-2">
                   <Label text="界面字号" />
                   <div className="flex gap-2">
                     {(["xs", "sm", "base"] as const).map((f) => (
                       <button
                         key={f}
-                        className={`cursor-pointer rounded-md border px-4 py-1.5 text-xs transition-colors ${
-                          fontSize === f ? "border-accent/60 bg-accent/10 text-accent" : "border-line text-sub hover:border-line hover:bg-muted"
+                        className={`h-7 cursor-pointer rounded-[14px] border px-3 text-[13px] transition-colors ${
+                          fontSize === f ? "border-line bg-hover text-text" : "border-line text-sub hover:bg-hover/60 hover:text-text"
                         }`}
-                        onClick={() => patch({ appearance: { ...appearance, fontSize: f } })}
+                        onClick={() => {
+                          const next = { appearance: { ...appearance, fontSize: f } };
+                          patch(next);
+                          // v3.0 UI 审查：字号即时生效（与主题一致），保存后持久化
+                          useStore.getState().setAppearance({ fontSize: f, streamCursor, theme });
+                        }}
                       >
                         {f === "xs" ? "紧凑" : f === "sm" ? "标准" : "大"}
                       </button>
                     ))}
                   </div>
-                  <div className="text-[11px] text-sub">整体界面缩放（含间距）；实时预览见按钮下方</div>
+                  <div className="text-xs text-sub">整体界面缩放（含间距）；点击即时生效，保存后持久化</div>
                 </div>
-                <div className="flex items-center justify-between rounded-lg border border-line bg-muted/30 p-3">
+                <div className="flex items-center justify-between rounded-2xl border border-line p-3.5">
                   <div>
-                    <div className="text-xs font-medium text-text">流式输出光标</div>
-                    <div className="mt-0.5 text-[11px] text-sub">AI 流式回复时显示绿色闪烁光标</div>
+                    <div className="text-sm leading-[22px] text-text">流式输出光标</div>
+                    <div className="mt-0.5 text-xs leading-[18px] text-sub">AI 流式回复时显示闪烁光标</div>
                   </div>
-                  <Toggle on={streamCursor} onChange={(v) => patch({ appearance: { ...appearance, streamCursor: v } })} />
+                  <Toggle
+                    checked={streamCursor}
+                    onChange={(v) => {
+                      patch({ appearance: { ...appearance, streamCursor: v } });
+                      // v3.0 UI 审查：光标开关即时生效（与主题一致），保存后持久化
+                      useStore.getState().setAppearance({ fontSize, streamCursor: v, theme });
+                    }}
+                  />
                 </div>
               </div>
             )}
@@ -343,6 +488,11 @@ export default function SettingsModal({ onClose, initialTab = "general" }: Props
             {tab === "subagent" && <AgentsPane />}
             {tab === "mcp" && <McpPane />}
             {tab === "hooks" && <HooksPane />}
+            {tab === "browser" && <BrowserPane />}
+            {tab === "memory" && <MemoryPane />}
+            {tab === "stats" && <StatsPane />}
+            {tab === "index" && <IndexPane />}
+            {tab === "schedule" && <SchedulePane />}
 
             {tab === "commands" && (
               <div className="space-y-6">
@@ -353,13 +503,13 @@ export default function SettingsModal({ onClose, initialTab = "general" }: Props
                   <Label text="命令白名单" hint="命中白名单的命令跳过高危命令审批（联网 requireExplicit 永不豁免）；* 匹配任意字符；新建的命令置顶" />
                   {!newCommandOpen ? (
                     <button
-                      className="flex w-full cursor-pointer items-center justify-center gap-1 rounded-lg border border-accent/50 bg-accent/10 py-2 text-xs font-medium text-accent transition-colors hover:bg-accent/20"
+                      className="flex w-full cursor-pointer items-center justify-center gap-1 rounded-xl border border-dashed border-line py-2 text-[13px] text-sub transition-colors hover:border-info/60 hover:text-info"
                       onClick={() => setNewCommandOpen(true)}
                     >
                       <Plus className="h-3.5 w-3.5" />新建命令
                     </button>
                   ) : (
-                    <div className="flex items-center gap-2 rounded-lg border border-accent/40 bg-accent/5 p-2">
+                    <div className="flex items-center gap-2 rounded-xl border border-info/40 bg-info-soft/50 p-2">
                       <input
                         className={`${inputCls} flex-1`}
                         value={newCommandText}
@@ -372,14 +522,14 @@ export default function SettingsModal({ onClose, initialTab = "general" }: Props
                         }}
                       />
                       <button
-                        className="flex h-8 cursor-pointer items-center gap-1 rounded bg-accent px-3 text-xs font-medium text-ink transition-colors hover:bg-accent/85 disabled:opacity-50"
+                        className="flex h-8 cursor-pointer items-center gap-1 rounded-lg bg-primary px-3 text-xs font-medium text-primary-fg transition-colors hover:bg-primary-hover disabled:opacity-50"
                         onClick={submitNewCommand}
                         disabled={!newCommandText.trim()}
                       >
                         <Check className="h-3.5 w-3.5" />添加
                       </button>
                       <button
-                        className="h-8 cursor-pointer rounded border border-line px-3 text-xs text-sub transition-colors hover:bg-muted hover:text-text"
+                        className="h-8 cursor-pointer rounded-lg border border-line px-3 text-xs text-sub transition-colors hover:bg-hover hover:text-text"
                         onClick={() => { setNewCommandOpen(false); setNewCommandText(""); }}
                       >
                         取消
@@ -389,12 +539,16 @@ export default function SettingsModal({ onClose, initialTab = "general" }: Props
                   <div className="space-y-1.5">
                     {allowlist.map((a, i) => (
                       <div key={`${a}-${i}`} className="flex items-center gap-2">
-                        <span className="flex-1 rounded-md border border-line bg-muted px-2 py-1.5 font-mono text-xs text-text">{a}</span>
-                        <button className="cursor-pointer rounded p-1 text-sub hover:bg-muted hover:text-danger" onClick={() => patchPolicy({ commandAllowlist: allowlist.filter((_, j) => j !== i) })} title="删除">
+                        <span className="flex-1 rounded-lg border border-line bg-elevated px-2.5 py-1.5 font-mono text-xs text-text">{a}</span>
+                        <button className="cursor-pointer rounded-lg p-1 text-sub hover:bg-hover hover:text-danger" onClick={() => patchPolicy({ commandAllowlist: allowlist.filter((_, j) => j !== i) })} title="删除">
                           <Trash2 className="h-3.5 w-3.5" />
                         </button>
                       </div>
                     ))}
+                  </div>
+                  {/* v2.10 批 9：内置默认白名单说明（只读命令自动放行，不弹窗） */}
+                  <div className="mt-2 rounded-lg bg-hover/50 px-2.5 py-1.5 text-[11px] leading-4 text-caption">
+                    内置默认放行（无需配置，不可删除）：只读查询（ls/pwd/date/whoami/which/echo 等）、git 只读（status/diff/log/show/branch 等）、版本查询（node --version 等）、包本地查询（npm ls 等）。以上命令执行不再弹窗。
                   </div>
                 </div>
 
@@ -404,16 +558,16 @@ export default function SettingsModal({ onClose, initialTab = "general" }: Props
                     {(Object.keys(MODE_META) as ApprovalMode[]).map((m) => (
                       <button
                         key={m}
-                        className={`cursor-pointer rounded-lg border p-3 text-left transition-colors ${
-                          policyMode === m ? "border-accent/60 bg-accent/10" : "border-line bg-muted/30 hover:border-line hover:bg-muted/60"
+                        className={`cursor-pointer rounded-xl border p-3 text-left transition-colors ${
+                          policyMode === m ? "border-line bg-hover" : "border-line bg-elevated hover:bg-hover/60"
                         }`}
                         onClick={() => patchPolicy({ mode: m })}
                       >
-                        <div className="flex items-center gap-1.5 text-xs font-medium text-text">
-                          <span className={`h-2 w-2 rounded-full ${policyMode === m ? "bg-accent" : "bg-sub/50"}`} />
+                        <div className="flex items-center gap-1.5 text-[13px] font-medium text-text">
+                          <span className={`h-2 w-2 rounded-full ${policyMode === m ? "bg-primary" : "bg-sub/50"}`} />
                           {MODE_META[m].label}
                         </div>
-                        <div className="mt-1 text-[11px] leading-relaxed text-sub">{MODE_META[m].desc}</div>
+                        <div className="mt-1 text-xs leading-5 text-sub">{MODE_META[m].desc}</div>
                       </button>
                     ))}
                   </div>
@@ -440,18 +594,18 @@ export default function SettingsModal({ onClose, initialTab = "general" }: Props
                             <option key={r.value} value={r.value}>{r.label}</option>
                           ))}
                         </select>
-                        <div className="flex items-center gap-1.5 text-[11px] text-sub">
+                        <div className="flex items-center gap-1.5 text-xs text-sub">
                           禁用
-                          <Toggle on={o.disabled === true} onChange={(v) => updateOverride(i, { disabled: v })} />
+                          <Toggle checked={o.disabled === true} onChange={(v) => updateOverride(i, { disabled: v })} />
                         </div>
-                        <button className="cursor-pointer rounded p-1 text-sub hover:bg-muted hover:text-danger" onClick={() => removeOverride(i)} title="删除">
+                        <button className="cursor-pointer rounded-lg p-1 text-sub hover:bg-hover hover:text-danger" onClick={() => removeOverride(i)} title="删除">
                           <Trash2 className="h-3.5 w-3.5" />
                         </button>
                       </div>
                     ))}
                   </div>
                   <button
-                    className="w-full cursor-pointer rounded-lg border border-dashed border-line py-2 text-xs text-sub transition-colors hover:border-accent hover:text-accent"
+                    className="w-full cursor-pointer rounded-xl border border-dashed border-line py-2 text-[13px] text-sub transition-colors hover:border-info/60 hover:text-info"
                     onClick={() => patchPolicy({ toolOverrides: [...overrides, { tool: "" }] })}
                   >
                     <Plus className="mr-1 inline h-3.5 w-3.5" />添加工具覆盖
@@ -468,62 +622,53 @@ export default function SettingsModal({ onClose, initialTab = "general" }: Props
                       return (
                         <button
                           key={m}
-                          className={`w-full cursor-pointer rounded-lg border p-2.5 text-left transition-colors ${
-                            sandboxMode === m ? "border-accent/60 bg-accent/10" : "border-line bg-muted/30 hover:bg-muted/60"
+                          className={`w-full cursor-pointer rounded-xl border p-2.5 text-left transition-colors ${
+                            sandboxMode === m ? "border-line bg-hover" : "border-line bg-elevated hover:bg-hover/60"
                           }`}
                           onClick={() => patch({ sandbox: { ...sandbox, mode: m } })}
                         >
-                          <div className="flex items-center gap-1.5 text-xs font-medium text-text">
-                            <span className={`h-2 w-2 rounded-full ${sandboxMode === m ? "bg-accent" : "bg-sub/50"}`} />
+                          <div className="flex items-center gap-1.5 text-[13px] font-medium text-text">
+                            <span className={`h-2 w-2 rounded-full ${sandboxMode === m ? "bg-primary" : "bg-sub/50"}`} />
                             {SANDBOX_META[m].label}
                             {unavailable && (
-                              <span className="rounded border border-warn/40 bg-warn/10 px-1.5 py-px text-[10px] text-warn">当前机器不可用</span>
+                              <span className="rounded border border-warn/40 bg-warn-soft px-1.5 py-px text-[11px] text-warn">当前机器不可用</span>
                             )}
                           </div>
-                          <div className="mt-0.5 text-[11px] leading-relaxed text-sub">{SANDBOX_META[m].desc}</div>
+                          <div className="mt-0.5 text-xs leading-5 text-sub">{SANDBOX_META[m].desc}</div>
                         </button>
                       );
                     })}
                   </div>
                 </div>
 
-                <div className="rounded-lg border border-line bg-muted/30 p-3 text-[11px] leading-relaxed text-sub">
+                <div className="rounded-xl border border-line bg-elevated p-3 text-xs leading-5 text-sub">
                   <span className="text-text">高危命令红线：</span>
                   rm -rf / del /f / format / mkfs / dd if= 等删除/格式化类命令始终 high 级审批（命令白名单可豁免；
                   联网放行 requireExplicit 任何档位不豁免）；Web 终端（右下角）中的高危命令同样需人工确认。
                 </div>
               </div>
             )}
-
-            {currentItem?.planned && <ComingSoonPane {...PLANNED[tab]} />}
           </div>
-        </div>
 
-        {/* 底部操作条 */}
-        <div className="flex shrink-0 items-center gap-3 border-t border-line px-4 py-2.5">
-          <div className="text-[11px] text-sub/70">
-            写入 ~/.infu/config.json（服务端白名单：仅设置节可写）；插件/技能/MCP/钩子实时生效
-          </div>
-          <div className="ml-auto flex items-center gap-2">
-            {saved && (
-              <span className="flex items-center gap-1 text-xs text-accent">
-                <Check className="h-3.5 w-3.5" />已保存
-              </span>
-            )}
-            <button
-              className="cursor-pointer rounded border border-line px-3 py-1.5 text-xs text-sub transition-colors hover:bg-muted hover:text-text"
-              onClick={onClose}
-            >
-              取消
-            </button>
-            <button
-              className="flex cursor-pointer items-center gap-1.5 rounded bg-accent px-4 py-1.5 text-xs font-medium text-ink transition-colors hover:bg-accent/85 disabled:opacity-50"
-              onClick={save}
-              disabled={saving}
-            >
-              {saving && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
-              保存设置
-            </button>
+          {/* 底部操作条 */}
+          <div className="flex shrink-0 items-center gap-3 border-t border-line px-6 py-3">
+            <div className="min-w-0 flex-1 truncate text-xs text-caption">
+              写入 ~/.infu/config.json（服务端白名单：仅设置节可写）；插件/技能/MCP/钩子实时生效
+            </div>
+            <div className="flex items-center gap-2">
+              {saved && (
+                <span className="flex items-center gap-1 text-xs text-success">
+                  <Check className="h-3.5 w-3.5" />已保存
+                </span>
+              )}
+              <CapsuleButton variant="outline" size="md" onClick={onClose}>
+                取消
+              </CapsuleButton>
+              <CapsuleButton variant="primary" size="md" onClick={save} disabled={saving}>
+                {saving && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
+                保存设置
+              </CapsuleButton>
+            </div>
           </div>
         </div>
       </div>
@@ -534,8 +679,8 @@ export default function SettingsModal({ onClose, initialTab = "general" }: Props
 function SectionTitle({ title, desc }: { title: string; desc: string }) {
   return (
     <div>
-      <div className="text-sm font-semibold text-text">{title}</div>
-      <div className="mt-0.5 text-[11px] text-sub">{desc}</div>
+      <div className="text-[15px] font-medium text-text">{title}</div>
+      <div className="mt-0.5 text-xs leading-[18px] text-sub">{desc}</div>
     </div>
   );
 }
@@ -543,8 +688,8 @@ function SectionTitle({ title, desc }: { title: string; desc: string }) {
 function Label({ text, hint }: { text: string; hint?: string }) {
   return (
     <div className="flex items-baseline gap-2">
-      <span className="text-xs font-medium text-text">{text}</span>
-      {hint && <span className="text-[11px] text-sub/70">{hint}</span>}
+      <span className="text-sm leading-[22px] text-text">{text}</span>
+      {hint && <span className="text-xs text-sub/70">{hint}</span>}
     </div>
   );
 }

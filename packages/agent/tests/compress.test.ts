@@ -5,7 +5,7 @@
  * 覆盖：estimateTokens 粗估 / resolveContextWindow（显式>模型名>provider>兜底）/
  *      compressMessages（触发边界、保留最新、摘要注入、摘要失败降级丢弃）
  */
-import { estimateTokens, compressMessages, serializeHistory } from "../src/agent/context.js";
+import { estimateTokens, compressMessages, serializeHistory, balanceToolPairs } from "../src/agent/context.js";
 import { resolveContextWindow } from "../src/providers/registry.js";
 import type { ChatMessageLike } from "../src/providers/chat.js";
 
@@ -92,6 +92,46 @@ console.log("\n▶ system 保留");
 const sys = await compressMessages(longHistory, 8000, fakeSummarize);
 check("压缩后首条非摘要（若摘要注入）或保留 system", sys.messages[0].role === "user", sys.messages[0].role);
 check("压缩后不含原 system（被摘要替换为 user 摘要）或 system 保留——至少 1 条", sys.messages.length >= 2);
+
+// 6.5. v3.2 摘要过大拒绝（SUMMARY_MUST_BE_SMALLER：摘要 ≥ 被替换内容时降级为直接丢弃，
+// 避免"压缩后反而更占"的无效压缩——估算低估时的保护）
+console.log("\n▶ 摘要过大拒绝");
+const bloatedSummarize = async () => `摘要：${"这是一个非常冗长的摘要内容用来撑大估算量。".repeat(600)}`;
+const bloat = await compressMessages(longHistory, 8000, bloatedSummarize);
+check("摘要过大被拒绝（不注入摘要标记）", !bloat.messages[0].content.includes("此前会话摘要"));
+check("摘要过大降级为丢弃（summary 为空）", bloat.summary === "");
+check("丢弃后仍比原历史短", bloat.messages.length < longHistory.length, String(bloat.messages.length));
+
+// 6.6. v3.2 边界工具对平衡（balanceToolPairs 单元：kept 区首条为 tool 消息时向前找配对 assistant）
+console.log("\n▶ 边界工具对平衡");
+const pairHistory: ChatMessageLike[] = [
+  { role: "system", content: "s" },
+  { role: "user", content: "查看代码" },
+  { role: "assistant", content: "", tool_calls: [{ id: "c2", type: "function", function: { name: "read_file", arguments: "{}" } }] },
+  { role: "tool", tool_call_id: "c2", content: "内容 A" },
+  { role: "user", content: "继续" },
+  { role: "assistant", content: "B" },
+  { role: "assistant", content: "", tool_calls: [{ id: "c3", type: "function", function: { name: "read_file", arguments: "{}" } }] },
+  { role: "tool", tool_call_id: "c3", content: "内容 C" },
+  { role: "user", content: "最后" },
+  { role: "assistant", content: "D" },
+];
+// kept 首条 = tool(c3)（索引 7）→ 前移到配对 assistant（索引 6）
+check("tool 结果在边界 → 前移到配对 assistant", balanceToolPairs(pairHistory, 7) === 6, String(balanceToolPairs(pairHistory, 7)));
+// 边界在普通消息上 → 原样
+check("边界不在 tool 上 → 原样", balanceToolPairs(pairHistory, 8) === 8, String(balanceToolPairs(pairHistory, 8)));
+// kept 首条 = tool(c2)（索引 3）→ 配对 assistant（索引 2）跨 user（索引 4 之后）无碍 → 前移到 2
+check("tool 在边界且配对在 user 前 → 前移配对", balanceToolPairs(pairHistory, 3) === 2, String(balanceToolPairs(pairHistory, 3)));
+// kept 首条 = tool 但配对被 user 消息隔断（构造畸形数据：tool 紧跟在 user 后）→ 保持原边界
+const broken: ChatMessageLike[] = [
+  { role: "system", content: "s" },
+  { role: "user", content: "u" },
+  { role: "tool", tool_call_id: "orphan", content: "内容" },
+  { role: "assistant", content: "B" },
+];
+check("tool 无配对（畸形）→ 保持原边界", balanceToolPairs(broken, 2) === 2, String(balanceToolPairs(broken, 2)));
+// 非 tool 首条 → 原样（含空数组安全）
+check("空消息数组安全", balanceToolPairs([], 0) === 0);
 
 // 7. serializeHistory 截断保护
 console.log("\n▶ serializeHistory");

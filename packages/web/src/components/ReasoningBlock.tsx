@@ -1,36 +1,40 @@
 import { useState } from "react";
-import { Brain, ChevronDown, ChevronRight } from "lucide-react";
+import { Brain } from "lucide-react";
 
-/** 思考过程折叠块（Claude Code 式：默认收起，点击展开完整推理） */
-export default function ReasoningBlock({ text }: { text: string }) {
+/**
+ * 思考过程折叠行（v2.14 批 2 对齐 主流 ReasoningRow）：
+ *  - 折叠态：图标 + 「思考」+ 摘要（第一行；运行中跟随最新一行）+ 扫光
+ *  - 展开态：标题行**摘要消失**（只剩图标 + 标题），全文从下一行开始
+ *  - hover：漂浮放大感（微上浮 + 放大 + 阴影）而非整行选中背景；图标颜色加深
+ */
+export default function ReasoningBlock({ text, running }: { text: string; running?: boolean }) {
   const [open, setOpen] = useState(false);
-  const preview = text.replace(/\s+/g, " ").slice(0, 60);
+  const visible = text.trimEnd();
+  const firstLine = visible.split("\n")[0] ?? "";
+  const lastLine = visible.slice(visible.lastIndexOf("\n") + 1);
+  const summary = running ? lastLine : firstLine;
 
   return (
-    <div className="my-1.5 overflow-hidden rounded-md border border-line/60 bg-muted/30">
+    <div className={`my-1.5 rounded-lg ${running ? "glare-sweep" : ""}`} data-variant="think" data-state={running ? "running" : "ok"}>
       <button
-        className="flex w-full cursor-pointer items-center gap-1.5 px-2.5 py-1.5 text-left transition-colors hover:bg-muted/50"
+        className="group/row flex h-6 w-full cursor-pointer items-center gap-1.5 rounded-lg px-1 text-left transition-colors"
         onClick={() => setOpen(!open)}
       >
-        {open ? (
-          <ChevronDown className="h-3 w-3 shrink-0 text-sub" />
+        <span className="flex h-4 w-4 shrink-0 items-center justify-center text-sub transition-all duration-150 group-hover/row:-translate-y-px group-hover/row:text-info">
+          <Brain className="h-3.5 w-3.5" />
+        </span>
+        <span className="shrink-0 text-[14px] leading-6 text-text transition-all duration-150 group-hover/row:-translate-y-px group-hover/row:text-text">思考</span>
+        <span className="dot-sep mx-2 shrink-0" />
+        {/* v2.14 批 2：展开态摘要消失（全文在下一行）；折叠态保留一行摘要。
+            hover：文字本身飘起（上浮 + 颜色加深）——命名组 group/row 防祖先 group 串扰（多行一起飘） */}
+        {!open ? (
+          <span className={`min-w-0 flex-1 truncate text-[14px] leading-6 transition-all duration-150 group-hover/row:-translate-y-px group-hover/row:text-text ${running ? "text-ongoing" : "text-sub"}`}>{summary}</span>
         ) : (
-          <ChevronRight className="h-3 w-3 shrink-0 text-sub" />
-        )}
-        <Brain className="h-3.5 w-3.5 shrink-0 text-warn" />
-        <span className="text-[11px] font-medium text-sub">思考</span>
-        {!open && (
-          <span className="min-w-0 flex-1 truncate text-[11px] text-sub/70">
-            {preview}
-            {text.length > 60 ? "…" : ""}
-          </span>
-        )}
-        {text.length > 60 && (
-          <span className="shrink-0 text-[10px] text-sub/50">{text.length} 字</span>
+          <span className="min-w-0 flex-1" />
         )}
       </button>
       {open && (
-        <div className="max-h-64 overflow-y-auto border-t border-line/50 px-3 py-2 text-[11px] leading-relaxed text-sub/90 whitespace-pre-wrap">
+        <div className="ml-[22px] max-h-64 overflow-y-auto whitespace-pre-wrap border-l border-line py-1 pl-3 text-[14px] leading-6 text-sub">
           {text}
         </div>
       )}

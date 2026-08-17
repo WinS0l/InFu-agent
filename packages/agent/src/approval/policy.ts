@@ -28,13 +28,45 @@ export const DEFAULT_POLICY: ResolvedApprovalPolicy = {
   commandAllowlist: [],
 };
 
-/** 从配置解析审批策略（缺省节/字段回退默认值） */
+/**
+ * v2.10 批 9 内置默认命令白名单（对齐主流 只读命令自动放行启发式）：
+ * 只读查询 / git 只读 / 版本查询——绝对无副作用的子集（不放 cat/grep 读任意文件类，
+ * 防 root 外信息泄露；不放写/网络/提交/代码执行）。用户配置追加合并（默认项不可删）。
+ */
+export const DEFAULT_COMMAND_ALLOWLIST: string[] = [
+  // 元数据/查询
+  "ls*", "pwd", "date", "whoami", "id", "uname*", "hostname", "which*", "type*", "env", "echo*", "df -h", "du*",
+  // git 只读（分支/配置写操作不放——git branch 创建删除、git config 写 ~/.gitconfig 均走审批）
+  "git status*", "git diff*", "git log*", "git show*", "git branch -a*", "git branch -r*",
+  "git branch --show-current*", "git branch -l*", "git remote -v*", "git ls-files*",
+  "git rev-parse*", "git blame*", "git stash list*", "git tag -l*", "git check-ignore*",
+  "git config --get*", "git config --list*", "git config -l*", "git config --global --get*",
+  // 版本查询（无网络/无副作用）
+  "node --version*", "npm --version*", "pnpm --version*", "yarn --version*", "python --version*",
+  "python3 --version*", "tsc --version*", "go version*", "cargo --version*", "rustc --version*", "java -version*",
+  // 包本地查询（npm view 等联网查询仍被断网门禁拦截，不放）
+  // v3.0 审计修复（S4）：npm run* 移除——`npm run <script>` 执行 package.json 任意脚本
+  // （脚本可联网/任意代码），不再免审批；仅保留 `npm run`（无参数 = 只列出脚本，无副作用）
+  "npm ls*", "pnpm ls*", "yarn list*", "pip list*", "pip show*", "go list*", "npm run",
+];
+
+/**
+ * v2.13：shell 组合符检测（白名单放行的前提 = 单条只读命令）——
+ * `git status && rm -rf x` 命中 git status* 白名单但实际执行 rm：组合符让"放行这条命令"
+ * 变成"放行命令及其链式结果"，超出信任面 → 含组合符退回正常审批。
+ */
+const SHELL_COMBINATORS = /&&|\|\||;|\||>|<|`|\$\(|\n/;
+export function hasShellCombinators(command: string): boolean {
+  return SHELL_COMBINATORS.test(command);
+}
+
+/** 从配置解析审批策略（缺省节/字段回退默认值；v2.10 默认白名单与用户配置合并） */
 export function resolveApprovalPolicy(cfg: InfuConfig | null | undefined): ResolvedApprovalPolicy {
   const p = cfg?.approvalPolicy;
   return {
     mode: p?.mode ?? DEFAULT_POLICY.mode,
     toolOverrides: p?.toolOverrides ?? [],
-    commandAllowlist: p?.commandAllowlist ?? [],
+    commandAllowlist: [...DEFAULT_COMMAND_ALLOWLIST, ...(p?.commandAllowlist ?? [])],
   };
 }
 

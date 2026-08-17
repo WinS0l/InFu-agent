@@ -7,7 +7,7 @@
  *
  * 安全边界：全局记忆位于 ~/.infu（受 isProtectedPath 写保护）——本模块是唯一合法
  * 写入通道。工具层白名单：topic 必须 ^[a-zA-Z0-9_-]{1,64}$（无路径穿越/后缀逃逸）。
- * 敏感信息检测（v2.6.1，Codex secret-redactor 轻量版）：写入前扫描 API key/token/
+ * 敏感信息检测（v2.6.1，敏感凭据检测）：写入前扫描 API key/token/
  * 私钥/连接串等模式，命中即拒绝——记忆文件（可能 git 版本化）不允许进凭据。
  */
 
@@ -20,7 +20,7 @@ export type MemoryScope = "project" | "global";
 /** 主题名白名单（防路径穿越与非法字符；同时约束长度） */
 export const TOPIC_RE = /^[a-zA-Z0-9_-]{1,64}$/;
 
-/** 敏感凭据模式（Codex secret-redactor 对齐；命中即拒绝写入记忆） */
+/** 敏感凭据模式（敏感凭据检测；命中即拒绝写入记忆） */
 const SECRET_PATTERNS: RegExp[] = [
   /\b(sk|sk-[A-Za-z0-9])-[A-Za-z0-9_-]{16,}\b/, // OpenAI/DeepSeek 风格 key
   /\bAKIA[A-Z0-9]{16}\b/, // AWS access key
@@ -36,7 +36,7 @@ const SECRET_PATTERNS: RegExp[] = [
 
 /**
  * 检测内容是否含敏感凭据；返回命中描述或 null（安全）。
- * 用于 memory_write 写入前拦截（Codex secret-redactor 轻量版）。
+ * 用于 memory_write 写入前拦截（敏感凭据检测）。
  */
 export function detectSensitiveContent(content: string): string | null {
   for (const re of SECRET_PATTERNS) {
@@ -138,13 +138,27 @@ export function readMemory(scope: MemoryScope, topic: string | undefined, root: 
     return { text: `主题「${topic.trim()}」不存在（可用 memory_write 创建）`, topics };
   }
   const content = fs.readFileSync(p, "utf-8");
+  // v3.0 批 11 记忆剪枝（AutoMem 200 行模式）：>200 行自动剪枝——保留头部（约定/结构）
+  // + 尾部（最近记录，价值最高），中间折叠提示
+  const lines = content.split("\n");
+  const PRUNE_AT = 200;
+  const KEEP_HEAD = 150;
+  const KEEP_TAIL = 50;
+  const pruned = lines.length > PRUNE_AT;
+  let shown = content;
+  if (pruned) {
+    shown =
+      lines.slice(0, KEEP_HEAD).join("\n") +
+      `\n\n<!-- ⚠️ 记忆剪枝：文件 ${lines.length} 行 > ${PRUNE_AT} 行，中间 ${lines.length - KEEP_HEAD - KEEP_TAIL} 行已折叠（保留头部约定 + 尾部最近记录）。如需精简请用 memory_write replace 重写 -->\n\n` +
+      lines.slice(-KEEP_TAIL).join("\n");
+  }
   return {
-    text: `记忆（${scope === "global" ? "全局" : "项目"} · ${topic.trim()}，${content.length} 字符）${content.length > MEMORY_READ_LIMIT ? "（已截断）" : ""}：\n${content.slice(0, MEMORY_READ_LIMIT)}`,
+    text: `记忆（${scope === "global" ? "全局" : "项目"} · ${topic.trim()}，${content.length} 字符${pruned ? `，已剪枝（原 ${lines.length} 行 > ${PRUNE_AT} 行）` : ""}）${content.length > MEMORY_READ_LIMIT ? "（已截断）" : ""}：\n${shown.slice(0, MEMORY_READ_LIMIT)}`,
     topics,
   };
 }
 
-/** 写入记忆（append=追加一条带时间戳的记录；replace=整体覆盖）。写入前做敏感凭据检测（Codex 模式）。 */
+/** 写入记忆（append=追加一条带时间戳的记录；replace=整体覆盖）。写入前做敏感凭据检测（敏感检测）。 */
 export function writeMemory(
   scope: MemoryScope,
   topic: string,

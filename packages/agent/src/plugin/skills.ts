@@ -16,22 +16,41 @@ import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import type { InfuConfig, SkillMeta } from "@infu/shared";
 
+/** 插件自带技能目录（v2.7：loadPlugins 注册，listSkills/use_skill 统一读取；全局配置级，模块级即可） */
+let pluginSkillDirs: string[] = [];
+export function registerPluginSkillDirs(dirs: string[]): void {
+  pluginSkillDirs = dirs.filter((d) => typeof d === "string" && d);
+}
+
 export interface SkillFrontmatter {
   name?: string;
   description?: string;
   [k: string]: unknown;
 }
 
-/** 解析 SKILL.md frontmatter（--- 包裹的 YAML 子集：key: value / 引号包裹）；解析失败返回 null */
+/** 解析 SKILL.md frontmatter（--- 包裹的 YAML 子集：key: value / 引号包裹 / 折叠块 > / 字面块 |）；解析失败返回 null */
 export function parseSkillFrontmatter(content: string): SkillFrontmatter | null {
-  const m = content.match(/^---\r?\n([\s\S]*?)\r?\n---/);
+  // 容忍 BOM（部分编辑器/工具写 UTF-8 带 BOM，导致 ^--- 失配）
+  const m = content.match(/^\uFEFF?---\r?\n([\s\S]*?)\r?\n---/);
   if (!m) return null;
+  const lines = m[1].split(/\r?\n/);
   const fm: SkillFrontmatter = {};
-  for (const line of m[1].split(/\r?\n/)) {
-    const kv = line.match(/^([A-Za-z0-9_-]+)\s*:\s*(.*)$/);
+  for (let i = 0; i < lines.length; i++) {
+    const kv = lines[i].match(/^([A-Za-z0-9_-]+)\s*:\s*(.*)$/);
     if (!kv) continue;
     const key = kv[1];
     let val: string = kv[2].trim();
+    // YAML 块标量（> 折叠 / | 字面）：后续缩进行拼入（Anthropic 官方 document-skills 等用此写法）
+    if (val === ">" || val === "|") {
+      const parts: string[] = [];
+      i++;
+      while (i < lines.length && /^\s+/.test(lines[i])) {
+        parts.push(lines[i].trim());
+        i++;
+      }
+      i--; // 回退，外层 i++ 指向下一个未消费行
+      val = parts.join(" ");
+    }
     // 引号包裹去除（单/双引号）
     if ((val.startsWith('"') && val.endsWith('"')) || (val.startsWith("'") && val.endsWith("'"))) {
       val = val.slice(1, -1);
@@ -69,7 +88,7 @@ function collectDir(dir: string, level: SkillMeta["level"], out: Map<string, Ski
   }
 }
 
-/** 列出全部可用 skill（用户级 > 项目级 > config 显式；同名首个胜出） */
+/** 列出全部可用 skill（用户级 > 项目级 > config 显式 > 插件自带 > 内置；同名首个胜出） */
 export function listSkills(cfg: InfuConfig | null, root: string): SkillMeta[] {
   const out = new Map<string, SkillMeta>();
   // 1. 用户级 ~/.infu/skills/
@@ -81,6 +100,11 @@ export function listSkills(cfg: InfuConfig | null, root: string): SkillMeta[] {
     const dir = s.path ? resolve(s.path) : findSkillDir(s.name, root);
     if (!dir) continue;
     const meta = readSkillMeta(dir, "config");
+    if (meta && !out.has(meta.name)) out.set(meta.name, meta);
+  }
+  // 4. 插件自带技能（v2.7：def.skills 目录；level=plugin；官方 docx/pdf/pptx/skill-creator/control-browser/web-gui-tester 均由此挂载）
+  for (const sd of pluginSkillDirs ?? []) {
+    const meta = readSkillMeta(sd, "plugin");
     if (meta && !out.has(meta.name)) out.set(meta.name, meta);
   }
   return [...out.values()];

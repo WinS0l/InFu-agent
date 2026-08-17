@@ -34,8 +34,12 @@ import { loadPlugins, withPlugins } from "./plugin/index.js";
 import { listSkills, buildSkillsPrompt } from "./plugin/skills.js";
 import { listAgents, buildAgentsPrompt } from "./agent/agents.js";
 import { buildInfuPrompt, buildMemoryPrompt, findInstructionFile, parseScopeRules, sedimentTask } from "./memory/index.js";
+import { autoNameSession } from "./session-naming.js";
 import { pluginCli, skillCli } from "./plugin/cli.js";
 import { agentCli } from "./agent/agent-cli.js";
+import { abortBackgroundAgentsByDepth } from "./agent/subagent.js";
+import { abortJobsByDepth } from "./tools/jobs.js";
+import { closeShellSession } from "./tools/persistent-shell.js";
 import type { ChatMessageLike } from "./providers/chat.js";
 
 const require = createRequire(import.meta.url);
@@ -84,6 +88,10 @@ function printEvent(e: AgentEvent, prefix = "") {
       break;
     case "subagent-done":
       console.error(C.green(`\n${P}◇ 子智能体完成（${e.steps} 步 / ${e.toolCount} 次工具）：${e.text.slice(0, 200).replace(/\n/g, " ")}`));
+      break;
+    case "ask-user":
+      console.error(C.cyan(`\n${P}❓ Agent 提问：${e.question}`));
+      if (e.options?.length) console.error(C.dim(`   选项：${e.options.join(" / ")}（可输入编号或自定义回答，回车跳过）`));
       break;
   }
 }
@@ -365,6 +373,54 @@ async function main() {
     return;
   }
 
+  // ── v3.0 批 11 定时任务（cron 调度 + 无人值守）──
+  if (args[0] === "schedule") {
+    const cmd = args[1] ?? "list";
+    const { addSchedule, listSchedules, removeSchedule, setScheduleEnabled } = await import("./schedule.js");
+    if (cmd === "add") {
+      // infu schedule add "<cron>" "<prompt>" [--root <path>]
+      const cron = args[2];
+      const prompt = args[3];
+      if (!cron || !prompt) {
+        console.error(C.red('用法：infu schedule add "<cron>" "<任务描述>" [--root <路径>]（cron 5 字段：分 时 日 月 周，如 */30 * * * *）'));
+        process.exit(1);
+      }
+      const root = args.includes("--root") ? args[args.indexOf("--root") + 1] : process.cwd();
+      const r = addSchedule(cron, prompt, root);
+      console.log(r.ok ? C.green(r.message) : C.red(r.message));
+      return;
+    }
+    if (cmd === "list") {
+      const list = listSchedules();
+      if (!list.length) { console.log('暂无定时任务（infu schedule add "*/30 * * * *" "任务描述"）'); return; }
+      console.log(C.cyan(`
+═══ 定时任务（${list.length}）═══`));
+      list.forEach((e) => {
+        const st = e.enabled ? C.green("启用") : C.yellow("暂停");
+        console.log(` ${e.id} [${st}] cron="${e.cron}" 下次 ${e.nextRun ? new Date(e.nextRun).toLocaleString("zh-CN") : "—"}`);
+        console.log(`     任务：${e.prompt.slice(0, 60)}`);
+        console.log(`     项目：${e.root} 上次：${e.lastRun ? new Date(e.lastRun).toLocaleString("zh-CN") + " " + (e.lastStatus ?? "") : "—"}`);
+      });
+      return;
+    }
+    if (cmd === "remove") {
+      const id = args[2];
+      if (!id) { console.error(C.red("用法：infu schedule remove <id>")); process.exit(1); }
+      const r = removeSchedule(id);
+      console.log(r.ok ? C.green(r.message) : C.red(r.message));
+      return;
+    }
+    if (cmd === "pause" || cmd === "resume") {
+      const id = args[2];
+      if (!id) { console.error(C.red(`用法：infu schedule ${cmd} <id>`)); process.exit(1); }
+      const r = setScheduleEnabled(id, cmd === "resume");
+      console.log(r.ok ? C.green(r.message) : C.red(r.message));
+      return;
+    }
+    console.error(C.red("用法：infu schedule add/list/remove/pause/resume"));
+    return;
+  }
+
   const getArg = (name: string) => {
     const i = args.indexOf(name);
     return i >= 0 ? args[i + 1] : undefined;
@@ -375,7 +431,7 @@ async function main() {
   // 任务 prompt 提取：跳过全部参数（带值参数连同其值，开关单独跳过）——顺带修复参数值混入 prompt 的既有问题
   const VALUE_ARGS = new Set(["--root", "--model", "--fallback-model", "--max-steps", "--template", "--session", "--thinking",
     "--planner-model", "--executor-model", "--reviewer-model"]);
-  const FLAG_ONLY = new Set(["-y", "--yes", "--no-plan-approval"]);
+  const FLAG_ONLY = new Set(["-y", "--yes", "--no-plan-approval", "--orchestrate"]);
   let prompt = "";
   for (let i = 0; i < args.length; i++) {
     const a = args[i];
@@ -397,7 +453,10 @@ async function main() {
   const thinkingLevel = parseInt(getArg("--thinking") || "", 10) || undefined;
   const autoApprove = args.includes("-y") || args.includes("--yes");
 
-  const planApproval = !args.includes("--no-plan-approval");
+  // v2.6 主流式流程：默认单一循环直接执行；--orchestrate 显式启用 Planner→确认→Executor→Reviewer
+  // （计划确认默认只在编排模式开启；--no-plan-approval 强制关闭）
+  const orchestrate = args.includes("--orchestrate");
+  const planApproval = orchestrate && !args.includes("--no-plan-approval");
   const templateId = getArg("--template");
 
   // 模板任务：--template <id> 用模板 prompt 代替手动输入（字段用默认值）
@@ -430,12 +489,13 @@ async function main() {
   infu "任务" --planner-model <id> --executor-model <id> --reviewer-model <id>  按角色指定模型（规划/执行/审查）
   infu "任务" --thinking <1-4>  思考级别（按模型实际级别数自动映射；1 快速 ~ 4 极限）
 
-任务流程（Planner 规划 → 计划确认 → Executor 执行 → Reviewer 审查）：
+任务流程（v2.6 主流式：默认单一循环直接执行，模型自主规划/建清单/干活）：
   infu --template init-project  模板任务：初始化新项目
   infu --template fix-tests     模板任务：修复测试失败
   infu --template analyze       模板任务：分析项目
   infu --template add-feature   模板任务：添加新功能
-  infu "任务" --no-plan-approval 不要求确认计划，直接执行
+  infu "任务" --orchestrate     显式启用分层编排（Planner 规划 → 计划确认 → Executor → Reviewer）
+  infu "任务" --orchestrate --no-plan-approval  编排但不弹计划确认
 
 示例：
   infu config
@@ -494,7 +554,6 @@ async function main() {
       title: prompt.slice(0, 40),
       root,
       modelId,
-      mode: "orchestrate",
     });
   }
   store.appendEvent(sessionId, { type: "user-message", text: prompt });
@@ -555,7 +614,7 @@ async function main() {
     .map((p) => `${p}=${roleModelConfigs[p].modelConfig.model}`);
   if (roleHints.length) console.error(C.dim(`角色模型: ${roleHints.join(" · ")}`));
   console.error(C.dim(`项目: ${root}`));
-  console.error(C.dim(`审批: ${autoApprove ? "自动批准" : "交互确认"}${planApproval ? " | 计划需确认" : " | 计划不确认"}${sessionId ? " | 会话已记录" : ""}`));
+  console.error(C.dim(`流程: ${orchestrate ? "分层编排" : "直接执行（主流式）"}${orchestrate ? (planApproval ? " | 计划需确认" : " | 计划不确认") : ""}${sessionId ? " | 会话已记录" : ""}`));
   console.error(C.dim(`工具: ${Object.keys(TOOLS).length} 个\n`));
 
   const common = {
@@ -581,11 +640,25 @@ async function main() {
     return { plan: undefined, feedback: feedback.trim() || "批准执行" };
   };
 
+  // v2.6 收尾：执行中提问（ask_user 工具）——交互输入（回车=跳过/空回答）；v2.10 支持结构化选项
+  const cliAskUser = async (question: string, options?: Array<string | { label: string; desc?: string; recommended?: boolean }>) => {
+    const labels = (options ?? []).map((o) => (typeof o === "string" ? o : o.label));
+    console.error(C.cyan(`\n❓ Agent 提问：${question}`));
+    if (labels.length) console.error(C.dim(`  选项：${labels.map((o, i) => `${i + 1}. ${o}`).join("  ")}（输入编号/文本，回车跳过）`));
+    const answer = await ask("你的回答");
+    if (!answer.trim()) return "";
+    const n = Number(answer.trim());
+    if (Number.isInteger(n) && n >= 1 && n <= labels.length) return labels[n - 1];
+    return answer.trim();
+  };
+
   runOrchestratedTask({
     ...common,
     planApproval,
+    orchestrate,
     templateId,
     confirmPlan: cliConfirmPlan,
+    askUser: cliAskUser,
     abortSignal: abortController.signal,
     // v2.3：MCP 工具 + 插件工具只进 Executor（Planner/Reviewer 架构级只读不暴露）；
     // 插件钩子随 Executor 生效；skill 描述注入 Executor system；
@@ -604,13 +677,28 @@ async function main() {
     .then((r) => {
       process.stdout.write("\n" + r.text + "\n");
       finishSession("done");
+      // v3 自动命名（fire-and-forget；模型生成简短标题，失败保留原文截断）
+      if (sessionId && config) {
+        const modelCfg =
+          (modelId ? config.models.find((m) => m.id === modelId) : undefined) ||
+          config.models.find((m) => m.apiKey) ||
+          config.models[0];
+        if (modelCfg) autoNameSession(store, sessionId, prompt, r.text, modelCfg).catch(() => {});
+      }
     })
     .catch((e) => {
       finishSession("error");
       console.error(C.red(`\n✗ Agent 运行失败: ${e.message}`));
       process.exit(1);
     })
-    .finally(() => mcp?.close());
+    .finally(() => {
+      mcp?.close();
+      // v2.11：父任务结束 → 中止会话内全部后台子智能体与后台任务（v2.13：depth -1 = 全深度）
+      try { abortBackgroundAgentsByDepth(sessionId, -1); } catch { /* 忽略 */ }
+      try { abortJobsByDepth(sessionId, -1); } catch { /* 忽略 */ }
+      // v3.0 审计修复（S3）：任务结束关闭持久 shell 会话
+      try { closeShellSession(sessionId); } catch { /* 忽略 */ }
+    });
 }
 
 main().catch((e) => {

@@ -49,7 +49,7 @@ export async function loadMcpTools(
         usedNames.add(name);
         tools.push(mcpToolToDef(cfg, conn, t, name));
       }
-      emit({ type: "text", text: `MCP 服务器「${cfg.name}」已连接，注入 ${list.length} 个工具` });
+      // 成功连接不再 emit text（v3：避免每任务在对话流出现环境噪音；模型经工具列表感知环境）
     } catch (e) {
       if (conn) {
         try {

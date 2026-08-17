@@ -6,7 +6,7 @@
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "scripts": {
-    "build": "tsc -p tsconfig.json",
+    "build": "tsc -p tsconfig.json && node -e \"const fs=require('fs');fs.cpSync('src/plugin/browser/skills','dist/plugin/browser/skills',{recursive:true});fs.cpSync('skills','dist/skills',{recursive:true});\"",
     "dev": "tsx watch src/cli.ts",
     "cli": "tsx src/cli.ts",
     "start": "tsx src/server.ts"
@@ -21,13 +21,18 @@
     "@infu/shared": "*",
     "@modelcontextprotocol/sdk": "^1.30.0",
     "ai": "^6.0.159",
+    "fast-glob": "^3.3.3",
     "hono": "^4.12.12",
     "node-pty": "^1.1.0",
+    "playwright-core": "^1.62.1",
     "zod": "^4.0.0"
   },
   "devDependencies": {
     "@types/node": "^25.0.0",
     "tsx": "^4.19.0",
     "typescript": "^5.5.0"
-  }
+  },
+  "files": [
+    "dist/**"
+  ]
 }

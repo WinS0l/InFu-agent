@@ -1,7 +1,7 @@
 /**
  * InFu 计划反馈意图判断（v2.3）— 用户对执行计划的自由文本回复 → 结构化三态
  *
- * 生态共识（Claude Code ExitPlanMode approve/request-changes/reject、ZCode 拒绝=中止）：
+ * 生态共识（主流 ExitPlanMode approve/request-changes/reject、InFu 拒绝=中止）：
  * 用户反馈是「执行 / 修订 / 中止」的结构化意图，不是字符串。用户说"先停下来先不做"
  * 必须中止任务（不再进入执行与审查），而不是把文本当指令注入执行。
  *

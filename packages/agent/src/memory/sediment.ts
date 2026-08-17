@@ -4,7 +4,7 @@
  * 每次会话结束（交付报告生成后）把报告原文 + 结构化元数据归档到
  * <root>/.infu/history/YYYY-MM-DD.md（按日期归档，一天多会话追加条目）。
  *
- * 定位（用户拍板 + 主流对齐：Claude Auto Memory 会话中主动写 / Codex 会话后后台
+ * 定位（用户拍板 + 主流对齐：会话中主动写 / 会话后后台
  * 提炼的即时简化版）：本模块做「发生过的」事实归档（只增不改）；
  * 「下次该怎么干的」稳定知识由 Agent 中途经 memory_write 记录（system 已注入引导），
  * 两路配合 = 记忆四层（规则 INFU.md / 全局 / 项目 / 历史）+ 会话历史。
@@ -13,6 +13,8 @@
 import fs from "node:fs";
 import path from "node:path";
 import type { RunResult } from "../agent/loop.js";
+import { loadConfig } from "../providers/registry.js";
+import { findProjectByRoot } from "../projects.js";
 
 export interface SedimentInput {
   /** 项目根目录 */
@@ -22,7 +24,6 @@ export interface SedimentInput {
   /** 执行结果（RunResult：text/steps/toolCount/approvals/toolLogs） */
   result: Pick<RunResult, "text" | "steps" | "toolCount" | "approvals" | "toolLogs">;
   /** 交付报告全文（buildReport 输出；直接归档不加工） */
-  report: string;
   /** 审查意见（可选） */
   reviewText?: string;
   /** 模型标签（展示用；如 provider/model） */
@@ -51,9 +52,18 @@ function cleanTitle(prompt: string): string {
  * 会话沉淀：追加一条历史条目到 <root>/.infu/history/YYYY-MM-DD.md。
  * 幂等不做去重——同一会话多次调用（理论不会）会产生多条，可接受。
  * 返回归档路径与条目摘要（供 memory-sediment 事件落库审计）。
+ *
+ * v3：root = 默认会话根目录且未注册为项目时**跳过沉淀**（只读容器——
+ * 自由会话不产生项目历史，与工具层写保护一致；返回空 path 由调用方识别）。
  */
 export function sedimentTask(input: SedimentInput): { path: string; entry: string } {
-  const { root, prompt, result, report, reviewText, modelLabel } = input;
+  const { root, prompt, result, reviewText, modelLabel } = input;
+  // v3 只读容器跳过：默认会话根目录（非项目）不沉淀历史
+  const cfg = loadConfig();
+  const sessionRoot = cfg?.general?.defaultRoot;
+  if (sessionRoot && path.resolve(root) === path.resolve(sessionRoot) && !findProjectByRoot(root)) {
+    return { path: "", entry: "" };
+  }
   const now = new Date();
   const dateStr = now.toISOString().slice(0, 10);
   const timeStr = now.toTimeString().slice(0, 5);
@@ -78,8 +88,7 @@ export function sedimentTask(input: SedimentInput): { path: string; entry: strin
     meta +
     `\n\n**文件改动 / 验证概览**：${changesBlock}\n` +
     `**执行摘要**：\n${(result.text || "（无摘要）").slice(0, 2000)}\n\n` +
-    `**交付报告**：\n${report}\n` +
-    (reviewText ? `\n**审查意见**：\n${reviewText}\n` : "");
+    (reviewText ? `**审查意见**：\n${reviewText}\n` : "");
 
   fs.appendFileSync(file, entry + "\n\n---\n\n", "utf-8");
   return { path: file, entry: `归档到 ${path.relative(root, file)}（${dateStr} ${timeStr} ｜ ${cleanTitle(prompt)}）` };

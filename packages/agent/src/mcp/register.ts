@@ -1,7 +1,7 @@
 /**
  * MCP 服务器自注册（v2.3 增强）— Agent 自主注册 MCP 给 InFu 自己用
  *
- * 参考 opencode 生态的「插件 config hook 自注册」模式（config.mcp["x"] = {...}），
+ * 参考 主流 生态的「插件 config hook 自注册」模式（config.mcp["x"] = {...}），
  * 映射到 InFu 的「受控工具 + 人工审批」模型：
  *  - 白名单：只允许追加 mcpServers 节；models/providers/roles/apiKey 等其余
  *    配置字段不可达（防自我提权/自我投毒——Agent 不能改自己的模型/凭据/角色）

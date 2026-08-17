@@ -18,5 +18,10 @@
   },
   "devDependencies": {
     "@napi-rs/cli": "^3.0.0"
-  }
+  },
+  "files": [
+    "index.node",
+    "index.d.ts",
+    "scripts/**"
+  ]
 }

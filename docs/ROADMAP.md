@@ -27,6 +27,49 @@
 - **验证**：`npm test` 的 win-sandbox-net 自测 21 项（检测/拦截/放行/审计）+ 文档 docs/SANDBOX.md「三·六」
 - **OS 级断网的正确姿势**：装 Docker Desktop 后 `INFU_SANDBOX=docker`（L2 自带 `--network none`）；云版落地后 microVM
 
+## 下一阶段：桌面端（用户 2026-08-15 拍板）
+
+### ✅ 桌面端 InFu【批 1 完成 2026-08-15：Electron 壳 + 嵌入式真浏览器】
+- **目标**：InFu 打包为桌面应用（单机个人场景完整闭环——Web 版无法做的：嵌入式真浏览器、系统级集成、开机自启等）
+- ✅ **选型定稿（Electron）**：本机实证 ZCode Desktop 3.7.6 为 electron-builder 生态（current.blockmap + NSIS + updater 目录指纹）；opencode 桌面版同栈；Node 后端零改造宿主；嵌入式浏览器 = connectOverCDP 连接应用自身 Chromium（Agent 页面即用户页面）
+- ✅ **桌面壳（新 packages/desktop/）**：主进程 ESM 宿主 agent 后端（`startServer({staticDir, onListening})` 同进程 + 同端口静态托管 web dist + CORS + 端口回传；前端相对路径 fetch 零改动）；无边框自定义标题栏（titleBarStyle hidden + titleBarOverlay：系统拖拽/贴边/双击保留，按钮色随主题联动）；托盘仅退出入口；单实例锁；窗口状态持久化（~/.infu/desktop-window.json）；dev 架构（vite 5199 错开常驻 + `?infuAgentPort=` query 绝对地址 + CORS）
+- ✅ **嵌入式真浏览器（右侧栏「浏览器」tab 落地，ZCode 同款）**：WebContentsView（地址栏/前进后退/刷新/DevTools/导航白名单/window.open 视图内导航/rect ResizeObserver 实时上报）；**Agent 驱动实时跟随**——browser-use runtime 桌面模式 connectOverCDP 连应用自身 CDP（9222 占用自动递增），页识别 globalThis 标记 getURL 精确匹配 → data: 起始页 → 非主窗口页兜底；实测真实 Agent 聊天任务驱动嵌入式浏览器实时导航
+- ✅ **本机加固适配**（Windows 25H2）：sandbox:true 渲染进程无法启动 → sandbox:false + contextIsolation；GPU 子进程反复 0x80000003 崩溃 → disableHardwareAcceleration + in-process-gpu + crash-limit + ready-to-show 2s 兜底（in-process-gpu 须配 sandbox:false）
+- ✅ 验证：npm test 全绿（修复 session-store 断言未同步 v2.14 批 10）+ CDP 全链路 + playwright 驱动（导航/搜索交互/截图）+ 真实 Agent e2e 实时跟随
+- ✅ **嵌入式浏览器对齐 ZCode 布局（2026-08-16 批 3）**：多 tab（WebContentsView tabs Map）+ 面板内 tab 条/工具栏（地址栏过滤 data:、📄 尺寸预设 375×667 等 + 适应窗口、⋯ 更多 = 默认浏览器打开/DevTools）+ 起始页美化 + 菜单让位协议（WebContentsView 原生层盖 DOM 菜单 → 菜单打开时视图让位 200px）+ webview 标签 PoC 失败（render-process-gone）保留 WebContentsView + viewport 走 playwright CDPSession（Electron debugger.attach 静默失败）；实测全链路 + npm test 26 套件全绿；遗留：编号区与 AX 树错位
+- ✅ **browser-use 对齐 ZCode 0.2.1（2026-08-15，用户拍板方案 1+2+3）**：AI 可访问性树 snapshot（CDP Accessibility.getFullAXTree，Codex domSnapshot 同技术）+ 新工具 browser_eval（页面 JS 执行）+ control-browser 技能同步 snapshot→locator→act 工作流；顺手修复 5 个 bug（builtin 插件路径 dist 模式失效/skills 复制/connectOverCDP close 关整个应用/页识别漏 dev 主窗口/eval 执行）——详见 AGENTS.md
+- ✅ **架构定稿：webview 元素 + 主进程 CDP 桥（2026-08-16 批 8，用户拍板「不是浏览器覆盖 infu，而是 infu 覆盖浏览器」+「参考 ZCode 宿主注入」）**：① UI 用 `<webview>` 元素（DOM 层叠：圆角/阴影/菜单自然盖在浏览器之上，即「infu 覆盖浏览器」；每个 tab 一个元素，自由尺寸 = 元素 CSS，无需主进程 bounds）——命门验证：webview guest 渲染进程在本机加固环境崩溃，**必须 `webpreferences="sandbox=no"`**（默认 sandbox 渲染起不来 = 批 4-6 render-process-gone 根源）；② **Agent 控制弃用 playwright connectOverCDP**（初始 target 列表过滤 webview 类型 = tab 不可见/空白堆积/输入污染/失败循环的灾难根源；连 remote-debugging-port 一并移除）→ 改**主进程 CDP 桥**：每个 webview 的 guest webContents `debugger.attach("1.3")` + sendCommand 注入 `__infuCdpSend/__infuCdpOn`（Agent 后端与主进程同进程直接调桥，无端口无 target 发现——对齐 ZCode「宿主持有浏览器对象暴露给 Agent」）；③ **修浏览器关闭**：BrowserPanel 改为 RightRail 常驻（webview 元素从 DOM 移除即销毁 guest → 面板只能显隐不能卸载），loadSession 清 rightTabs 不再销毁，只有用户显式关闭浏览器 tab（× → browserCloseAll）才销毁——批 7 遗留「会话切换/任务结束浏览器被杀」根治；④ **修 browser_eval**（`Runtime.evaluate replMode`：语句/表达式/函数三态通吃——旧实现只接受函数表达式，`const x=…` SyntaxError、表达式 `fn is not a function` = Bing 任务 6 连败根因）；⑤ **修 browser_fill**（页面内多级匹配 CSS→placeholder/aria-label/name/title→label→可见兜底——旧实现只有 CSS/text，「输入搜索词」找不到）；⑥ **修编号点击**（click 用与展示同一份 snapshot 的 indexMap——动态页面两次快照编号漂移致 describeNode nodeId=0）；⑦ 顺手修 server 静态托管参数反序 bug（isPathInside(root, abs) 传反 → 生产模式 404，批 7 生产模式从未真正工作过的隐藏 bug）；⑧ 实测：真实 Agent 任务 bing 搜索/多 tab 新建切换/browser_tabs 复用/example.com 读取全通，跨会话浏览器 tab 保留、无空白堆积；npm test 33 套件全绿。安全边界：Agent 端 browser_close 语义改为「绝不主动关闭」（ZCode 语义：tab 除非显式 close 永不关闭）
+- ✅ **批 2 完成（2026-08-16 批 10-12）**：electron-builder NSIS 打包（InFu Setup 109MB，已实测全链路）+ **computer-use**（screen_capture/click/type + vision 底座 visionQueue/read_image + Web UI 面板）+ **定时任务**（schedule CLI + Web UI + 无人值守审批语义）+ **语义检索/持久 shell/LSP/记忆剪枝**（批 11）。**剩余**：⏳ 正式图标（用户提供后替换 build/icon.png 重新打包）。**明确不做**：开机自启（用户拍板「不许给用户加开机自启」）
+- ✅ **v3.0 UI 审查批 2：三需求（2026-08-16，用户拍板 + 反馈修正两轮）**：① 代码/审查按 root 可用性——自由会话（root 空）代码按钮 disabled+提示、CodeView/ReviewPane 空态、后端会话落库不写回隐式 cwd；② 折叠 rail 分隔线（让位区 28px+py-3=40px 与聊天 header 线水平对齐，实测 y=39）；③ 统计页双图表——model-call 事件（每次模型调用落库：时间/模型/prompt/completion/cache）+ getStats 真实聚合（modelUsage、dailyTrend 日期=done∪model-call + byModel 按天×模型）+ StatsPane 上下布局（上活跃热力图 = GitHub 式：横向星期 7 列/纵向周行+行首月份/左侧色阶图例/自适应缩放；下按天 Token 趋势横向条形图「（模型色标区分）」+ 模型图例；保留卡片行）。验证：tsc/build/settings-api/聚合单测/浏览器冒烟全过
+- ✅ **v3.0 UI 审查批（2026-08-16，用户拍板「全做吧」；17 条 UI + 4 条对话流 21 项全落地）**：ChatPanel 消息 memo 化（MessageItem React.memo + 回调 useCallback + lastEditIdx/lastUserIdx/rmIdx useMemo 预计算 + Streamdown 完成消息 static 模式，流式每帧不再重渲染/重解析历史消息）；其余 17 条 UI（ReviewPane diff 失败提示与 run_test 状态标签、Timeline 子 Agent 点击展开右栏、BrowserPanel pending 关闭跳过主进程/删 visible 死参、SettingsModal 字号/主题点击即时生效、Toggle 共享组件收拢、SchedulePane 行内两段式删除、ComputerUsePane 大图 × + Esc、SettingsTab 类型收紧 + App 删 cast、代码模式隐藏拖拽热区、ModelPane 死代码删除 + setDefault 同步 setModelId、TitleBar.tsx 删除）；D 条（错误行 ⚠️ 前缀）不实施（不值得改）。验证：web tsc + vite build + playwright 真实会话冒烟全过
+- ✅ **全库安全与逻辑审计修复（2026-08-16，用户授权自由优化；审计评分 8.2/10）**：S1–S7 安全 + B1–B3 逻辑 + C1 注入 + D1 校验共 12 项全落地——
+  - **S1 CORS/DNS rebinding**：server.ts CORS 白名单（localhost/127.0.0.1/[::1]）+ Origin/Host 校验，非白名单 403
+  - **S2 Reviewer run_test 任意命令**：getReviewerTools() 包装 run_test 拒绝 command 参数（"只读审查"不可再当命令执行器）
+  - **S3 持久 shell**：spawn env 改 sanitizeEnv（凭据不再暴露给模型 echo 读取）；closeShellSession 挂 server/cli/scheduler-runner 任务结束 finally（此前永不清理）
+  - **S4 命令白名单 npm run\* 移除**：`npm run <script>` 执行任意 package.json 脚本不再免审批；仅保留 `npm run`（无参列脚本）
+  - **S5 webfetch 重定向 SSRF**：fetchText 改 manual 逐跳跟踪，每跳复查 isPrivateTarget（防 https://公网 → 内网/云元数据）；文件头过时门禁文档修正
+  - **S6 symlink 逃逸写保护**：isPathInside 双检（词法在内 + realpath 解析后仍在内——项目内 junction 指向外部时拦截）
+  - **S7 前端裸 fetch 收敛**：apiFetch 导出，store/8 组件（审批/ask/截图流/终端流/归档/建项目/解析/定时任务/模型管理）全部改道（桌面 dev 端口 query 生效）
+  - **B1 重复调用提醒条件反转**：原 `ok &&`（成功才提醒、失败死循环不提醒）→「第 N 次且上次失败」即提醒
+  - **B2 计划修订超限静默降级**：第 3 轮 revise 不再无声落入 execute——emit 明示 + 意见并入附加指示
+  - **B3 chat 超时语义**：总时长 → 空闲超时（收到数据帧重置；长输出不再被误杀）
+  - **C1 截图 PS 注入**：路径补单引号转义（`'` → `''`）
+  - **D1 工具参数运行时校验**：loop 执行前 zod safeParse，失败友好报错回填让模型自纠（MCP 宽松 schema 自动跳过）
+  - **验证**：agent/web tsc + vite build 全过；相关套件全绿（bugfix 14 项含新增 npm run 断言、web-tools/approval-policy/tools/loop-opt/terminal 41/plugin 78/memory 84/subagent 94/jobs/v212/retry/fallback/compress/settings-api/mcp 等）
+- ✅ **v3.1 全库复核批 1：高危修复 + 审批流畅化 + 工具补齐（2026-08-17，用户「自由发挥全面优化」）**——37 套件全绿（新增 approval-cache 17 / fs-tools 37）：
+  - **安全高危**：① **本地令牌鉴权**（server.ts：staticDir 存在时随机 token 注入 index.html `window.__INFU_TOKEN__`，/api/* 校验 X-InFu-Token——浏览器打开恶意页面无法再以无鉴权本机 API 为跳板操纵 Agent；vite dev 不启用）；② **git 命令注入根治**（git-tools gitRun 改 execFile 数组直传，去 cmd.exe shell——原 `\"` 转义对 cmd 无效，git_commit message 可注入任意命令）；③ **scheduler 高危放行修复**（DANGEROUS 提取模块级导出，run_command 高危分支加 requireExplicit——定时任务无人值守不再自动放行 rm -rf；run_test 自定义 command 同步收口：高危 requireExplicit/普通 medium，删"low 免审批任意命令"旁路）；④ **MCP env 消毒**（stdio 子进程 env 以 sanitizeEnv() 为基底，凭据不再随子进程泄漏）；⑤ **SSRF 简写绕过**（web.ts：127.1/2130706433/0x7f000001/::ffff: 归一化判定 + 十六进制 fail-closed）；⑥ **外传策略补全**（net-policy：certutil/bitsadmin/mshta/regsvr32/nslookup/rclone 等 + powershell/python/node 调用模式）；⑦ **嵌入式浏览器 file:// 封堵**（BrowserPanel normalizeUrl 非法 scheme 返回空 + main.ts sanitizeBrowserUrl——webview sandbox=no 可直读磁盘）；⑧ 打包排除 .infu-worktrees（570MB Rust 产物）
+  - **逻辑**：usage 双计修复（chat.ts 最后一次 usage 快照单次 yield + loop 成功轮才并入全局——视觉降级重试不再污染命中率统计）；max-steps 收尾总结前 ensureContextBudget（防 API 400 收尾）；cron `7`=周日匹配 + validCronSyntax 语法校验（24h 窗口误杀年度任务）+ 调度防重入（runningIds）；persistent-shell 监听器泄漏修复（once 挂载 + finish 移除，长会话内存无界增长根治）+ 持久分支补命令审计
+  - **审批流畅化（用户核心诉求：二档/最高档少弹窗）**：① **会话级「已批准记忆」**（approval/cache.ts：非红线操作同会话同参批准一次后直接放行，256 条 FIFO 有界，requireExplicit 永不记忆，跨会话不共享，审计照常全量）；② **审批批量操作**（并行工具调用堆积多个审批时弹窗出现「全部允许/全部拒绝（N）」按钮，store resolveAllApprovals 批量决策）
+  - **工具补齐（对齐 opencode）**：project_tree（目录树，只读进白名单）/ file_ops（mv/cp/rm/mkdir，medium，路径边界+写保护+作用域三检）/ os_info / current_time（只读进白名单）；工具 42→46；Timeline 图标补齐；DEFAULT_SYSTEM_PROMPT 加工具纪律 5 条（探索先 project_tree、文件操作用 file_ops 不用 shell、read_file 带行号不转储、run_test 优先、一次一个状态改变）
+  - **验证**：37 套件全绿（含新增 2 套件 54 项）、agent/web tsc + vite build 全过、agent dist 已重建
+
+### ✅ v3.2 消息流对齐 harness + token 优化 + 断网可见性（2026-08-17，用户「抄作业+差异化」四项任务）
+- **UI 优化（与 Electron 原生融为一体）**：三栏顶部统一 `3.25rem`（52px@16px，随字号缩放）——聊天 header `h-[3.25rem]` + 卡片顶部 1px border、Sidebar Logo 行 `h-[calc(3.25rem+1px)]`、折叠 rail 让位区 `h-[calc(3.25rem-11px)]` + `py-3(12px)` = 精确同 y（对齐公式）；CodeView 覆盖层 top 同步 `calc(3.25rem + 1px)`；折叠 rail 按钮文字 "Tab" → PanelRightOpen 图标圆钮（self-end 与 tab 底对齐）；RightRail 活动 tab 顶部 2px 信息蓝指示条；RightRailEmpty 初始面板优化（主按钮独立区 + 分隔线 + 次按钮 hover 上浮）；composer 描边弱化 `border-line/60`（对齐 harness 输入框）
+- **消息流对齐 harness（差异化）**：① 模型降级/上下文压缩事件从无框小字升级为 **EventRow 可展开折叠行**（降级=warn 色 AlertTriangle、压缩=info 色 Files 显示摘要全文）——harness 用错误条，InFu 用事件行（差异点）；② 失败工具行用错误首行顶替参数摘要（对齐 harness errorSummary，失败行 hover:bg-danger-soft/50）；③ 错误消息行加**类型徽标**（classifyError：网络错误/超时/限流 429/认证失败/流中断/HTTP n，对齐 harness TurnErrorItem code 徽标）；④ 运行状态行显示**重试倒计时**（WifiOff +「网络错误，正在重试 1/3（2 秒后）」，对齐 harness ModelRetryItem）
+- **token 优化（借鉴 harness compaction）**：① **压缩边界工具对平衡**（context.ts `balanceToolPairs`：kept 区首条为 tool 结果时向前回溯配对 assistant（不跨 user 边界）——防「tool 消息引用被压缩掉的 call_id」API 400）；② **摘要过大拒绝**（SUMMARY_MUST_BE_SMALLER：摘要估算 ≥ 被替换内容 → 拒绝注入，降级为直接丢弃——防「压缩后反而更占」）；③ **400 上下文超限自动压缩重试**（chat.ts `isContextWindowExceeded`（400 + context/token 特征）→ loop catch 强制 `ensureContextBudget(true)` 压缩后清空累加器重试一次，每轮一次——估算低估时兜底）；④ **usage miss 兜底**（DeepSeek wire 的 prompt_tokens 含缓存命中 → miss = max(0, prompt - hit)，命中率统计不再虚高）；⑤ **前端中英混合估算**（中文 1 字符≈1 token、其他 4:1，与后端 estimateTokens 同式——旧字符/4 对中文严重低估）；⑥ **空闲超时 120s → 300s**（对齐 harness DEFAULT_STREAM_IDLE_TIMEOUT_MS——深度思考模型长思考不再被误杀）
+- **断网可见性**：streamChat 重试退避前回调 `onRetry`（attempt/maxAttempts/delayMs/message）→ gateway 透传 → loop emit `retry` 事件 → SSE → 前端状态行倒计时 + 事件落库审计
+- **验证**：agent/web tsc + vite build 全过；全量套件分批跑绿（compress 33 新增摘要拒绝/配对 5 断言、retry 22 新增 onRetry/超限识别 8 断言、其余 30 套件无回归；browser.test 平台 kill 跳过——v3.1 已绿且本次无关）
+
 ### ⏳ 沙箱长期升级：Docker microVM 模式（借鉴 Claude Code）【降级为条件触发】
 - **目标**：L2 Docker 沙箱从共享内核容器升级为 microVM（独立内核，Docker Desktop 4.58+ 的 VM 模式）
 - **完成标准**：`INFU_SANDBOX=docker` 时实际运行在独立内核 VM 中；不可信代码可安全执行
@@ -97,7 +140,7 @@
 - ✅ **子智能体（opencode 式，2026-08-13）**：`delegate_task`（第 14 个内置工具）——独立上下文 + 结果回收 + **同轮多工具调用并行执行**（loop 3.2 段 Promise.all，对齐 ZCode）+ `tasks[]` 并行批量（最多 6）；**agent 文件化定义**（`.infu/agents/<name>.md` frontmatter：description/tools/model/maxSteps/thinkingLevel/permission/sandbox）；**内置 agent 对齐 ZCode**（general-purpose=全工具 / explore=只读，调用时机经 ZCode 本机 33 次调用实证：explore 67% 只读探索调研 / general-purpose 33% 深度审计）；**审批对齐 ZCode**（只读委派免审批、写能力一次授权、内部继承授权、requireExplicit 红线逐条、agent 名不存在直接报错）；**展示对齐 opencode/Claude Code**（主对话流条目 + 右侧栏完整消息流弹窗，内部过程不进主对话流）；**摘要完整接收**（≤2000 字结构化约定 + 20K 兜底）；设置面板可编辑 agent（工具/权限/沙箱/模型/推理强度）；`npm test` 641 项全绿 + CLI/浏览器端到端
 - ✅ **best-of-n 按用户评审完全移除（2026-08-13）**：同任务 N 路竞速被判定多余（同模型同工具产出趋同；主流 Agent 并发全是「不同任务并行」）——删除 CLI `--best-of-n`、server 分支、Web 第 4 档模式 + TrialsPanel、tests/parallel.test.ts、docs/BEST-OF-N.md；真并发 = delegate tasks 不同任务并行（见上）
 
-### v2.6 记忆与任务【✅ 批 1 + 批 2 完成 2026-08-13；✅ v2.6.1 会话中枢重构；收尾项视体量】
+### v2.6 记忆与任务【✅ 批 1 + 批 2 + v2.6.1 会话中枢重构 + 收尾全部完成 2026-08-13】
 - ✅ **v2.6.1 会话中枢重构（2026-08-13，用户纠正「任务=会话」误称后定稿）**：
   - **概念修正**：会话（Session）是核心对象，项目是容器，任务看板是误称产物——**任务看板整体删除**（`.infu/tasks/` 模块/4 个 task 工具/`/api/tasks`/KanbanView/TaskModal/NewTaskModal/侧栏任务区/tasksPrompt 引导段/tasks.test.ts 59 项）
   - **记忆系统修正（用户拍板逻辑）**：五层→四层——「发生的事」进会话历史（SQLite）、「总结」进项目历史（.infu/history/ 自动沉淀）、「下次该怎么干」进项目/全局记忆（memory_read/write）、「你必须遵守的」进 INFU.md；**任务记忆（L3）删除**；记忆读取按会话 root 解析路径（自由会话读全局记忆 + root 下 .infu/memory 若存在——对齐 Claude 每目录独立记忆 + 全局兜底）；生成时机 = 会话中 Agent 判断未来有用性主动写（Claude Auto Memory 模式）+ 会话结束自动归档（Codex 即时简化版）；**memory_write 敏感凭据检测**（Codex secret-redactor 轻量版：sk-/AKIA/私钥/Bearer/连接串/JWT 等模式命中拒绝写入）
@@ -115,19 +158,262 @@
   - **自动沉淀**（新 `src/memory/sediment.ts`）：任务完成（report 生成后）归档到 .infu/history/YYYY-MM-DD.md——标题/时间/模型/模式/步数/审批统计/改动概览（write/edit/test/command/memory_write）/执行摘要/交付报告全文/审查意见；**零额外模型调用**（用户拍板：报告归档+工具补充；稳定约定由 Agent 中途 memory_write 记录——Executor system 注入记忆引导段）；沉淀失败不影响交付；orchestrator 内部 + CLI/server 直接/方案模式三处挂点
   - 验证：`npm test` 720 项全绿（新增 memory.test.ts 77 项：指令发现/作用域解析校验/glob 转换/主题读写/写保护精确化/工具接线/沉淀防爆）+ **CLI 端到端实测**（真实 agnes 模型三连：任务 1 创建 README + memory_write 约定 → 任务 2 memory_read 读回约定（跨任务记忆闭环）→ 任务 3 访问禁止路径被工具层拦截「命中禁止规则 secret/**」且 Agent 遵守）
   - ⏳ **遗留（v2.7）**：记忆索引/剪枝机制（Codex memories 30 天剪枝 + 秘密脱敏、AutoMem 索引 200 行加载——渐进读取靠 Agent 自觉 + 主题分类，长期膨胀需机制兜底；已按用户评审标注）
+- ✅ **v2.6 收尾（2026-08-13，主流 Agent 工具补齐 + Git 优化 + 工具调用优化）**：
+  - **主流 Agent 工具调研补齐**（联网调研 Claude Code/Gemini CLI/opencode/Codex 四家工具集后实施）：
+    - **联网工具**（走 run_command network=true 同款门禁：high + requireExplicit 审批，-y 不放行，默认断网）：webfetch（URL 抓取 → HTML 转纯文本，1MB 响应上限/20s 超时/max_chars 可配）+ web_search（默认 DuckDuckGo Instant Answer 免 Key；设 INFU_TAVILY_API_KEY 自动切 Tavily，质量更高）
+    - **Git 提交链**（补齐 status/diff 之外）：git_log（只读）/ git_add（暂存，中）/ git_commit（本地提交，high，绝不 push，all=true 自动暂存；无改动友好提示）/ git_branch（list/create/switch，分支名白名单 ^[A-Za-z0-9._\\/-]+$ 防注入）；git_diff 增强（stat 可关、file 按文件过滤）
+    - **任务协作**：read_files（批量读多文件省轮次，进 Planner/Reviewer 白名单）/ todo_write（执行阶段任务清单，整体替换，内存态按 root 隔离）/ ask_user（执行中向用户提问——全链路：ToolContext.askUser + ask-user 事件 + POST /api/ask/:id + CLI stdin 交互 + Web AskModal 弹窗（复用审批弹窗 Dark OLED 风格）；子智能体继承父级通道）
+  - **工具调用优化**（loop.ts 四项）：
+    - **畸形 JSON 修复**（repairToolArgs：去 markdown 围栏/去外层括号/修尾逗号/单引号键值逐级修复，仍失败回填错误让模型重发——不再把垃圾参数丢给工具执行；数组/标量等非对象结果拒绝）
+    - **未知工具提示**（报错列出全部可用工具名，模型可自纠）
+    - **写工具串行 / 只读并行分组**（isMutatingTool：write/edit/run_command/run_test/git 写操作/mcp_register/plugin_add/memory_write/todo_write/ask_user 串行执行，防并行写同一文件互相覆盖；只读/委派保留 v2.5 并行语义）
+    - **工具结果统一裁剪**（回填模型的消息副本 8K 上限 trimToolResult；事件/落库保持完整——与上下文压缩同哲学：DB 无损、运行时控预算）
+  - **结构**：tools/index.ts 公共助手（命令执行/审批/遍历/裁剪）抽取到 tools/util.ts；新工具分模块 web.ts / git-tools.ts / task-tools.ts 挂接
+  - 验证：npm test 全绿（新增 git-tools 17 / web-tools 9 / task-tools 11 / loop-opt 14 共 51 项）+ 工具层自测（真实 git 仓库提交链/本地 HTTP 抓取/审批门禁拒绝）
+- ✅ **主流式流程改造（v2.6 收尾追加，2026-08-13，用户评审「三档太死、恢复主流 Agent 做法」）**：**默认流程 = 单一 Agent 循环直接执行**——模型自主决定（寒暄直接回复 0 工具、复杂任务自主探索 / todo_write 建清单 / 执行），**不再强制 Planner→计划确认→Executor→Reviewer 流水线**（这是"发个嗨也要跑规划/执行"的根因）；**计划确认默认不弹**（Web 曾硬编码 planApproval:true 已删）；**Planner/Reviewer 分层保留为显式可选**（CLI --orchestrate / API orchestrate:true 开启，对齐 Claude Code /plan 用户触发语义）；清理三档残留（web store orchestrate/mode 状态、server mode:"orchestrate" 硬编码、api planApproval:true）；DEFAULT_SYSTEM_PROMPT 加消息类型判断（非开发任务直接回复不调工具）+ todo_write 引导；Executor 提示词兼容无计划场景（自主规划）
 - ~~批 2 任务看板（2026-08-13）~~：**v2.6.1 按用户评审整体删除**（「任务=会话」误称产物；实现含 .infu/tasks/ 文件 + task 工具 + Kanban 视图 + rubric，均已移除，详见 v2.6.1 概念修正节）
-### v2.7 生态与数据
-- 插件落地：browser-use、computer-use、文档技能（docx/pdf/pptx）、skill 创建器
-- skill 生态完善（导入/导出/模板库/市场雏形，SKILL.md 标准）
-- 定时任务/自动化（cron + webhook/HTTP 触发）
-- 成本/用量追踪 + 审计可视化/任务回放
-- UI 整体打磨（先讨论）+ 团队基础支持（最简多账号/共享/权限）
+### v2.7 生态与数据【✅ 批 1 插件/技能生态 + 设置界面补齐；剩余项低优先级】
+- ✅ **批 1 插件/技能生态落地（2026-08-13，借鉴 zcode 官方插件）**：
+  - **官方能力统一为「内置插件」**（对齐 zcode：插件=分发单位，内容可为工具/技能）——3 个官方插件随 InFu 分发、默认启用、设置界面插件列表可见可禁用：**browser-use**（playwright-core 1.62 驱动 chromium：browser_navigate/snapshot/click/type/fill/screenshot/close 7 工具，navigate 联网门禁 high+requireExplicit、交互 medium 审批、截图存 .infu-browser/；chromium 自动探测 ms-playwright；control-browser + web-gui-tester 两技能随插件）、**document-skills**（docx/pdf/pptx 从 Anthropic 官方 document-skills 复刻，35+31+5 文件 + Python 脚本，补装 python-pptx/reportlab/pypdf，SKILL.md 加 InFu 环境适配头）、**skill-creator**（引导 Agent 写高质量 SKILL.md，适配 InFu 目录约定）
+  - **插件技能挂载机制**（loadPlugins→skillDirs→registerPluginSkillDirs 注册表 + listSkills level=plugin；SkillMeta level 加 builtin/plugin）
+  - **插件市场雏形**（marketplace.ts 内置注册表 + PluginConfig source/version 元数据 + `infu plugin marketplace/install` 一键安装）
+  - **内置插件合并加载**（mergeBuiltinPlugins：默认启用，config {id,enabled:false,source:builtin} 禁用；/api/plugins 合并视图 + PUT/DELETE 内置只能启停；probe 传 mergeBuiltin:false 只探测目标）
+  - **YAML 折叠块解析增强**（parseSkillFrontmatter 支持 description: > 块标量——Anthropic 官方写法）
+  - **设置界面「浏览器」「记忆」「索引库」「使用统计」四 Tab 填充**（原「规划中」占位全部落地）：浏览器 Tab = 浏览器控制开关 + 无头/有头 + 浏览器路径 + 浏览器数据（清除缓存/清除全部，POST /api/browser/clear），config.browser 持久化；记忆 Tab = 四层记忆说明 + 自动沉淀开关（config.memory.autoSediment）+ INFU.md 指令查看 + 全局/项目记忆查看（GET /api/memory）；**索引库** = 轻量文件索引（src/index/ 文件清单持久化 ~/.infu/index/，search_code 优先复用，状态+重建 GET/POST /api/index）；**使用统计** = 会话事件流聚合（tokens 字符/4 估算、会话/消息/活跃天数/连续天数/最常用模型/按天趋势/模型用量，GET /api/stats）
+  - 验证：`npm test` 全绿（新增 builtin-skills 11 / browser 10 / settings-api +17）
+- ⏳ **剩余（低优先级/暂缓，2026-08-13 用户定稿）**：**computer-use 插件**（vision 门槛——InFu 消息纯文本不支持图片输入，agnes 未标 vision 能力，用户拍板先不做，需时先做 vision 底座）；**skill 模板库**（导入/导出已做，模板库/市场雏形可选）；**远程市场**（用户明确不需要）；**定时任务/自动化**（cron + webhook，暂缓）；**语义检索**（embedding，索引库升级，暂缓）；**团队基础支持**（v3 触发条件未到，暂缓）
+
+### v2.8 UI 整体打磨【✅ 2026-08-14，用户触发「抄作业 e/app/deepseek-harness」】
+- **定稿基调（用户三项决策）**：主强调 = **中性灰**（主按钮暗色近白 #F9FAFB / 浅色近墨 #0F1115；语义色不变——成功/运行绿 #22C55E、链接信息蓝 #679EFE、进行中 #5686FE、警告黄、错误红）；**深+浅双主题**（深色默认，html[data-theme] 翻转整套 token，设置→外观切换、config `appearance.theme` 持久化）；**去顶栏**（三栏通高，Logo/新建/搜索/设置全进侧栏）
+- **设计系统重写**（web/index.css）：移植 harness 双主题 token（中性蓝灰阶 #151517/#232325/#2C2C2E/#353638/#1B1B1C ↔ 白系；文字四级；透明度边框 l1–l4；阴影 lv1–3；圆角 8–24；ease 曲线）；`@theme inline` 把旧类名（bg-ink/panel/muted/line/text/sub…）映射到主题变量 → 全站类名自动双主题；滚动条 8px 薄款；`prefers-reduced-motion`；store 新增 theme/侧栏折叠与宽度/详情栏开合与宽度（localStorage 持久化）
+- **三栏骨架**（App.tsx）：Grid 可拖拽（侧栏 264–420 / 详情 300–520，8px 隐形热区 + 右侧 12×32 圆角拖柄，折叠态点击重开）+ 侧栏折叠 rail 56px（<1024px 自动折叠）+ 详情栏可关到 0；键盘快捷键保留
+- **侧栏重构**：60px Logo 行（宝石 Logo + InFu + AGENT 徽标，点击新建会话）+ 新建会话 38px r12 条 + 搜索胶囊（28px 圆 → 药丸，Ctrl+K）+ 会话树 32px 行（16px 状态点/悬停换操作）+ 底部设置行；rail = Logo 展开/新建/设置三圆钮
+- **对话区**：空态 Hero（光晕 #6187D8@9% +「探索未至之境」26px + AGENT 徽标 + 项目 chip + 模板卡片）；用户消息右侧 r22 气泡（暗 #2C2C2E / 浅 #EDF3FE）max-w 525 + 悬停复制/回滚操作行；助手无气泡全宽 16/28；**思考/工具折叠行**（24px 图标+标题+2×2 点分隔+摘要，运行中 2.6s 扫光带，展开 IN/OUT r12 卡片粘性标签）；运行状态 shimmer 行 + 耗时；回到底部 34px 圆钮；`.infu-md` markdown 全套样式（标题/列表/表格/引用/代码块 r12 粘性语言条）
+- **输入胶囊**：r22 悬浮卡 max-w 780 + lv2 阴影，textarea 自适应（max 336px）+ 工具行（工作树 chip / 模型药丸 / 思考 1–4 / **34px 圆形发送键** ↔ 运行中停止方块，空输入 0.4 透明）；工作树条/计划卡改 dock 卡（harness 接管卡样式：信息蓝头部条 + 胶囊按钮）
+- **右详情栏**：360px 可拖拽可折叠 + 28px 关闭钮；Diff/文件改动/测试结果改 r12 卡片 + 粘性头部 + 复制；SubagentViewer 滑出面板重样式（状态点 + shimmer 运行态）
+- **弹窗统一**：新增共享原语 `ui.tsx`（Modal r24 遮罩+blur2px+Esc/胶囊按钮、Toggle、StateDot、DisclosureRow、CodeBlock）；审批/提问/归档/创建项目/设置六弹窗全部收敛；SettingsModal 改 880→min(880,94vw)×min(800,100vh−48) r24 双栏（188px 导航轨 + 54px 内容头）；**修 bug**：固定尺寸小屏不可用、`E:\InFu(test)` 硬编码、`#38bdf8` 硬编码→token、ModelPane 原生 confirm()→统一 Modal、死代码（ToolCard/ComingSoonPane/PLANNED/未用导出/Kanban 注释）
+- **终端**：xterm 配色跟随主题（暗 #151517 / 浅 #FFFFFF 两套）+ 热切换不重建；高危确认改统一弹窗；开关按钮胶囊化
+- **主题持久化链路**：`appearanceConfigSchema` 加 `theme` 字段（shared 已重建 dist）——旧 server 进程需重启生效（server PUT 用 `.strip()` 会丢弃未声明字段）
+- 验证：`npm test` 全绿（exit 0）+ web tsc/vite build 通过 + 浏览器实测（侧栏折叠 56px/展开、详情栏关闭 0px/点击重开 360px、深↔浅主题即切即生效（body #151517↔#FFFFFF、侧栏 #1B1B1C↔#F9FAFB、发送键 #F9FAFB↔#0F1115）、设置弹窗三组导航/保存落盘/4319 新服务端 theme 持久化回读）
+- ✅ **批 2 多会话并行 + 排队发送 + 附件 + @插件（2026-08-14，用户拍板四项）**：
+  - **多会话并行**（修「执行中不能切会话」bug + harness 式真并行）：store 重构——`running` 全局单值 → `runningIds[]`（每会话独立）+ `sessionCache`（每会话消息缓存，流式事件写对应缓存，切换秒切不丢流式状态）+ `eventTarget`（SSE 事件按连接会话路由，防串扰）+ per-session phase/step；Sidebar openSession/newSession 解除 running 守卫（缓存命中秒切、无缓存拉事件重放）；sendChat finally 用连接自己的 sessionId 重拉（修 Ctrl+N 串扰）；侧栏运行绿点（animate-ping）按 runningIds；**服务端**：/api/chat 续跑加 per-session 检查（同会话双流 400，不同会话真并行）+ 任务启动置 running + 启动时 resetStaleRunning 清残留；`npm test` 859 项全绿
+  - **排队发送**（harness QueueDock 增强版 + 主流调研：Claude Code Enter 队列/Cursor Stop&Send）：运行中输入 → 入队（输入卡上方 QueueDock dock 条：编辑 inline/移除/**立即发送 = Stop&Send**（移出队列→abort 当前任务→立刻发）/拖拽排序（原生 HTML5 DnD））；done 事件自动消费队首（循环直到空；停止/异常不消费——队列保留待用户处理）；消费用会话自己的 root（后台并行场景）；占位符提示「AI 处理中…回车将排队发送（队列 N 条）」
+  - **附件**（调研定稿：主流 = 图片走视觉 + 文件/文件夹走路径引用；浏览器拿不到绝对路径 → **内容上传方案**）：composer 工具行最左 Paperclip 按钮 + 菜单（添加文件…/添加文件夹…，webkitdirectory）；输入卡上方 AttachmentRail 预览（文件卡片/图片缩略图 + hover 移除，单文件 2MB/图片 5MB/最多 20 个）；发送链路——文件读 base64 → 服务端暂存 `~/.infu/attachments/<sid>/`（任务结束清理）→ 附件绝对路径注入所有阶段 prompt（Agent 用 read_file 读）+ `ToolContext.extraReadDirs` 只读白名单（read_file/read_files 放行、写工具不放行）；图片 dataURL 走 AI SDK image content part 视觉（仅 Executor 阶段；Planner/Reviewer 只收文本引用）；`attachments` 事件落库可重放（用户消息附件行展示，图片字节不落库）；shared AgentEvent 加 attachments 变体
+  - **@ 插件**（对齐主流 Cursor @ 实时过滤 + 键盘选择）：光标前 `@` 触发（词边界 + URL/路径豁免）；面板列插件（/api/plugins 含内置，名称+内置徽标+版本）随输入实时过滤；**无匹配自动消失**；↑↓/Enter/Esc 键盘操作 + 点击即用（mousedown 保焦点）；选中插入 `@插件id ` 引用文本（Agent 自主调用其工具）
+  - **文件选择文案对齐**（调研确认 harness =「选择工作区」目录选择）：CreateProjectModal「浏览文件夹…」→「选择文件夹…」、SettingsModal「浏览」→「选择文件夹」（webkitdirectory 是浏览器唯一目录选择方式，应用内目录浏览器留待后续）
+  - **自由会话 root（用户拍板保持现状）**：不设 defaultRoot 时自由会话 root = agent 启动目录（仓库根），可读写，与 Claude Code 一致；只读规则仅对设置了 defaultRoot 的会话生效（isReadOnlySessionRoot 不变）
+  - **字体整体缩小一档**（用户拍板：harness 正文同为 16px/28px，仍觉大）：`.infu-md` 正文 16/28 → **15/25**、h4-h6 同步、表格 15/25 → 14/23；用户气泡 16/24 → **15/23**；根缩放档整体下调（xs 14→13 / sm 15→14 / base 16→15）——UI 文字同步收紧对齐 harness 13px 刻度
+  - 验证：`npm test` 859 项全绿 + 浏览器实测（A 长任务 + B 寒暄双会话并行侧栏双绿点、运行中新建/切换会话、切回 A 流式缓存恢复、运行中输入 2 条入队 → done 后 17.5s 内自动消费两条队列清空、@ 面板 3 插件/过滤只剩 browser-use/无匹配消失/Esc 关闭、附件菜单两项、根字号 14px/气泡 15px、会话重放正常）
+- ✅ **批 4 交付报告移除 + 滚动跟随修复（2026-08-14）**：**交付报告整体移除**（用户「没啥用去掉」）——loop.ts 删 buildReport/finishWithReport/emit report、RunResult.report 字段删除；orchestrator 删汇总报告与 emit；sediment 历史归档去掉「交付报告」段落（保留文件改动概览/执行摘要/审查意见）；前端删 StructuredBlock success 报告块与 turn 尾报告复制源；shared report 事件类型保留（DB 历史兼容，重放忽略）；测试同步更新（loop-opt 删 4 断言 / memory 删 1 断言，854 项全绿）。**滚动跟随修复**（「AI 快速输出时无法上滑」）——自动滚底从无条件 scrollIntoView 改为**仅用户处于底部附近（离底 <48px）时跟随**（atBottomRef 随 onScroll 同步）；上滑即停跟随、滚回底部恢复、发送新消息强制回底；实测流式中滚动位置 4 秒保持不动 ✓
+- ✅ **批 3 消息流细节彻底对齐 harness（2026-08-14，用户「不用验证我来验证」）**：用户消息——气泡内 /name @name 词边界 token 渲染 **refChip**（@ 蓝底 / 灰底，对齐 projectUserText）；操作行图标**常显**（28px 圆形）+ **时间 hover 淡入 80ms**（data-time-hover-root，触屏常显）+ 时间移到图标前（clock start）+ **日期感知时钟**（今天 HH:mm / 今年 M月D日 HH:mm / 跨年带年，对齐 formatMessageClock）+ tabular-nums；助手 turn 尾——图标常显 + 时间在图标后（clock end）+ **`· 运行 Xs`**（finishAssistant 记 endedAt，分:秒）；错误消息专用行（红点 + 「任务失败」标题 + 消息，对齐 TurnErrorItem）；思考行（ReasoningBlock）——行高 28→**24px**、标题 14px、**运行中显示最新行/结束后显示第一行**（harness latestLine/firstLine）、展开 14/24 tertiary 22px 缩进、去掉字数徽标；工具行（Timeline）——行高 24px、工具名 14px/参数 13px 固定 px、2×2 点分隔 margin 0 8px；StatsLine 居中 12/20 tabular；运行状态行 14px + 等宽时钟；**根缩放副作用修复**——消息流所有 rem 字号类（text-sm/text-xs）改固定 px（根 14px 下 text-sm=12.25px 失真）
+
+### v2.9 右侧栏浏览器式改造【✅ 2026-08-14，用户拍板四项】
+- **右侧栏标签页系统**：store 新增 `rightTabs`（review/browser/subagent/subagents）+ `activeRightTab` + open/close/setActive；App aside 改造为顶部 tab 条（活动高亮 + 状态徽标 + 关闭 ×）+ 内容区；**空态初始面板**——「打开 tab」标题 + 「选择要在侧面板中打开的 tab」副标题 + 居中按钮组（38px r12 与新建任务同规格）：**审查 / 浏览器 / 子 Agent / computer-use（禁用 + 待开发徽标）**
+- **子 Agent tab（自动开 tab + 实时跟随，用户拍板）**：subagent-start 事件 → 自动添加 tab（label = Agent 名）+ 激活（ZCode 式）；tab 上状态徽标（运行中 spinner/完成绿点/异常红点）；SubagentViewer 弹窗 → SubagentThreadView 内容组件（去 absolute 壳，消息流与父对话流同构：ReasoningBlock/Streamdown/Timeline，委派任务描述 + 可折叠最终摘要）；对话流委派条目点击 → 打开对应 tab；旧 subagentViewer 弹窗逻辑删除；多个子 Agent 并行 = 多个 tab 并排
+- **审查 tab**：DiffPanel 内容（Git Diff / 文件改动记录 / 测试结果）抽为 ReviewPane 复用组件——审查 tab + 代码模式覆盖层两处使用（对齐 ZCode Review 多文件 Diff 确认）
+- **浏览器 tab = 占位（用户拍板：等桌面化）**：「浏览器面板将在桌面版提供（嵌入式真实浏览器，ZCode 同款）——当前 Web 版 Agent 浏览器截图保存在 .infu-browser/ 目录」；**桌面化后按 ZCode 同款实现，前端 UI 结构直接复用**（已记遗留）
+- **子 Agent 上限 = 每会话 6（用户拍板，主流模型）**：调研 harness per-owner 10 / Codex per-session 4 / Claude Code 全局 20——**主流均为 per-session**；ToolContext 加 sessionId（server→orchestrator→loop 传递链）；subagent.ts 每会话活跃计数（runSubagent 进入 +1 / finally -1，Map 无泄漏）+ delegateTasks 超限拒绝（明确错误提示「该会话子 Agent 已达上限 6，当前 N 个运行中」）；多会话各自最多 6
+- 验证：`npm test` 854 项全绿 + 浏览器实测（初始面板四按钮/审查 tab Diff 空态/浏览器占位/computer-use 禁用/子 Agent 列表空态/关闭 tab 回空态/**真实委派 explore → 右侧栏自动开 tab「explore」+ 实时显示处理过程**）
+- ✅ **批 2 审查 ZCode 式 + 会话归属修复 + 细节（2026-08-14，用户五点）**：
+  - **会话归属修复**（「选中项目新建会话却落在自由会话区」根因）：worktree 模式下会话 root 被落库为 `.infu-worktrees/infu-task-*` 临时路径 → 项目匹配失败 → 全部落入自由会话区。修复：`root`（会话归属/落库/记忆）与 `execRoot`（执行目录）分离——前端 sendChat 传 root=项目 + execRoot=worktree；服务端 createSession 用 root、工具执行/INFU.md/作用域用 execRoot。实测新会话 root = 项目 ✓
+  - **审查升级 ZCode 式**：新增 `GET /api/review/files`（git diff --numstat + 未跟踪文件 → 每文件 +N/-M）与 `GET /api/review/file`（unified diff；未跟踪 = 全新增行；路径越界拦截）；ReviewPane 重写——上半改动文件列表（文件名 + 加绿减红计数，点击切换）+ 下半**行级 diff 着色**（+ 绿底 / - 红底 / @@ 高亮 / 等宽 12px）+ 测试结果保留
+  - **子 Agent 消息流去框**：streamdown 表格/代码块卡片清理抽为公共 hook `useCleanMarkdownBoxes`（聊天区 + 子 Agent 详情共用）
+  - **新建 tab 按钮**：tab 条右侧 SquarePlus 图标 → 上拉菜单（审查/浏览器/子 Agent/computer-use 待开发，与思考模式/模型选择同款下拉样式）
+  - **tab 条去横线**：border-b 移除（与内容区浑然一体）
+  - 验证：npm test 854 项全绿 + 实测（审查 143 文件 +N/-M / 单文件 diff / 新 tab 菜单 / 横线 0px / 会话归属 root=项目）
+- ✅ **批 3 代码界面 = 项目代码浏览器 + 审查宏观/微观视图（2026-08-14，用户拍板）**：
+  - **代码界面改造**（原 Diff 覆盖层与审查 tab 重叠 → 用户拍板「文件树 + 内容预览」）：新增 `GET /api/fs/tree`（git 已跟踪 + 未跟踪 + diff --numstat 改动统计；非 git 递归扫描跳过大目录）与 `GET /api/fs/file`（内容预览，300KB 截断 + 二进制检测）；新 CodeView 组件——左侧文件树（顶层目录折叠组 + 改动标记：+N 绿 / -M 红 / 未跟踪「新」，含改动的目录自动展开）+ 右侧内容预览（路径头 + 大小 + 等宽 pre）；DiffPanel 删除；与审查 tab 分工：审查 = 看改动 diff，代码界面 = 浏览项目代码
+  - **审查宏观/微观**：审查 tab 初始只显示文件列表（宏观），点击文件后**整个 tab 切换为该文件 diff 视图**（微观：返回 ← + 文件名 + 增删统计 + 行级着色全屏），不再上下分栏
+  - **root 恢复修复**：刷新恢复会话时不设置 st.root（代码界面/审查 root 变空）→ App.tsx 恢复逻辑补 session.root 回填
+  - 验证：构建全绿 + 实测（树渲染/目录折叠/内容预览/root 恢复后 2 文件树正常）
+- ✅ **批 4 工作树通知按钮 + 代码界面语法高亮（2026-08-14，用户实测反馈）**：
+  - **工作树通知按钮**（替代输入卡上方 dock 条——占空间且与终端按钮重叠）：终端按钮**左边**同尺寸胶囊按钮（GitBranch + 「工作树」+ 运行绿点脉冲），有工作树/通知时显示；点击弹出**下拉面板**（宽 260px 较高：分支名/路径/说明/note + 合并到主分支主色按钮 + 丢弃任务改动）；**store persist 持久化 worktree 状态**——刷新不消失，未操作前按钮一直在（用户抱怨原通知刷新即丢）；合并/丢弃后自动消失；原 dock 条删除
+  - **代码界面语法高亮**（VSCode 式，用户「强调色省心美观」）：引入 highlight.js（web 包）；扩展名 → 语言映射（ts/js/json/md/css/html/py/bash/yaml/rust/go 等 common 集合，未知回退纯文本转义）；`.codeview-hl` token 色**随双主题变量翻转**（keyword/operator=info 蓝、string/attr=success 绿、comment=caption 斜体、number=warn 橙、type=ongoing）
+  - 验证：实测（工作树按钮终端旁/下拉合并丢弃/刷新持久化；md 文件渲染 20 个 hljs token span）
+- ⏳ **遗留（桌面化触发）**：浏览器面板嵌入式真实浏览器（ZCode 同款：地址栏/前进后退/DevTools/Agent 驱动实时跟随；Web 版 CDP 帧流方案与桌面 webview 方案均已评估，桌面化时实施）；computer-use
+
+### v2.10 工具集 / 调用机制 / Token 与命中率优化【✅ 2026-08-14，借鉴 harness + 主流调研】
+- **Todo 面板**（用户点名「没见过」）：todo_write emit `todo-write` 事件（落库重放）；前端 store todos + TodoPanel（harness TodoDock 同款：输入卡上方折叠条「任务清单 N 完成 · M 进行中 · K 待办」+ 展开列表；completed 实心对勾/in_progress 旋转环/pending 虚线环；纯展示，状态由模型更新）；实测「任务清单 3 完成」+ 4 事件落库
+- **AskModal 升级**（对齐 AskUserQuestion 规范）：ask_user schema 加 multiSelect / description / 选项结构化（label+desc+recommended）；AskModal 多选（checkbox 切换 + 提交计数）/ 推荐徽章 / 选项说明 / 问题 description；CLI/server 通道适配结构化
+- **压缩优化**（Token/命中率重点，借鉴 harness compaction）：**压缩前先剪超长工具结果**（pruneToolResults：>8K 保留 head 4096 + 标记 + tail 1024，零模型成本，剪完可能免压缩）；**摘要调用构造为会话真前缀**（当前 system + 原样历史 + 末尾摘要指令——复用 provider warm KV cache）；保留 80%/60% 阈值与失败降级
+- **glob 工具**（harness 借鉴，fast-glob）：按模式找文件（`**/*.ts`、`{a,b}` 多选；跳过 node_modules/.git/.infu-worktrees/dist；上限 200；越界 ../ 拒绝）；进 Planner/Reviewer 只读白名单；与 search_code 互补（找路径 vs 找内容）
+- **调用机制优化**：**重复调用提醒守卫**（连续同工具同参 3/5/8 次注入「请改变策略/勿重复调用」提醒，不刷屏）；**run_command 输出落盘**（>8K 完整写 `.infu-outputs/*.log` + 回填 head 4K + 路径提示 + tail 1K，模型可 read_file 看全量）；**只读并行组滚动池上限 10**（防单轮 20+ 只读调用爆内存，harness maxParallel 同款）
+- 验证：npm test **866 项全绿**（新增 tools-opt 12 项：glob 命中/越界拒绝/白名单、剪枝头尾保留、剪枝联动免压缩）+ 浏览器实测（Todo 面板渲染 + 事件落库）
+- ✅ **批 2 web_search 修复 + 工具小优化（2026-08-14，用户「web_search 经常搜不到」）**：
+  - **根因**：① 原 DuckDuckGo Instant Answer API 只返回「即时答案」卡片（绝大多数查询为空）；② 实测本网络环境 **DuckDuckGo 全家（api/html/lite）全部不可达（000）**而 Bing 可达——所以 web_search 一直失败
+  - **修复**：新增 **Bing RSS 搜索**（`format=rss` 标准 XML，免 Key、无 HTML 反爬 challenge，实测 5 条真实结果）；后端链 = Tavily（有 Key）> **Bing RSS（免 Key 主后端）** > DDG HTML > DDG Instant Answer 保底；「未找到」提示附换词建议
+  - **工具小优化**：search_code 正则无效时友好报错（提示转义，替代笼统「工具执行异常」）；webfetch 保持
+  - 验证：Bing RSS 实测 5 条真实结果 + npm test 866 项全绿
+- ✅ **批 3 webfetch 重写 + 工具能力审视（2026-08-14，用户「webfetch 不好用，看看其他工具能力」）**：
+  - **htmlToText 重写**：块级标签（p/div/li/h1-6/table/br 等）→ 换行保持段落结构（原实现全部压成空格挤一行——可读性差根因）；行内标签→空格；实体解码；去多余空行
+  - **正文提取**（readability 启发式）：优先 `<article>/<main>` 容器（语义即正文），其次 id/class 含 content|main|post|article|body 的 div，否则整页——导航/页脚/侧栏大幅过滤；实测 react.dev 提取正文干净
+  - **编码探测**：Content-Type header + HTML meta charset 检测，GBK/GB2312 按声明解码（原固定 UTF-8 中文老站乱码）；实测 163.com GBK 无乱码
+  - **project_scan 增强**：框架识别扩充（Next/Nuxt/Astro/Tauri/Electron/NestJS/Fastify/Vite/Webpack/状态管理 + Python FastAPI/Django/Flask 从 requirements/pyproject 识别）
+  - **工具能力整体审视结论**：read/write/edit/search_code（正则友好报错 v2.10 已加）/list_directory/git 链/glob/todo/ask_user/memory 均已达标；web_search（Bing RSS 修复）、webfetch（本次重写）为短板已补
+  - 验证：真实页面实测（react.dev 正文提取 + 163.com GBK）+ npm test 866 项全绿
+- ✅ **批 4 审批严厉度对齐主流（2026-08-14，用户「弹窗太多」）**：调研主流（Claude Code 默认模式/Codex/Gemini/opencode 共识 = 文件编辑自动执行、仅命令/网络/危险操作询问）→ **文件编辑与验证类工具降 low**（smart 档自动放行）：write_file / edit_file（沙箱写保护/只读容器/工作树隔离不变，安全不降级）、run_test、git_add / git_commit（本地提交，绝不 push）/ git_branch 创建切换；**保留弹窗**：run_command（每条命令，高危检测 high）、网络（high+requireExplicit 红线）、mcp_register/plugin_add（high 安全线）、memory_write（medium）。smart 档下弹窗大幅减少（写文件/测试/提交不再问）。npm test 865 项全绿（审批策略断言更新）
+- ✅ **批 5 只读联网降 low（2026-08-14，用户「websearch/webfetch 不算高风险」）**：对齐 harness/主流（web_search/web_fetch 是普通工具无每次审批；bash 命令才是审批重点）→ **webfetch / web_search 降 low**（smart 档自动放行，不再每次弹窗；confirm 档仍确认）；**run_command 保持审批**（命令是真正危险面，主流一致），其中**外传命令联网（network=true）仍 requireExplicit 人工红线**不变。安全边界：只读拉取自动、命令/上传/注册仍受控。实测 web_search 返回真实结果（Bing RSS：新浪财经等）+ npm test 866 项全绿（web-tools 断言更新为自动放行）
+- ✅ **批 6 剩余工具审批对齐 harness + 档位调研（2026-08-14）**：**browser-use 插件全降 low**（navigate 去联网审批、click/type/fill 去页面副作用审批——已授权使用浏览器，对齐主流不逐次弹窗）；**memory_write 降 low**（对齐主流 memory 自动；敏感凭据检测与全局写保护仍在）。**harness 审批档位调研结论**：harness **无「低/中/高」三级**——二元 ApprovalPolicy（ask/never）+ 三档沙箱模式（read-only/workspace-write/danger-full-access）+ 提权审批（bash 被拒后可带 sandbox_permissions+justification 请求提权一次）；映射关系：workspace-write+ask ≈ InFu smart（文件编辑自动、命令/提权询问）、never ≈ auto、danger-full-access+ask ≈ confirm；InFu 的 risk 分级 + 三档是更细的实现，语义已对齐。**当前保留审批**：run_command（命令，主流一致）、命令联网 network=true（人工红线）、mcp_register/plugin_add（自注册安全线，InFu 特有）。npm test 866 项全绿
+- ✅ **批 7 图片视觉降级 + 附件审批确认（2026-08-14，用户「发图片会报错」）**：**根因**——图片走 AI SDK image content part 视觉，但 agnes 等端点不支持 image part（API 400/500 "Invalid user..."）→ 任务直接失败；计划中的「不支持视觉自动降级」未实现。**修复**：loop 模型调用段加降级重试——请求含图片且失败 → 图片 parts 替换为文本提示（「当前模型不支持图片输入，已自动转为文本提示」）→ 重试一次（仅一次）；实测事件流 session→text（降级提示）→done、无 error。**附件审批确认**：发送附件本身不弹审批（文件走 read_file low 自动、图片走视觉），只有 Agent 用命令处理附件时才走命令审批。npm test 866 项全绿
+- ✅ **批 8 附件审批真相 + 白名单放行 + docx 自动提取（2026-08-14，用户「放附件也要审批」查证）**：
+  - **查证结论**：附件本身不审批（read_file/use_skill 均 low 自动）；用户看到的审批 = Agent 用 **run_command 跑 python-docx 解析 .docx 附件**（二进制 read_file 读不了 → 命令审批弹窗）
+  - **命令白名单 = 完全放行**（对齐 Claude Code allowedCommands）：白名单命中的命令跳过全部审批（含高危检测豁免——用户显式配置的信任）；联网放行仍人工红线
+  - **docx 附件自动提取文本**（服务端暂存时零依赖 zip 解析 word/document.xml）→ 附件引用指向 .txt，Agent 直接 read_file，不再需要跑命令；原 docx 保留
+  - 端到端实测：发送真实 docx → Agent 读取提取文本并正确概括（「张冬旭，大连民族大学物联网工程本科在校生…熟悉 Python 与嵌入式开发」）toolCount=1 无命令调用
+  - npm test 866 项全绿
+- ✅ **批 9 内置默认命令白名单（2026-08-14，用户「查主流白名单」）**：调研结论——主流均无预置白名单（Claude Code 靠内置只读命令自动放行启发式 / Codex 用沙箱 / harness 无白名单、approval 仅 ask/never + 沙箱升级）；社区共识加白 = 只读查询 + git 只读 + 版本查询。**实施**：新增 `DEFAULT_COMMAND_ALLOWLIST`（只读查询 ls/pwd/date/whoami/which/echo/df/du、git 只读 status/diff/log/show/branch/remote/ls-files/rev-parse/blame/stash/tag/check-ignore/config、版本查询 node/npm/pnpm/yarn/python/tsc/go/cargo/rustc/java、包本地查询 npm ls/pnpm ls/pip list/go list + npm run）——**用户配置与默认合并（默认项不可删）**；不放 cat/grep 读任意文件（防 root 外泄露）、不放写/网络/提交/代码执行（红线）；设置 UI 命令白名单区加内置默认说明。npm test 866 项全绿（approval-policy 断言更新）
+- ⏳ **v2.11+ 已规划**见下节（子 Agent 控制工具/后台 job/usage 四桶/工具 schema 精简/session 查询/持久 shell/LSP/read_image——用户授权落档，触发条件已标注）
+
+### v2.11 子智能体控制 + 后台任务（job）【✅ 2026-08-15，用户拍板跳过 bug 收尾直接推进】
+- **子智能体控制（对齐 Claude Code SendMessage 恢复 + Agent View 仪表盘）**：
+  - `delegate_task` 加 `background` 参数——后台模式：立即返回子智能体 id（不阻塞父级循环）；独立 AbortController（父级中止传播 + interrupt_agent 可单独中止）；per-session 活跃上限 6 对后台同样生效
+  - 新工具：`list_agents`（low 只读，列状态：运行中/等待消息/完成/异常 + 模型/步数/委派任务）、`report`（low 回收结果，运行中返回进度、等待中提示恢复方式）、`send_message`（low，恢复等待中的子智能体）、`interrupt_agent`（low，中止一个或 all 全部）
+  - 子智能体内部新工具 `agent_message`（暂停等待父级回复 → `agent-waiting` 事件 → 父级 `send_message` 恢复 → `agent-resumed` 事件；Claude Code SendMessage 语义；仅后台模式可用，同步委派调用返回错误防死锁）
+  - 生命周期：父任务结束按**委派深度**自动中止本深度启动的后台子智能体（server/cli 任务 finally 挂点；子任务随父结束）
+- **后台任务（job，harness jobs 同款）**：
+  - `run_command` 加 `background` 参数——启动后立即返回 job id（不阻塞 Agent 循环）；审批（命令级）/断网门禁与同步完全一致
+  - 新工具：`job_list`（low 只读）、`job_output`（low，环形缓冲 512KB 防爆内存，tail 只看末尾）、`job_kill`（low，杀进程树：Windows taskkill /F /T，POSIX 进程组）
+  - 每会话活跃上限 8；`job-start`/`job-done` 事件（落库审计可重放）；审计标签 `soft-bg`
+  - 安全边界（docs/SUBAGENTS.md 更新）：后台任务暂走**软沙箱语义**（L1.5 受限沙箱接口为同步无法后台化），命令审批/断网策略/审计不降级；后续可升级
+  - 管理工具全部 low（管理 Agent 自有子任务，写能力已有委派授权背书）；list_agents/report/job_list/job_output 进 Planner/Reviewer 只读白名单 + READONLY_TOOLS
+- 验证：npm test 全绿（新增 **subagent-control 24** + **jobs 19**）+ CLI 端到端实测（真实模型：后台 run_command → job_list/job_output/job_kill 全链 + 后台委派 explore → list_agents → report 回收）
+- 📌 **bug 排查收尾阶段（2026-08-14 用户提出）暂缓落档**：用户 2026-08-15 拍板「先做 v2.11」——触发条件 = v2.11 完成后用户提出具体 bug/现象时再专项排查（无触发不主动做）
+
+### v2.14 批 18 审批档位图标 + 设置有效性审计【✅ 2026-08-15，用户三点】
+- **档位图标**：全自动 = **ShieldAlert（盾牌+感叹号）警告色**（警示全自动放行）；智能 = Scale（天平，**中性色**）；全部确认 = ShieldCheck（**中性色**）——只有警告场景用色
+- **设置有效性审计**（explore 深扫 14 类设置项全链路）：12 项 ✅ 真实生效；修复 **2 个无效设置 + 1 个错位**：
+  - **defaultModelId 死配置**：保存/落盘正常但 Web 会话从不读取（store 取 models[0]）→ App.tsx fetchConfig 应用 defaultModelId（setModels 校验存在性回退）——设置「默认模型」/星标现在真实生效
+  - **子智能体 sandbox 档位死配置**：agent 文件 frontmatter sandbox 解析了但无运行时消费 → 全链路接线：shared ToolContext.sandboxMode → runAgent opts → ctx → run_command/run_test → execLocal(modeOverride 用 resolveEffectiveMode 解析) → subagent runSubagent/startBackgroundSubagent 传 agentDef.sandbox
+  - **索引库面板作用域错位**：/api/index 固定操作启动目录 → 端点接受 root 参数（前端传当前项目 root）
+- 验证：tsc/vite build + server 重启 + 浏览器实测（智能档 Scale 中性色图标 ✓）
+
+### v2.14 批 17 双思考修复 + Hero 艺术字【✅ 2026-08-15，用户两点】
+- **「两个正在思考」修复**：根因 = 发送时 ensureAssistant 预建空消息（streaming）→ phase-start 事件**无条件新开消息** → 两条空 streaming 消息都渲染「正在思考…」；修复 = phase-start 时最后一条 assistant 为空则**复用**（打 phase 标记），非空才新开。实测「正在思考」计数 = 1 ✓
+- **Hero 欢迎界面**：去掉正方体 SVG 图标；「无限未来」改为**艺术字**——56px / font-extrabold / tracking-tight / **单色渐变**（`linear-gradient(180deg, text-primary → text-tertiary)` + background-clip:text——深色主题白→灰渐变、浅色主题黑→灰渐变，跟随主题）
+
+### v2.14 批 16 任务清单条缩小居中【✅ 2026-08-15，用户「缩小 + 居中，避开终端按钮」】
+- TodoPanel 折叠条 max-w 780 → **500**（缩小约 1/3，水平居中 mx-auto）——输入卡右上终端按钮的垂直带被左右留白避开，**不再重合**；文字仍 13px 可读，任务项清晰
+- 验证：tsc/vite build ✓
+
+### v2.14 批 15 侧栏滚动审查【✅ 2026-08-15，用户「任务太多能否滑动 + 区块头滑动机制」】
+- **审查结论**：侧栏是**单滚动容器**（主体区 min-h-0 flex-1 overflow-y-auto）——任务再多都能滚（实测 9 会话可滚 174px，内容溢出即滚）
+- **最优解（我的决断）**：不做嵌套滚动（项目/会话各自滚动区是"无法滑动"的常见根源——滚轮在子滚动区会卡死）；采用**单滚动容器 + 区块头 sticky 吸顶**（VS Code/Linear 同款）：SectionHeader 加 `sticky top-0 z-10 bg-sidebar/95 border-b backdrop-blur-sm`——滚动时「已顶置/项目/会话」区块头保持可见、内容从其下穿过，既有"区块头滑动机制"的观感又保证可靠性
+- 验证：浏览器实测（滚动容器 scrollHeight>clientHeight ✓、scrollTop 可移动 ✓、sticky 区块头 2 个 ✓）
+
+### v2.14 批 14 定位浮标动态化【✅ 2026-08-15，用户「当前第几段浮标就定位到第几个」】
+- 左侧定位浮标增加**活跃态**：滚动时计算「视口上部 40% 内的最后一条用户消息」= 当前段落 → 对应浮标**延长（w-3.5 → w-8）+ 变色（line → info 蓝 + 微光阴影）**；其余浮标保持普通态（hover 才变长变色）
+- 消息变化（新回复/重放）后自动重新定位；滚动（onScroll）实时跟随
+- 验证：浏览器实测（2 轮对话 → 活跃浮标 28px 延长 + info 蓝，普通 12.25px ✓）
+
+### v2.14 批 13 寒暄规则移除 + 右侧栏细节【✅ 2026-08-15，用户「去掉寒暄规则对齐主流 + Tab 大写」】
+- **prompt 移除寒暄判断规则（对齐主流 Agent）**：DEFAULT_SYSTEM_PROMPT / PLANNER_SYSTEM_PROMPT 删除「消息类型判断」第 0 条——主流（Claude Code/Codex）prompt 均无此规则，模型天然处理（纯寒暄简短回复、带任务的问候直接干活）；规则化判断本身脆弱（时好时坏根因）。orchestrator 代码层寒暄短路保留（Planner 不调工具自然结束）。实测：纯「嗨」简短回复 ✓；「你好啊+任务」统计 3700+ 文件 ✓
+- **右侧栏**：空态面板「打开 tab」→「打开 **Tab**」（大写 T，两处）；折叠 rail 展开按钮从 PanelRightOpen 图标 → **粗体「Tab」文字**（bold 15px）
+
+### v2.14 批 12 工作树按钮上消息 + 编辑仅最近消息【✅ 2026-08-15，用户两点】
+- **工作树按钮移到 AI 消息**：原输入框上方胶囊按钮 + 下拉面板整体移除——按钮改为**只出现在「最近一次修改文件的 assistant 消息」的操作行**（write/edit 工具判定），复制按钮同款圆形图标（GitBranch + 绿色脉冲点），**点击直接并入主分支**（无面板无确认，成功/失败 toast）；"取消消失机制"——不再有面板/消息状态的消失逻辑
+- **编辑按钮仅最近用户消息**：✏️ 编辑按钮只在**最后一条用户消息**的操作行显示（其他历史用户消息不显示编辑）
+- 验证：tsc/vite build + 浏览器实测（编辑按钮唯一 ✓ / 工作树按钮逻辑条件验证——需真实 git 仓库才出现）
+
+### v2.14 批 11 ZCode 款编辑 + 回滚交互重构【✅ 2026-08-15，用户「查证 ZCode 编辑机制 + 回滚双按钮」】
+- **查证（联网）**：Claude Code 无"原地编辑"——`/rewind` + Restore conversation 把早期 prompt 恢复进输入框编辑重发；**模型无状态**，harness 每轮重建上下文 → 截断后旧消息/旧回答不再进入上下文 → **AI 自然忘记**（与用户主观体验一致）
+- **回滚重构**：待定态输入框上方显示**「确认回滚」「取消回滚」双大胶囊按钮**（≈两倍终端按钮宽；确认=info 蓝主按钮）；**去掉"写消息+发送才回滚"机制**——确认按钮直接截断（本地同步截断 + AI 感知标记 + 3s toast）；回滚待定时输入内容再发送 = 自动先回滚再发（快捷组合）
+- **ZCode 款编辑**：用户消息 ✏️ → 编辑态（输入框填原文 + 「确认编辑/取消编辑」按钮）；**确认 = rewind(marker:false 无标记) + 本地截断 + 重发**——旧消息与 AI 回答消失、显示新消息、AI 重新思考；取消 = 退出编辑态；切会话自动退出编辑态
+- **rewind marker 选项**：store.rewind(id, seq, {marker})——回滚 true（落 rewind 事件 → AI 感知），编辑 false（静默截断，AI 无需被告知）
+- 待回滚小标签主题化（text-warn → text-sub）
+
+### v2.14 批 10 回滚/编辑分离 + UI 精修【✅ 2026-08-15，用户「回滚≠编辑 + 按钮样式」】
+- **回滚与编辑分离**（用户澄清概念）：回滚**不再预填原文编辑**（askRewind 去掉 fillText）——回滚 = 撤回重来，直接输入新消息发送；取消回滚只取消待定态（不动输入框）
+- **编辑按钮（ZCode 款）**：用户消息操作行新增 Pencil 铅笔按钮——填入输入框修改后重发，**历史保留**（普通发送，与回滚无耦合）
+- **AI 感知回滚**：新增 `rewind` 事件类型（回滚截断时落库 {to, at}）→ rebuildMessages 注入 system 消息「对话历史曾在 seq N 处被回滚截断…」——AI 明确知道已回滚及位置（实测：marker 落库 + system 注入 + 旧内容不出现 ✓）
+- **回滚完成 toast**：提交后输入框上方悬浮提示「已回滚——之前的对话已截断，AI 将从这里继续」，3 秒自动消失，主题样式
+- **UI 精修**：取消回滚按钮 = 终端按钮同款（border-line bg-elevated/90 text-text hover:bg-hover）+ 图标换 **X**；回滚提示条主题化（bg-elevated/80 border-line text-sub，原 warn 黄）
+
+### v2.14 批 9 寒暄修复落地 Web + 回滚 UI【✅ 2026-08-15，用户三点】
+- **Web 端寒暄误判根因**：批 4 改了 DEFAULT_SYSTEM_PROMPT 但**常驻 server 进程不热重载**（tsx 运行中不加载新模块）——CLI 新进程生效、Web 旧进程失效 → 重启 server 后 Web 实测"你好啊+任务"调用工具执行 ✓
+- **回滚机制查证**（用户问"是不是撤回消息 AI 不记得"——**正是**）：`store.rewind` = `DELETE FROM events WHERE seq >= 锚点`（该消息及之后全部事件物理删除）→ 重发时 rebuildMessages 从截断后事件流重建 → **AI 上下文完全不含被删内容**（比"编辑替换"更彻底：这条消息从未存在过）
+- **取消回滚按钮**：从顶部提示条文字按钮 → **输入框上方图标按钮**（终端按钮同款：absolute -top-8 胶囊、warn 色 ↺、仅 pendingRollback 时显示）；顶部提示条保留信息（"待回滚 N 条消息"）去掉按钮
+
+### v2.14 批 8 右侧直角【✅ 2026-08-15，用户「右侧不要大 R 角，与右侧栏融为一体」】
+- 卡片圆角 `rounded-[20px]` → **`rounded-l-[20px]`**（仅左侧圆角：左上/左下 20px，右上/右下 0px 直角）——右侧与右侧栏平齐融合，圆角只保留在左侧（覆盖侧栏效果）
+- 验证：浏览器实测（TL 20px / TR 0px / BL 20px / BR 0px ✓）
+
+### v2.14 批 7 无缝贴齐【✅ 2026-08-15，用户「顶部不留缝 + 右侧一体分隔线在」】
+- **顶部不留缝**：中间列 `p-2` → `pt-0`（卡片顶部贴窗口顶，hero/header 均贴齐）
+- **右侧栏与聊天一体**：中间列 `pr-0`（卡片右缘无缝贴右侧栏）+ 右侧栏去掉 `border-l`——分隔线 = 卡片自身 1px 右边框（观感一体、线在）
+- 代码模式覆盖层适配（top 40|0 / right 0）
+- 验证：浏览器实测（卡片顶部 gap 0 ✓、卡片右缘与右侧栏 gap 0 ✓、右侧栏 border-left 0px ✓、卡片 border-right 1px ✓）
+
+### v2.14 批 6 卡片一体化【✅ 2026-08-15，用户「header 与聊天一体 + 去侧栏竖线」】
+- **header 融入聊天卡片**：顶部区域（会话名/推拉按钮）移进卡片容器（App.tsx 中间列 = p-2 外壳 → 卡片 div（rounded 20/border/bg-ink/shadow）→ header（h-10 border-b）+ ChatPanel）；ChatPanel 根去掉卡片壳（壳在外层）；中间列 gridRow "1 / span 2"
+- **侧栏竖线移除**：Sidebar 两处 aside 去掉 `border-r border-line`——聊天卡片的边界线成为唯一分隔（卡片 1px border）
+- **代码模式覆盖层适配**：left: sideW+8 / top: 48|8 / right: 8（卡片内全屏代码视图，保留卡片边框一体感）
+- 验证：tsc/vite build + 浏览器实测（卡片 20px 圆角/1px 边框/阴影 ✓、ChatPanel 内部无壳 ✓、侧栏 border-right 0px + blur(40px) ✓）
+
+### v2.14 批 5 布局视觉：聊天卡片 / 侧栏磨砂 / 右侧栏同色【✅ 2026-08-15，用户三点要求】
+- **聊天界面 = 大圆角卡片**：中间列外留 8px 边距，ChatPanel 根改 `rounded-[20px] border border-line bg-ink shadow-lv2 overflow-hidden`——与左侧栏接壤处圆角透出底层（侧栏/光晕），卡片浮起覆盖感
+- **侧栏磨砂玻璃**：Sidebar 两处 aside `bg-sidebar/70 backdrop-blur-2xl`（半透明 + 40px 背景模糊）；底层新增装饰光晕（`--glow-a/--glow-b` 深浅两套 token，radial-gradient 左上+右下）——光晕透出侧栏被 blur = 玻璃质感
+- **右侧栏与聊天同色**：RightRail aside `bg-sidebar` → `bg-ink`（与聊天卡片一致）
+- 踩坑：`bg-base` 无 `--color-base` token 映射（Tailwind 类无效，静默透明）——统一用 `bg-ink`（--color-ink 已映射且同值）
+- 验证：tsc/vite build + 浏览器实测（main 圆角 20px/不透明背景/阴影 ✓、aside blur(40px)/70% 半透明 ✓、零 console 错误）
+
+### v2.14 批 4 prompt 修复：寒暄误判 + Infu 身份【✅ 2026-08-15，用户反馈「你好啊+任务」被当寒暄】
+- **根因**：DEFAULT_SYSTEM_PROMPT 第 0 条"用户消息不是开发任务（寒暄/问候…）时直接回复"——模型把**问候语开头 + 任务请求**（"你好啊，帮我看看项目有几个文件"）误判为纯寒暄直接跳过
+- **修复**：prompt 重写（借鉴 harness persona 风格：身份极简 + 行为指引直接）——
+  - 身份改为「你是 Infu（**In 和 F 大写**），一个直接、务实的 AI 助手」，去掉"软件工程智能体"定位（用户明确：Infu 就是 Infu）
+  - 寒暄判断明确化：**包含任何任务请求（查看/统计/分析/修改/创建/搜索/运行/测试）时，即使以问候语开头也必须执行任务**；只有**纯粹寒暄**才直接回复
+  - Planner 提示词同构修复
+- 验证：真实模型「你好啊，帮我看看项目有几个文件」→ 执行任务（扫描/统计/分布说明）✓；纯「嗨」→ 0 工具直接回复 ✓
+- 📌 用户偏好已记忆（infu-naming-and-persona）：I/F 大写、不称软件工程智能体
+
+### v2.14 批 3 交互精修 2【✅ 2026-08-15，用户两点反馈】
+- **hover 串扰修复**：消息容器 div 也是 `group`，CSS group-hover 匹配任意祖先 → 鼠标靠近时多行一起飘。改用**命名组** `group/row` + `group-hover/row:`（Tailwind v3.2+ 命名组，只匹配自身）
+- **AI 中间文本独立成消息**（用户贴「全量 28 套件全绿…更新 ROADMAP」事例）：原一轮的文本全部合并到最后一条消息（和总结混在一起）；改为——**已有工具调用之后的文本自动开新消息**（appendText / loadSession 重放 / loadSessionCache / 子智能体线程四处同构），渲染顺序改为 **思考 → 文本 → 工具**（模型先说话再调工具，中间文本穿插在工具调用之间，harness flow 语义）
+- 验证：tsc + 浏览器实时任务实测（中间文本出现在 read_file 工具行之前 ✓）
+
+### v2.14 批 2 对话流交互精修【✅ 2026-08-15，用户四点反馈】
+- **思考行交互**：展开态标题行**摘要消失**（只剩图标 + 标题，全文从下一行开始；原展开/折叠都显示一行摘要）；hover 从"整行选中背景"改为**漂浮放大感**（微上浮 -translate-y-px + scale 1.01 + shadow-lv2 + 图标变蓝）
+- **diff 统计修复**：read_file 等只读工具**不再显示 diff 数字**（原正则 `[+-]\d+` 把 read 结果的行号范围 "-152" 误匹配成假 diff）；仅写工具（edit_file）显示真实 +N -M，**加绿减红**（原全绿）；write_file 新建无 diff 不显示
+- **消息流间距**：移除 turn 内 -mb-2.5 收紧 → 工具行/思考/文本各自独立成块（harness flow item 统一 16px 节奏）
+- **去掉 `>` 箭头**：思考行/工具行的 ChevronRight 移除（对齐 harness DisclosureRow 无箭头；展开交互保留整行点击）
+- 验证：web tsc/vite build + 浏览器实时任务实测（箭头 0 / read_file 行干净 / 三工具行平铺 / 零 console 错误）
+
+### v2.14 对话流对齐 harness 最终版【✅ 2026-08-15，用户「再借鉴 harness，样式一模一样」】
+- **结构：步骤卡片 → per-tool 平铺**（最大差异修复）：Timeline 重构——每个工具调用 = 独立一行（harness ToolCallTree 同构），去掉 StepCard 步骤分组卡片；与文本/思考/用户气泡统一 16px 节奏平铺
+- **工具行细节对齐**：图标映射补齐（36 工具全覆盖：glob/web/git 全家/memory/todo/ask_user/use_skill/session/job/子 Agent 控制/mcp/plugin）；运行中 = 图标 + 扫光（去 spinner）；失败 = 红点替换图标（StateDot）；成功无标记；**risk 徽标移除**（对齐 harness 干净感）；摘要改关键键优先（command/path/query/pattern…，harness SUMMARY_KEYS 语义）
+- **文件路径链接**（harness fileLink）：read/write/edit/read_files 工具行摘要 = 可点击路径（下划线蓝）→ 打开代码界面自动展开目录定位文件（store codeViewFile 外部定位 + CodeView 消费；span 非 button 防嵌套非法 HTML）
+- **已对齐确认不动**：用户气泡（525/r22/浅蓝#EDF3FE·深灰#2C2C2E）、操作行（28px 圆钮/时间 hover/clock start/end/日期感知/运行时长）、思考行（24px/最新行跟随/扫光/22px 缩进）、运行状态行（shimmer 蓝渐变文字 + 等宽时钟）、错误行（红点+标题+消息）、代码块（r12/语言条/copy）、markdown 标题层级、回到底部
+- **保留的 InFu 特色（用户拍板项）**：字号 15/25（用户 8-14 拍板缩小一档，harness 16/28）、思考标题中文「思考」（harness "Think"）、turn 内连续流（-mb-2.5 收紧）、状态行文案「InFu 运行中」（harness "Deep diving..."）
+- 验证：web tsc/vite build + 浏览器实时任务实测（read_file/run_command/glob 三工具行平铺渲染 + 关键键摘要 + diff 统计 + 零 console 错误；修复 button 嵌套 hydration 警告）
+
+### v2.13 逻辑错误与 bug 排查收尾【✅ 2026-08-15，双探索排查 + 29 项确认修复】
+- **安全/漏洞类（高危）**：
+  - **命令白名单组合符绕过**（`git status && rm -rf x` 命中白名单整体免审批）→ 白名单命中再校验组合符（&&/;/|/>/</`/$()），含组合符退回正常审批；白名单收窄：`git branch*` → 只读列表（-a/-r/-l/--show-current）、`git config*` → `--get/--list`（写 ~/.gitconfig 走审批）
+  - **路径 startsWith 前缀漏洞**（`../work2\evil.txt` 与 root 同前缀兄弟目录越界）→ 统一 `isPathInside`（根 + 分隔符边界 + win32 大小写折叠），替换全部文件工具与 /api/fs /api/review 端点
+  - **git_diff file 参数命令注入**（反引号/$() 在双引号内执行，low 免审批）→ 安全字符白名单硬校验
+  - **webfetch SSRF**（127.0.0.1/169.254.169.254 内网与云元数据探测）→ `isPrivateTarget`（IP 字面 + DNS 解析后检查私网/回环/链路本地/CGNAT/ULA；测试用 INFU_ALLOW_PRIVATE_URL 豁免）
+  - **glob 反斜杠/绝对路径逃逸**（`..\..\Users`、`C:\...`）→ 统一相对路径校验
+- **审批一致类**：git_commit 声明 high → low（v2.10 已降，声明残留）、edit_file medium → low、**git_add 补 guard**（confirm 档不再静默放行）
+- **状态/生命周期类**：用户停止后会话被 done 覆盖 → updateStatus stopped 终态保护（可被新任务 running 覆盖）；同会话双发 TOCTOU → 检查通过立即置 running；重复调用守卫 Map 移出循环（跨轮累计复活）；图片降级误触发（任何错误都触发 + 历史图片被永久剥离）→ 仅错误含视觉特征时降级 + 只处理末尾 user 消息 + 重试前重置累加器；后台委派绕过 6 上限 → slots 检查；后台任务清理全深度（子 Agent 内部启动的 job 随父任务结束）；jobs spawn 失败双触发 + 状态错标；后台子 Agent waiters 中止竞态卡死；附件早退路径残留
+- **前端状态路由（并行/队列/会话核心）**：finally/catch 用本连接 connSid（finishAssistantFor/addErrorFor——跨会话清 running/写错会话修复）；abortController 单例 → per-session Map（并行 stop 失效修复）；计划按会话存（后台会话挂起不被误清）；todos/usage 按会话（后台不覆盖视图 + 切换回填）；重放跳过被接管会话 + 后台会话只写缓存（loadSessionCache 不污染全局）；队列消费 root 用会话自身（续跑不传 root 服务端用存储值）；队列失败插回队首；agent-waiting/resumed 前端处理（线程等待提示）；停止反馈服务端落库（重放保留）；Sidebar 切换 loadSession forceView
+- 验证：npm test 全绿（新增 **bugfix 回归套件 33 项**：组合符/收窄/路径边界/SSRF/stopped 保护）+ e2e 实测（组合符命令走审批、glob 越界拒绝）+ web tsc/vite build
+- 📌 排查方法：双 explore agent 并行深扫（前端 store/事件路由 + 后端安全/生命周期），输出 29 项确认 bug（15 后端 + 14 前端），按安全 > 状态 > 一致性分批修复
+
+### v2.12 工具精简 / usage 四桶 / 会话查询【✅ 2026-08-15】
+- **工具 schema 精简（Token 成本杠杆）**：新增 `compactJsonSchema`（loop 组装 tools 时对全部工具参数 JSON Schema 递归裁剪——删冗余元字段 $schema/title/default/examples/additionalProperties/definitions、description 截断 150、enum 截断 12、属性数上限 20、嵌套深度 >5 折叠；纯裁剪不影响工具执行——执行端直接读 args）；工具 description 截断 800（内置工具手写描述普遍 <800 无感，MCP 超长被裁）。实测全内置工具 schema **12146 → 8891 字符（-27%）**；MCP 大 schema（30+ 属性/超长描述）收益更显著
+- **usage 四桶（对齐 harness usage-projection）**：chat.ts 末尾 chunk 解析加 `promptTokens/completionTokens`（uncached=miss / output=completion / cacheRead=hit / cacheWrite 暂无 API 数据）；shared done.usage 扩展四字段；loop/orchestrator 聚合链路贯通；**StatsLine 升级**——「缓存命中 X%（读 N · 未命中 M）· 输出 N tokens」（无缓存数据的端点保持前缀估算兜底）；ContextMeter 占用率环已存在（v3 时落地）
+- **session 查询工具（Agent 复盘/复用）**：`session_search`（low 只读，关键词匹配标题/根目录 + 最近会话列表，返回 id/标题/时间/状态/事件数）+ `session_trace`（low 只读，指定会话的关键事件轨迹摘要——用户消息/文本/工具调用与结果/错误/计划/子智能体/完成，limit 尾部截取）；进 Planner/Reviewer 只读白名单；store 访问可注入（测试防污染真实库）
+- 验证：npm test 全绿（新增 **v212 套件 16 项**：裁剪边界/全工具可裁剪/四桶解析/session 工具）+ 端到端实测（真实模型：session_search 搜出历史会话 → session_trace 复盘 937 事件会话的 80 条关键轨迹）
+- ⏳ **剩余 🟢 低优先级**：持久 bash shell、LSP 工具、read_image（vision 底座，触发条件 = 桌面化或接入视觉模型时）
+
+### v2.12+ 已规划（2026-08-15 更新：v2.12 三项 🟡 全部完成；剩余全为低优先级/触发条件项）
+- 🟢 **低 · 持久 bash shell**（跨调用保留 cwd/env，harness bash-persistent 同款）；**LSP 工具**；**read_image**（vision 底座——触发条件：桌面化或接入视觉模型时）
+- ✅ **usage 四桶 / 工具 schema 精简 / session 查询工具**已随 v2.12 完成（上方）；🔴 子 Agent 控制 / 后台 job 已随 v2.11 完成
 
 ## 低优先级 / 远期（可做可不做）
 
 - ⏳ **v3 团队/公司版 InFu（触发条件已定义，2026-08-12）**：Agent 跑在云端服务器 + 云端沙箱 + 多租户隔离/认证授权。**触发条件 = 出现第二个真实用户或明确的团队使用场景**——在那之前不做（v2 聚焦单机个人化深耕）。**若落地，microVM 随本项一并触发**（多租户 = 不可信代码场景，ROADMAP 已定义）；届时网络隔离在可控环境（云服务器）下随 microVM 一并解决。v3 立项时再讨论具体形态
 - ⏳ WSL2 原生沙箱（bubblewrap/Landlock）作为 L3 备选
-- ⏳ 子智能体增强（恢复子智能体 / 后台模式——参考 Claude Code `SendMessage` 恢复与 Agent View 仪表盘；InFu 事件全量落库已具备重放基础）
+- ✅ **子智能体增强（恢复子智能体 / 后台模式）**已由 v2.11 覆盖（2026-08-15：delegate_task background 后台模式 + send_message 恢复等待中的子智能体 + list_agents/report/interrupt_agent + agent_message 内部通道，对齐 Claude Code SendMessage 与 Agent View）
 
 ---
 

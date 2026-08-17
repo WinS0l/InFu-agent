@@ -1,17 +1,29 @@
 @echo off
 rem ============================================
-rem  InFu one-click launcher (Windows)
-rem  All services share ONE console window:
-rem  closing the window stops EVERYTHING.
+rem  InFu Desktop launcher (Windows)
+rem  Prioritizes packaged desktop app (release\win-unpacked\InFu.exe);
+rem  falls back to source dev mode (electron + built-in agent server).
 rem ============================================
 chcp 65001 >nul 2>&1
 cd /d "%~dp0"
 
-rem ---- cleanup leftover instances on port 4317 ----
+rem ---- cleanup leftover instances ----
+taskkill /F /IM InFu.exe >nul 2>&1
 for /f "tokens=5" %%p in ('netstat -ano ^| findstr ":4317" ^| findstr "LISTENING"') do (
   taskkill /F /PID %%p >nul 2>&1
 )
+for /f "tokens=5" %%p in ('netstat -ano ^| findstr ":9222" ^| findstr "LISTENING"') do (
+  taskkill /F /PID %%p >nul 2>&1
+)
 
+rem ---- 1) packaged desktop app: launch directly ----
+if exist "%~dp0packages\desktop\release\win-unpacked\InFu.exe" (
+  echo [InFu] Launching packaged desktop version...
+  start "" "%~dp0packages\desktop\release\win-unpacked\InFu.exe"
+  exit /b 0
+)
+
+rem ---- 2) source dev mode ----
 if not exist node_modules (
   echo [InFu] Installing dependencies, please wait...
   call npm install --no-audit --no-fund
@@ -22,24 +34,30 @@ if not exist node_modules (
   )
 )
 
+rem ---- first run: config wizard ----
 if not exist "%USERPROFILE%\.infu\config.json" (
   echo [InFu] First run: creating config template...
   call npm run infu -- --setup
 )
-
 findstr /C:"apiKey" "%USERPROFILE%\.infu\config.json" >nul 2>&1
 if errorlevel 1 (
   echo [InFu] No API key configured yet. Opening config wizard...
   call npm run config
 )
 
-rem ---- start Web UI in background (SAME console: closes with window) ----
-start /b cmd /c "cd /d %~dp0packages\web && npm run dev" >nul 2>&1
+rem ---- build and launch desktop app ----
+echo [InFu] Building desktop app...
+call npm run build -w @infu/shared
+call npm run build -w @infu/agent
+call npm run build -w @infu/web
+call npm run build -w @infu/desktop
+if errorlevel 1 (
+  echo [InFu] Build failed. Please check errors above.
+  pause
+  exit /b 1
+)
 
-rem ---- start agent service in foreground ----
-echo [InFu] Starting agent service + Web UI...
+echo [InFu] Starting desktop app...
 echo [InFu] Closing this window stops everything.
-echo [InFu] Opening browser at http://localhost:5174 ...
-start "" http://localhost:5174
-call npm run start
+call npx electron packages/desktop
 pause

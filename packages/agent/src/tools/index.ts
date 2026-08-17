@@ -4,253 +4,64 @@
  */
 
 import { z } from "zod";
-import { exec, execFile, execFileSync } from "node:child_process";
-import { promisify } from "node:util";
 import fs from "node:fs";
-import path from "node:path";
+import path, { join } from "node:path";
 import type { ToolDef, ToolContext, RiskLevel } from "@infu/shared";
 import {
-  sanitizeEnv, isProtectedPath, auditCommand, dockerAvailable, buildDockerArgs,
-  resolveSandboxMode, resolveEffectiveMode, type SandboxMode,
+  sanitizeEnv, isProtectedPath, auditCommand,
 } from "../sandbox/index.js";
-import {
-  winRestrictedAvailable, runRestricted, type RestrictedRunResult,
-} from "../sandbox/win-restricted.js";
 import { detectEgress, egressBlockedMessage } from "../sandbox/net-policy.js";
 import { registerMcpServer, type RegisterInput } from "../mcp/register.js";
 import { registerPlugin, type RegisterPluginInput } from "../plugin/register.js";
 import { listSkills, readSkillContent } from "../plugin/skills.js";
 import { listAgents, readAgentFile } from "../agent/agents.js";
-import { delegateTasks, describeDelegation, isReadOnlyDelegation, type SubagentSpec } from "../agent/subagent.js";
+import { delegateTasks, describeDelegation, isReadOnlyDelegation, startBackgroundSubagent,
+  listBackgroundAgents, interruptBackgroundAgent, sendMessageToAgent, getAgentReport,
+  availableSubagentSlots, MAX_ACTIVE_SUBAGENTS_PER_SESSION,
+  type SubagentSpec } from "../agent/subagent.js";
+import { startBackgroundJob, listJobs, getJobOutput, killJob, auditJobStart } from "./jobs.js";
 import { readMemory, writeMemory, validateTopic, checkPathScope } from "../memory/index.js";
 import { loadConfig } from "../providers/registry.js";
+import { currentApprovalPolicy, isCommandAllowed, hasShellCombinators } from "../approval/policy.js";
+import { findProjectByRoot } from "../projects.js";
 import {
-  currentApprovalPolicy, isToolDisabled, resolveToolRisk, shouldAutoApprove, isCommandAllowed,
-} from "../approval/policy.js";
-
-const execAsync = promisify(exec);
-const execFileAsync = promisify(execFile);
-
-/** 输出截断上限（防止结果撑爆上下文） */
-const MAX_OUTPUT = 12000;
-const MAX_FILE_READ = 512 * 1024; // 512KB
-
-/** 工具结果截断 */
-function clip(s: string, max = MAX_OUTPUT): string {
-  if (s.length <= max) return s;
-  return s.slice(0, max) + `\n...（已截断，共 ${s.length} 字符）`;
-}
-
-/** 命令输出格式化 */
-function fmtOut(o: { stdout: string; stderr: string }, ok: boolean): string {
-  const parts: string[] = [];
-  if (o.stdout.trim()) parts.push(o.stdout.trim());
-  if (o.stderr.trim()) parts.push(`[stderr] ${o.stderr.trim()}`);
-  const body = parts.join("\n") || "(无输出)";
-  return ok ? clip(body) : `命令执行失败：\n${clip(body)}`;
-}
-
-/** 执行 shell 命令（win32 自动选 shell；默认使用消毒后的环境变量；signal 中止时 kill 子进程） */
-async function runShell(
-  command: string,
-  cwd: string,
-  timeoutMs = 60000,
-  env: NodeJS.ProcessEnv = sanitizeEnv(),
-  signal?: AbortSignal
-): Promise<{ ok: boolean; out: string; code: number | null }> {
-  // 先检查工作目录，给出明确错误而不是神秘失败
-  if (!fs.existsSync(cwd) || !fs.statSync(cwd).isDirectory()) {
-    return { ok: false, out: `目录不存在: ${cwd}`, code: null };
-  }
-  try {
-    const { stdout, stderr } = await execAsync(command, {
-      cwd,
-      timeout: timeoutMs,
-      env,
-      shell: process.platform === "win32" ? "cmd.exe" : "/bin/bash",
-      windowsHide: true,
-      encoding: "utf8",
-      maxBuffer: 8 * 1024 * 1024,
-      // v2.5：中止信号传递——父/子智能体被终止时立即 kill 命令（不等 60s 超时）
-      signal,
-    });
-    return { ok: true, out: fmtOut({ stdout, stderr }, true), code: 0 };
-  } catch (e: any) {
-    const code = e.code ?? e.status ?? null;
-    // 中止：不当作错误透出（上层 abort 流程处理）
-    if (signal?.aborted || e.name === "AbortError") {
-      return { ok: false, out: "任务已停止（用户中止）", code: null };
-    }
-    // 关键：错误详情必须透出（目录不存在/找不到命令/退出码），不要吞掉
-    const detail = [e.stderr, e.stdout, e.message ? String(e.message) : ""]
-      .filter((s) => typeof s === "string" && s.trim())
-      .join("\n")
-      .trim();
-    return {
-      ok: false,
-      out: detail
-        ? `命令执行失败（code=${code}）：\n${clip(detail)}`
-        : `命令执行失败（code=${code}）`,
-      code,
-    };
-  }
-}
-
-/** Docker 沙箱执行命令（默认断网、只读挂载、资源限制、任务后销毁） */
-async function runInDocker(command: string, root: string, timeoutMs = 120000): Promise<{ ok: boolean; out: string; code: number | null }> {
-  try {
-    const args = buildDockerArgs(root, command);
-    const { stdout, stderr } = await execFileAsync("docker", args, {
-      timeout: timeoutMs,
-      windowsHide: true,
-      encoding: "utf8",
-      maxBuffer: 8 * 1024 * 1024,
-      env: sanitizeEnv(), // 凭据不进容器
-    });
-    return { ok: true, out: fmtOut({ stdout, stderr }, true), code: 0 };
-  } catch (e: any) {
-    const code = e.code ?? e.status ?? null;
-    const detail = [e.stderr, e.stdout, e.message ? String(e.message) : ""]
-      .filter((s) => typeof s === "string" && s.trim())
-      .join("\n")
-      .trim();
-    return {
-      ok: false,
-      out: detail
-        ? `沙箱执行失败（code=${code}）：\n${clip(detail)}`
-        : `沙箱执行失败（code=${code}）`,
-      code,
-    };
-  }
-}
-
-/** 沙箱档位解析（v2.4：config.sandbox.mode 优先于环境变量；auto 按可用性选择 docker → win 受限 → 软沙箱） */
-async function getSandboxMode(): Promise<SandboxMode> {
-  const requested = resolveSandboxMode(process.env, loadConfig());
-  // 受限可用性统一检查（含 INFU_SANDBOX_RESTRICTED=0 强制禁用；有会话级缓存）
-  const winRestrictedOk = process.platform === "win32" && (await winRestrictedAvailable());
-  if (requested === "auto") {
-    return resolveEffectiveMode(requested, {
-      dockerOk: await dockerAvailable(),
-      winRestrictedOk,
-      platform: process.platform,
-    });
-  }
-  return resolveEffectiveMode(requested, { dockerOk: false, winRestrictedOk, platform: process.platform });
-}
-
-/** 受限执行结果 → 标准输出格式（level/net 映射为模式标签；退出码 0 才算成功，与 Node exec 语义一致） */
-function fmtRestricted(r: RestrictedRunResult): { out: string; ok: boolean; code: number | null; sandbox: string } {
-  const ok = r.ok && !r.timedOut && r.code === 0;
-  const body = [r.stdout, r.stderr]
-    .filter((s) => s.trim())
-    .join(r.stdout.trim() && r.stderr.trim() ? "\n[stderr] " : "\n")
-    .trim();
-  const out = ok
-    ? clip(body || "(无输出)")
-    : `命令执行失败（code=${r.code}${r.timedOut ? "，超时被终止" : ""}）：\n${clip(body)}`;
-  // 令牌等级映射为模式标签
-  const sandbox =
-    r.level === "job-only" ? "restricted:job-only"
-    : r.level === "none" ? "soft"
-    : "restricted";
-  return { out, ok, code: r.code, sandbox };
-}
-
-/**
- * 本地命令统一分派：Docker(L2) → 受限沙箱(L1.5，win32 硬沙箱) → 软沙箱(L1)
- * run_command 与 run_test 共用（修复 run_test 绕过沙箱的历史缺口）。
- * v2.4 档位语义：显式 soft = 纯软沙箱（不再隐式 L1.5）；显式 restricted 不可用时降级 soft；
- * 显式 docker 不可用时报错（不静默降级）；auto 按可用性自动选择。
- * 网络出站控制为命令级策略（net-policy.ts，M6 软控制收尾）：
- * 外传命令在 run_command/run_test 入口拦截，不进入本分派。
- * 返回 sandbox 标签用于审计与展示。
- */
-async function execLocal(
-  command: string,
-  cwd: string,
-  timeoutMs = 60000,
-  signal?: AbortSignal
-): Promise<{ ok: boolean; out: string; code: number | null; sandbox: string }> {
-  const mode = await getSandboxMode();
-  if (mode === "docker") {
-    const r = await runInDocker(command, cwd, timeoutMs);
-    return { ...r, sandbox: "docker" };
-  }
-  if (mode === "off") {
-    const r = await runShell(command, cwd, timeoutMs, sanitizeEnv(), signal);
-    return { ...r, sandbox: "off" };
-  }
-  if (mode === "restricted") {
-    const r = await runRestricted(command, cwd, timeoutMs, sanitizeEnv());
-    if (r) return fmtRestricted(r);
-    // native 异常 → 降级软沙箱（下面统一处理）
-  }
-  // soft / 降级：纯软沙箱（L1，不隐式走 L1.5）
-  const r = await runShell(command, cwd, timeoutMs, sanitizeEnv(), signal);
-  return { ...r, sandbox: "soft" };
-}
-
-/** 沙箱标签 → 展示文本 */
-function sandboxTag(sandbox: string): string {
-  switch (sandbox) {
-    case "docker": return "（Docker 沙箱）";
-    case "restricted": return "（受限沙箱）";
-    case "restricted:job-only": return "（受限沙箱·仅Job）";
-    case "off": return "（直连）";
-    default: return "（软沙箱）";
-  }
-}
-
-/** 递归遍历（跳过常见噪音目录），返回匹配文件列表 */
-function walkFiles(root: string, maxFiles = 2000): string[] {
-  const SKIP = new Set(["node_modules", ".git", "dist", "build", "out", ".next",
-    "coverage", "venv", ".venv", "__pycache__", ".cache", ".idea", ".vscode",
-    ".infu", ".infu-sandbox", "target", ".turbo", ".yarn", ".pnpm-store"]);
-  const results: string[] = [];
-  const stack = [root];
-  while (stack.length && results.length < maxFiles) {
-    const dir = stack.pop()!;
-    let entries: fs.Dirent[];
-    try {
-      entries = fs.readdirSync(dir, { withFileTypes: true });
-    } catch {
-      continue;
-    }
-    for (const ent of entries) {
-      const full = path.join(dir, ent.name);
-      if (ent.isDirectory()) {
-        if (!SKIP.has(ent.name)) stack.push(full);
-      } else if (ent.isFile()) {
-        results.push(full);
-      }
-    }
-  }
-  return results;
-}
-
-/**
- * 审批辅助（v2.4 策略化）：按配置档位与工具覆盖决策——
- * 工具级覆盖先应用（禁用拦截/风险覆盖），再按档位（auto 放行 / confirm 全人工 / smart low 放行）。
- * requireExplicit（联网放行/自注册等安全线）任何档位下都需人工确认。
- * 禁用工具的准确文案由 loop 执行段统一拦截；此处为直调兜底（返回 false）。
- */
-async function guard(
-  ctx: ToolContext,
-  tool: string,
-  risk: RiskLevel,
-  description: string,
-  requireExplicit?: boolean
-): Promise<boolean> {
-  const policy = currentApprovalPolicy();
-  if (isToolDisabled(tool, policy.toolOverrides)) return false;
-  const effectiveRisk = resolveToolRisk(tool, risk, policy.toolOverrides);
-  const auto = shouldAutoApprove(policy, effectiveRisk, requireExplicit);
-  if (auto === true) return true;
-  return ctx.requestApproval(description, effectiveRisk, requireExplicit);
-}
+  clip, MAX_OUTPUT, MAX_FILE_READ, runShell, execLocal, sandboxTag, walkFiles, guard, isPathInside,
+} from "./util.js";
+import { webTools } from "./web.js";
+import { gitTools } from "./git-tools.js";
+import { taskTools } from "./task-tools.js";
+import { sessionTools } from "./session-tools.js";
+import { visionTools } from "./vision.js";
+import { semanticSearch } from "./semantic.js";
+import { execPersistent, closeShellSession } from "./persistent-shell.js";
+import { lspDiagnose } from "./lsp.js";
+import { loadIndex } from "../index/index.js";
+import { fsTools } from "./fs-tools.js";
+import { envTools } from "./env-tools.js";
 
 // ─────────────────────────── 工具定义 ───────────────────────────
+
+/**
+ * 高风险命令正则（v2.4：末尾无 \b——dd if=/…、mkfs.ext4 后随符号（/ .）处无词边界，
+ * 加 \b 会漏检）。v3.1：提取为模块级并导出——run_command 与 run_test 共用同一门槛。
+ */
+export const DANGEROUS = /\b(rm\s+-rf|rmdir\s+\/s|del\s+\/f|format\s+|mkfs|dd\s+if=)/i;
+
+/**
+ * v3 默认会话根目录只读保护：root = config.general.defaultRoot 且未注册为项目时，
+ * 禁止写操作（自由会话容器目录；已注册项目 = 用户显式授权，豁免）。
+ * isReadOnlySessionRoot 同时供记忆工具判断（自由会话只能读写全局记忆）。
+ */
+function isReadOnlySessionRoot(root: string): boolean {
+  const cfg = loadConfig();
+  const sessionRoot = cfg?.general?.defaultRoot;
+  if (!sessionRoot) return false;
+  return path.resolve(root) === path.resolve(sessionRoot) && !findProjectByRoot(root);
+}
+function sessionRootReadOnlyBlock(ctx: ToolContext): string | null {
+  if (!isReadOnlySessionRoot(ctx.root)) return null;
+  return "默认会话根目录为只读容器——自由会话不能修改此目录，请先在侧栏选择/创建项目后执行写操作";
+}
 
 /**
  * delegate_task 参数 schema（v2.5）：单任务（prompt）或并行批量（tasks[]）互斥。
@@ -273,6 +84,8 @@ const delegateTaskSchema = z
     root: z.string().min(1).optional(),
     maxSteps: z.number().int().min(1).max(50).optional(),
     modelId: z.string().min(1).optional(),
+    // v2.11：后台模式（立即返回不阻塞，list_agents/report/send_message/interrupt_agent 管理）
+    background: z.boolean().optional().describe("后台模式（默认 false=同步等待回收）。true 时立即返回子智能体 id，父级可继续其他任务；子智能体可用 agent_message 暂停等待父级回复（send_message 恢复）"),
   })
   .superRefine((v, ctx) => {
     const single = !!v.prompt;
@@ -295,10 +108,12 @@ export const TOOLS: Record<string, ToolDef> = {
     async execute(args, ctx) {
       const rel = args.path as string;
       const abs = path.resolve(ctx.root, rel);
-      if (!abs.startsWith(path.resolve(ctx.root))) return "错误：路径越界（不允许访问项目根之外）";
+      // v3.1 附件只读白名单：用户附加的文件/文件夹（绝对路径）可读
+      const inExtra = (ctx.extraReadDirs ?? []).some((d) => isPathInside(d, abs));
+      if (!isPathInside(ctx.root, abs) && !inExtra) return "错误：路径越界（不允许访问项目根之外）";
       // v2.6 路径作用域（INFU.md「路径作用域」节声明式规则：禁止直接拒绝 / 白名单模式）
       const scopeErr = checkPathScope(rel, ctx.scopeRules);
-      if (scopeErr) return `错误：路径超出作用域——${scopeErr}（项目指令「路径作用域」节；如需访问请更新规则或与用户确认）`;
+      if (scopeErr && !inExtra) return `错误：路径超出作用域——${scopeErr}（项目指令「路径作用域」节；如需访问请更新规则或与用户确认）`;
       if (!fs.existsSync(abs) || !fs.statSync(abs).isFile()) return `错误：文件不存在 ${rel}`;
       if (fs.statSync(abs).size > MAX_FILE_READ) return `错误：文件过大（>${MAX_FILE_READ} 字节），请用 search_code 定位相关内容`;
       const all = fs.readFileSync(abs, "utf-8").split("\n");
@@ -316,7 +131,9 @@ export const TOOLS: Record<string, ToolDef> = {
     name: "write_file",
     description:
       "写入文件（覆盖）。创建新文件或整体重写已有文件。注意：此操作会覆盖目标文件，需用户确认。",
-    risk: "medium",
+    // v2.10：文件编辑降 low（对齐主流：主流 默认模式写文件自动执行；
+    // 安全不降级——敏感路径/只读容器/工作树隔离等写保护仍在）
+    risk: "low",
     schema: z.object({
       path: z.string().describe("相对项目根的文件路径"),
       content: z.string().describe("完整文件内容"),
@@ -324,7 +141,7 @@ export const TOOLS: Record<string, ToolDef> = {
     async execute(args, ctx) {
       const rel = args.path as string;
       const abs = path.resolve(ctx.root, rel);
-      if (!abs.startsWith(path.resolve(ctx.root))) return "错误：路径越界（不允许访问项目根之外）";
+      if (!isPathInside(ctx.root, abs)) return "错误：路径越界（不允许访问项目根之外）";
       // v2.6 路径作用域（INFU.md「路径作用域」节）
       const scopeErr = checkPathScope(rel, ctx.scopeRules);
       if (scopeErr) return `错误：路径超出作用域——${scopeErr}（项目指令「路径作用域」节；如需写入请更新规则或与用户确认）`;
@@ -333,8 +150,11 @@ export const TOOLS: Record<string, ToolDef> = {
       if (protectedName) {
         return `错误：目标路径位于受保护区域（${protectedName}），拒绝写入——Agent 没有修改 SSH 密钥/凭据/配置的合法场景`;
       }
+      // v3 默认会话根目录只读（自由会话容器）
+      const roBlock = sessionRootReadOnlyBlock(ctx);
+      if (roBlock) return `错误：${roBlock}`;
       const desc = `写入文件 ${rel}（${(args.content as string).length} 字符）`;
-      if (!(await guard(ctx, "write_file", "medium", desc))) return "用户拒绝：未写入";
+      if (!(await guard(ctx, "write_file", "low", desc))) return "用户拒绝：未写入";
       fs.mkdirSync(path.dirname(abs), { recursive: true });
       fs.writeFileSync(abs, args.content as string, "utf-8");
       const lines = (args.content as string).split("\n").length;
@@ -346,7 +166,8 @@ export const TOOLS: Record<string, ToolDef> = {
     name: "edit_file",
     description:
       "精确替换文件中的一段文本（第一次匹配）。用于局部修改，比 write_file 更安全。",
-    risk: "medium",
+    // v2.10：文件编辑降 low（对齐主流自动执行；安全不降级——写保护/只读容器/工作树隔离仍在）
+    risk: "low",
     schema: z.object({
       path: z.string().describe("相对项目根的文件路径"),
       old_text: z.string().describe("被替换的原文（必须与文件内容完全一致）"),
@@ -355,13 +176,16 @@ export const TOOLS: Record<string, ToolDef> = {
     async execute(args, ctx) {
       const rel = args.path as string;
       const abs = path.resolve(ctx.root, rel);
-      if (!abs.startsWith(path.resolve(ctx.root))) return "错误：路径越界";
+      if (!isPathInside(ctx.root, abs)) return "错误：路径越界";
       const scopeErr = checkPathScope(rel, ctx.scopeRules);
       if (scopeErr) return `错误：路径超出作用域——${scopeErr}（项目指令「路径作用域」节）`;
       const protectedName = isProtectedPath(abs);
       if (protectedName) {
         return `错误：目标路径位于受保护区域（${protectedName}），拒绝修改`;
       }
+      // v3 默认会话根目录只读（自由会话容器）
+      const roBlock = sessionRootReadOnlyBlock(ctx);
+      if (roBlock) return `错误：${roBlock}`;
       if (!fs.existsSync(abs)) return `错误：文件不存在 ${rel}`;
       const content = fs.readFileSync(abs, "utf-8");
       const oldText = args.old_text as string;
@@ -369,7 +193,7 @@ export const TOOLS: Record<string, ToolDef> = {
         return "错误：未找到匹配的原文（old_text 与文件内容不一致），请先 read_file 确认";
       }
       const desc = `修改文件 ${rel}（替换 ${oldText.length} 字符）`;
-      if (!(await guard(ctx, "edit_file", "medium", desc))) return "用户拒绝：未修改";
+      if (!(await guard(ctx, "edit_file", "low", desc))) return "用户拒绝：未修改";
       const updated = content.replace(oldText, args.new_text as string);
       fs.writeFileSync(abs, updated, "utf-8");
       // 行数 diff 统计（+N -M 行）
@@ -392,11 +216,20 @@ export const TOOLS: Record<string, ToolDef> = {
       max_results: z.number().int().min(1).max(100).optional().describe("最大结果数（默认 30）"),
     }),
     async execute(args, ctx) {
-      const re = new RegExp(args.pattern as string);
+      // v2.10：正则无效时友好报错（模型可据提示自纠转义，而非笼统「工具执行异常」）
+      let re: RegExp;
+      try {
+        re = new RegExp(args.pattern as string);
+      } catch (e) {
+        return `错误：正则表达式无效（${(e as Error).message}）——需要匹配字面特殊字符时请转义（如 \\. \\+ \\( \\)）`;
+      }
       const include = (args.include as string[] | undefined) || null;
       const max = (args.max_results as number | undefined) || 30;
       const hits: string[] = [];
-      for (const file of walkFiles(ctx.root)) {
+      // v2.7 索引复用：有索引用索引文件清单（更快），否则实时扫描
+      const idx = loadIndex(ctx.root);
+      const files = idx ? idx.files.map((f) => path.resolve(ctx.root, f.file)) : walkFiles(ctx.root);
+      for (const file of files) {
         if (include && !include.some((ext) => file.endsWith(ext))) continue;
         if (hits.length >= max) break;
         try {
@@ -425,7 +258,7 @@ export const TOOLS: Record<string, ToolDef> = {
     async execute(args, ctx) {
       const rel = (args.path as string | undefined) || ".";
       const abs = path.resolve(ctx.root, rel);
-      if (!abs.startsWith(path.resolve(ctx.root))) return "错误：路径越界";
+      if (!isPathInside(ctx.root, abs)) return "错误：路径越界";
       const scopeErr = checkPathScope(rel, ctx.scopeRules);
       if (scopeErr) return `错误：路径超出作用域——${scopeErr}（项目指令「路径作用域」节）`;
       if (!fs.existsSync(abs) || !fs.statSync(abs).isDirectory()) return `错误：目录不存在 ${rel}`;
@@ -446,12 +279,14 @@ export const TOOLS: Record<string, ToolDef> = {
   run_command: {
     name: "run_command",
     description:
-      "在项目内执行 shell 命令（终端执行）。可运行构建、安装依赖、启动服务、查看环境等。高风险命令（删除/强制操作）需确认。需要网络（如 npm install）时设 network=true，须人工审批放行（默认断网执行）。",
+      "在项目内执行 shell 命令（终端执行）。可运行构建、安装依赖、启动服务、查看环境等。高风险命令（删除/强制操作）需确认。需要网络（如 npm install）时设 network=true，须人工审批放行（默认断网执行）。background=true 时后台运行（立即返回 job id 不阻塞，job_list/job_output/job_kill 管理，任务结束时自动终止）。persistent=true 时用持久 shell 会话执行（跨调用保留 cwd/env，如 cd 后下一轮命令仍在同一目录；⚠ 持久会话脱离沙箱）。",
     risk: "medium",
     schema: z.object({
       command: z.string().describe("要执行的命令"),
       timeout: z.number().int().min(1000).max(300000).optional().describe("超时毫秒（默认 60000）"),
       network: z.boolean().optional().describe("是否允许联网（默认 false=断网执行；true 需人工审批，自动批准模式不适用）"),
+      background: z.boolean().optional().describe("后台运行（默认 false=等待完成；true 立即返回 job id，用 job_list/job_output/job_kill 管理）"),
+      persistent: z.boolean().optional().describe("持久 shell 会话执行（默认 false=一次性进程；true 复用常驻 shell——跨调用保留 cwd/env，如 cd 后继续、export 环境变量。⚠ 持久会话脱离沙箱（进程已起无法施加受限令牌），断网策略/审批照常生效"),
     }),
     async execute(args, ctx) {
       const command = args.command as string;
@@ -475,12 +310,19 @@ export const TOOLS: Record<string, ToolDef> = {
           return `${msg}\n⚠ 联网审批被拒绝（断网策略）`;
         }
       } else {
-        // 常规审批（高危命令 high；其余 medium）；命令白名单（v2.4 设置）命中的命令跳过高危审批
+        // 常规审批（高危命令 high；其余 medium）；命令白名单（v2.4 设置）——
+        // v2.10 批 7 对齐主流（主流 allowedCommands）：白名单命中的命令**完全放行不弹窗**
+        // （仅联网放行仍人工——外传数据红线不豁免）
         const policy = currentApprovalPolicy();
         // 末尾无 \b：dd if=/…、mkfs.ext4 后随符号（/ .）处无词边界，加 \b 会漏检
-        const DANGEROUS = /\b(rm\s+-rf|rmdir\s+\/s|del\s+\/f|format\s+|mkfs|dd\s+if=)/i;
-        if (DANGEROUS.test(command) && !isCommandAllowed(command, policy.commandAllowlist)) {
-          if (!(await guard(ctx, "run_command", "high", `执行高风险命令：${command}`))) {
+        // v2.13：白名单放行的前提 = 单条只读命令——含 shell 组合符（&& ; | > < ` $()）
+        // 时退回正常审批（"git status && rm -rf x" 命中 git status* 但实际执行 rm）
+        if (isCommandAllowed(command, policy.commandAllowlist) && !hasShellCombinators(command)) {
+          /* 白名单命令：信任放行（高危检测也被豁免——用户显式配置的信任） */
+        } else if (DANGEROUS.test(command)) {
+          // v3.1 审计修复：高危命令升级为 requireExplicit——CLI -y / 定时任务无人值守
+          // 一律拒绝（此前无人值守自动放行 rm -rf 等，与「安全红线绝不自动放行」矛盾）
+          if (!(await guard(ctx, "run_command", "high", `执行高风险命令：${command}`, true))) {
             return "用户拒绝：高危命令未执行";
           }
         } else if (!(await guard(ctx, "run_command", "medium", `执行命令：${command}`))) {
@@ -488,11 +330,66 @@ export const TOOLS: Record<string, ToolDef> = {
         }
       }
       const timeoutMs = (args.timeout as number | undefined) || 60000;
-
-      // 沙箱统一分派（docker / 受限沙箱 / 软沙箱）；signal 中止时 kill 命令
-      const r = await execLocal(command, ctx.root, timeoutMs, ctx.abortSignal);
+      // 联网提示（在 background 分支与同步返回中共用）
       const netNote = wantNetwork && !netAllowed ? "\n⚠ 该命令未获联网放行（断网执行）" : "";
       const netTag = netAllowed ? "（联网放行）" : "";
+
+      // v3.0 批 11 持久 shell：复用常驻会话（保留 cwd/env）；审批/断网门禁已通过
+      if (args.persistent === true) {
+        const sid = ctx.sessionId ?? "default";
+        try {
+          const out = await execPersistent(sid, ctx.root, command, timeoutMs);
+          // v3.1 审计修复：补命令审计（原实现提前 return 绕过 auditCommand——持久分支
+          // 与 background/同步分支同为命令执行，必须进 commands.log）
+          auditCommand(ctx.root, command, true, out.slice(0, 120), "persistent-shell");
+          return `（持久 shell 会话执行）
+` + (out.trim() || "（无输出）") + netNote + netTag;
+        } catch (e) {
+          auditCommand(ctx.root, command, false, (e as Error).message.slice(0, 120), "persistent-shell");
+          return `持久 shell 执行失败：${(e as Error).message}`;
+        }
+      }
+
+      // v2.11 后台模式：启动后立即返回（不阻塞 Agent 循环）；审批/断网门禁已通过，与同步同安全语义
+      if (args.background === true) {
+        let job;
+        try {
+          job = startBackgroundJob(command, ctx.root, ctx.sessionId, ctx.delegationDepth ?? 0, ctx.emit);
+        } catch (e) {
+          return `错误：${(e as Error).message}`;
+        }
+        auditJobStart(ctx.root, command, job.id);
+        return (
+          `已后台启动任务 ${job.id}（不阻塞，可继续其他工作）：\n${command}` +
+          `\n\n管理：job_list 查看状态 / job_output(job_id) 看输出 / job_kill(job_id) 终止。` +
+          netNote + netTag
+        );
+      }
+
+      // 沙箱统一分派（docker / 受限沙箱 / 软沙箱）；signal 中止时 kill 命令；
+      // v2.14 批 18：子智能体 agent 文件 sandbox 字段覆盖档位
+      const r = await execLocal(command, ctx.root, timeoutMs, ctx.abortSignal, ctx.sandboxMode);
+
+      // v2.10 输出落盘：输出 > 8K 时完整写入 .infu/outputs/*.log，
+      // 回填 head 4K + 路径提示 + tail 1K（模型可用 read_file 看完整输出；事件/落库仍完整）
+      const outText = r.out;
+      if (outText.length > 8000) {
+        try {
+          const outDir = join(ctx.root, ".infu", "outputs");
+          fs.mkdirSync(outDir, { recursive: true });
+          const outFile = join(outDir, `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}.log`);
+          fs.writeFileSync(outFile, outText, "utf-8");
+          const head = outText.slice(0, 4096);
+          const tail = outText.slice(-1024);
+          return (
+            `${head}\n[... 命令输出过长（共 ${outText.length} 字符），完整输出已保存到 ${outFile}——需要时用 read_file 查看 …]\n${tail}` +
+            netNote +
+            (r.ok ? `\n${sandboxTag(r.sandbox)}${netTag}执行完成` : `\n${sandboxTag(r.sandbox)}${netTag}`)
+          );
+        } catch {
+          /* 落盘失败回退原输出（trimToolResult 仍会裁剪回填副本） */
+        }
+      }
 
       // 命令审计（所有模式，含沙箱档位）
       auditCommand(ctx.root, command, r.ok, r.out, r.sandbox);
@@ -500,7 +397,7 @@ export const TOOLS: Record<string, ToolDef> = {
     },
   },
 
-  // ── v2.3 MCP 自注册（opencode config-hook 模式 → 受控工具 + 人工审批）──
+  // ── v2.3 MCP 自注册（主流 config-hook 模式 → 受控工具 + 人工审批）──
   // 只允许追加 mcpServers 节（models/providers/roles/apiKey 不可达）；high + requireExplicit
   // 审批（-y 也不放行）；仅 Executor/直接模式注入（Planner/Reviewer 只读白名单不含）
   mcp_register: {
@@ -595,16 +492,17 @@ export const TOOLS: Record<string, ToolDef> = {
     },
   },
 
-  // ── v2.5 子智能体委派（opencode 式：独立上下文/并行执行/结果回收；agent 文件化定义见 agent/agents.ts）──
+  // ── v2.5 子智能体委派（函数式：独立上下文/并行执行/结果回收；agent 文件化定义见 agent/agents.ts）──
   delegate_task: {
     name: "delegate_task",
     description:
       "委派子智能体执行子任务：以独立上下文运行一个子 Agent（或 tasks 并行多个不同任务，同时跑），完成后回收结果摘要。\n" +
-      "调用时机（对齐 ZCode）：\n" +
+      "调用时机（对齐主流）：\n" +
       "· explore（只读，免审批）：探索/调研/摸清现状——回答需要跨多文件扫描、只需结论不要文件转储时；指定搜索广度（medium/very thorough）\n" +
       "· general-purpose（全工具，写能力需一次授权）：复杂多步任务——深度审计/代码审查/实现功能等需要多步推理执行时\n" +
       "· 单点查找（已知文件/符号/值）直接搜索即可，不要委派\n" +
       "· 有多个独立子任务时用 tasks 数组并行（最多 6 个）\n" +
+      "· 需要后台跑（不阻塞当前任务、稍后回收结果）时设 background=true：立即返回子智能体 id，用 list_agents 查看状态 / report 回收结果 / send_message 与等待中的子智能体交互 / interrupt_agent 中止\n" +
       "agent 参数可引用内置角色（explore / general-purpose）或 .infu/agents/<name>.md 角色文件；只读委派免审批，写能力委派需一次授权审批。",
     risk: "high",
     schema: delegateTaskSchema,
@@ -627,7 +525,7 @@ export const TOOLS: Record<string, ToolDef> = {
             return `错误：未找到 agent 定义 "${t.agent}"（可用：${available}；写入 .infu/agents/<name>.md 即自动注册）`;
           }
         }
-        // v2.5 返工（对齐 ZCode）：只读委派（explore / 只读白名单）免审批——
+        // v2.5 返工（对齐主流）：只读委派（explore / 只读白名单）免审批——
         // 读文件搜索不该打断；有写能力的委派（默认全工具/白名单含写工具）→ 一次授权审批，
         // 批准后子智能体内部继承授权（requireExplicit 安全红线仍逐条弹）。
         const readOnly = tasks.every((t) => isReadOnlyDelegation(t, ctx.root));
@@ -638,7 +536,7 @@ export const TOOLS: Record<string, ToolDef> = {
           );
           if (!approved) return "用户拒绝：未授权该委派任务";
         }
-        return await delegateTasks(tasks, {
+        const delegationCtx = {
           tools: TOOLS,
           root: ctx.root,
           emit: ctx.emit,
@@ -650,25 +548,198 @@ export const TOOLS: Record<string, ToolDef> = {
           abortSignal: ctx.abortSignal,
           parentCallId: ctx.callId,
           readOnly,
-        });
+          sessionId: ctx.sessionId,
+        };
+        // v2.11 后台模式：立即返回 id（不阻塞父级）；子 Agent 在注册表异步跑完，父级用
+        // list_agents/report/send_message/interrupt_agent 管理
+        if (args.background === true) {
+          // v2.13 修复：后台模式同样受 per-session 上限约束（原实现绕过检查——
+          // 父级可无限启动后台子 Agent 耗尽并发模型请求）
+          const slots = availableSubagentSlots(ctx.sessionId);
+          if (tasks.length > slots) {
+            return `错误：该会话子 Agent 已达上限 ${MAX_ACTIVE_SUBAGENTS_PER_SESSION} 个（当前 ${MAX_ACTIVE_SUBAGENTS_PER_SESSION - slots} 个运行中）——请等待现有子任务完成，或减少本次并行任务数（最多再开 ${slots} 个）`;
+          }
+          const started = tasks.map((t) => startBackgroundSubagent(t, delegationCtx));
+          return (
+            `已后台启动 ${started.length} 个子智能体（不阻塞，父级可继续其他任务）：\n` +
+            started.map((h) => `· ${h.id}（${h.name}）`).join("\n") +
+            `\n\n管理：list_agents 查看状态；report(agent_id) 回收结果；send_message(agent_id, message) 回复等待中的子智能体；interrupt_agent(agent_id) 中止。`
+          );
+        }
+        return await delegateTasks(tasks, delegationCtx);
       } catch (e) {
         return `错误：${(e as Error).message}`;
       }
     },
   },
 
+  // ── v2.11 子智能体控制（后台模式管理；对齐主流 SendMessage 恢复 + Agent View 仪表盘）──
+  list_agents: {
+    name: "list_agents",
+    description:
+      "列出当前会话的后台子智能体（delegate_task background=true 启动的）：id/名称/状态（运行中/等待消息/完成/异常）/模型/步数/工具次数/委派任务摘要。用于管理后台子任务。",
+    risk: "low",
+    schema: z.object({}),
+    async execute(_args, ctx) {
+      const agents = listBackgroundAgents(ctx.sessionId);
+      if (!agents.length) return "当前会话没有后台子智能体（用 delegate_task background=true 启动）";
+      const lines = agents.map((a) => {
+        const st = a.status === "running" ? "运行中" : a.status === "waiting" ? "等待消息" : a.status === "done" ? "完成" : "异常";
+        return `· ${a.id}（${a.name}）[${st}] ${a.model} ${a.steps}步/${a.toolCount}次工具 — ${a.prompt.slice(0, 80)}`;
+      });
+      return `后台子智能体（${agents.length} 个）：\n${lines.join("\n")}\n\n回收: report(agent_id)；恢复等待: send_message(agent_id, message)；中止: interrupt_agent(agent_id)`;
+    },
+  },
+
+  report: {
+    name: "report",
+    description:
+      "回收后台子智能体的结果（delegate_task background=true 启动的）。运行中返回进度；等待消息的返回其消息与恢复方式；已完成返回最终摘要。",
+    risk: "low",
+    schema: z.object({
+      agent_id: z.string().describe("子智能体 id（list_agents 查看）"),
+    }),
+    async execute(args, ctx) {
+      return getAgentReport(ctx.sessionId, String(args.agent_id ?? ""));
+    },
+  },
+
+  send_message: {
+    name: "send_message",
+    description:
+      "给等待中的后台子智能体发送消息并恢复其任务（对齐主流 SendMessage：子智能体用 agent_message 暂停等待父级回复时，用它回复；运行中/已完成的子智能体不能接收）。",
+    risk: "low",
+    schema: z.object({
+      agent_id: z.string().describe("子智能体 id（list_agents 查看）"),
+      message: z.string().describe("回复内容（子智能体将把它作为用户消息继续任务）"),
+    }),
+    async execute(args, ctx) {
+      const r = sendMessageToAgent(ctx.sessionId, String(args.agent_id ?? ""), String(args.message ?? ""));
+      // 恢复成功 → agent-resumed 事件（前端子 Agent 状态刷新；落库审计）
+      if (r.startsWith("消息已发送")) ctx.emit({ type: "agent-resumed", id: String(args.agent_id ?? "") });
+      return r;
+    },
+  },
+
+  interrupt_agent: {
+    name: "interrupt_agent",
+    description:
+      "中止后台子智能体（agent_id 指定一个，或 all=true 全部）——其任务立即停止，进度结果可用 report 查看。",
+    risk: "low",
+    schema: z.object({
+      agent_id: z.string().optional().describe("子智能体 id（list_agents 查看）"),
+      all: z.boolean().optional().describe("中止全部后台子智能体（默认 false）"),
+    }),
+    async execute(args, ctx) {
+      if (args.all === true) {
+        const all = listBackgroundAgents(ctx.sessionId);
+        let n = 0;
+        for (const a of all) {
+          if (a.status === "running" || a.status === "waiting") {
+            interruptBackgroundAgent(ctx.sessionId, a.id);
+            n++;
+          }
+        }
+        return n ? `已请求中止 ${n} 个后台子智能体` : "当前没有运行中的后台子智能体";
+      }
+      const id = String(args.agent_id ?? "");
+      if (!id) return "错误：需要 agent_id 或 all=true";
+      if (!interruptBackgroundAgent(ctx.sessionId, id)) return `错误：未找到后台子智能体 ${id}（用 list_agents 查看）`;
+      return `已请求中止子智能体 ${id}（其任务将立即停止）`;
+    },
+  },
+
+  // 子智能体内部通道（仅后台子智能体注入 ctx.agentChannel；父级/同步子智能体调用返回错误）
+  agent_message: {
+    name: "agent_message",
+    description:
+      "（子智能体内部）向父智能体发送消息并暂停等待回复——需要父级决策/补充信息时使用。父智能体用 send_message 回复后任务继续。",
+    risk: "low",
+    schema: z.object({
+      message: z.string().describe("发给父智能体的消息（问题/进度/需要的信息）"),
+    }),
+    async execute(args, ctx) {
+      if (!ctx.agentChannel) {
+        return "错误：agent_message 仅后台子智能体可用（delegate_task background=true 启动）——请自行决策，或在最终结果中说明";
+      }
+      const reply = await ctx.agentChannel.waitForMessage(String(args.message ?? ""));
+      if (reply == null) return "父智能体已中止（任务停止）";
+      return `父智能体回复：${reply}`;
+    },
+  },
+
+  // ── v2.11 后台任务（job）管理（run_command background=true 启动；主流 jobs 同款）──
+  job_list: {
+    name: "job_list",
+    description:
+      "列出当前会话的后台任务（run_command background=true 启动的）：id/命令/状态（运行中/完成/失败/已终止）/退出码/已运行时长。",
+    risk: "low",
+    schema: z.object({}),
+    async execute(_args, ctx) {
+      const jobs = listJobs(ctx.sessionId);
+      if (!jobs.length) return "当前会话没有后台任务（run_command 加 background=true 启动后台任务）";
+      const lines = jobs.map((j) => {
+        const st = j.status === "running" ? "运行中" : j.status === "done" ? "完成" : j.status === "failed" ? "失败" : "已终止";
+        return `· ${j.id} [${st}${j.code != null ? ` code=${j.code}` : ""}] ${Math.round((Date.now() - j.startedAt) / 1000)}s — ${j.command.slice(0, 80)}`;
+      });
+      return `后台任务（${jobs.length} 个）：\n${lines.join("\n")}\n\n查看输出: job_output(job_id)；终止: job_kill(job_id)`;
+    },
+  },
+
+  job_output: {
+    name: "job_output",
+    description:
+      "读取后台任务的输出（run_command background=true 启动的；完整缓冲，超长自动截断）。tail 参数可只看末尾。",
+    risk: "low",
+    schema: z.object({
+      job_id: z.string().describe("任务 id（job_list 查看）"),
+      tail: z.number().int().min(1).max(100000).optional().describe("只看末尾 N 字符（默认全部缓冲）"),
+    }),
+    async execute(args, ctx) {
+      return getJobOutput(ctx.sessionId, String(args.job_id ?? ""), args.tail as number | undefined);
+    },
+  },
+
+  job_kill: {
+    name: "job_kill",
+    description:
+      "终止后台任务（run_command background=true 启动的）——强制结束其进程树。",
+    risk: "low",
+    schema: z.object({
+      job_id: z.string().describe("任务 id（job_list 查看）"),
+    }),
+    async execute(args, ctx) {
+      return killJob(ctx.sessionId, String(args.job_id ?? ""));
+    },
+  },
+
   git_diff: {
     name: "git_diff",
-    description: "查看 Git 工作区改动（diff）。",
+    description:
+      "查看 Git 改动（diff）。默认带文件统计（--stat）+ 完整 diff；stat=false 只看完整 diff，file 指定后只看该文件的改动。",
     risk: "low",
     schema: z.object({
       path: z.string().optional().describe("相对项目根的目录（默认根）"),
       staged: z.boolean().optional().describe("查看暂存区 diff（默认 false 看工作区）"),
+      stat: z.boolean().optional().describe("是否附带文件统计（--stat，默认 true）"),
+      file: z.string().optional().describe("只看某个文件的改动（相对项目根的路径）"),
     }),
     async execute(args, ctx) {
       const rel = (args.path as string | undefined) || ".";
       const abs = path.resolve(ctx.root, rel);
-      const r = await runShell(args.staged ? "git diff --staged --stat && git diff --staged" : "git diff --stat && git diff", abs, 60000, sanitizeEnv(), ctx.abortSignal);
+      const wantStat = args.stat !== false;
+      const file = args.file as string | undefined;
+      // v2.13：file 参数命令注入修复——只允许安全字符（防 `$() 反引号在双引号内执行；
+      // git_diff 为 low 免审批，必须硬校验而非转义）
+      if (file !== undefined && !/^[^\\'"`$()&|<>;\n]+$/.test(file)) {
+        return "错误：file 参数包含不安全字符（仅允许普通文件名/路径字符）";
+      }
+      const gitBase = args.staged ? "git diff --staged" : "git diff";
+      const fileArg = file ? ` -- "${file.replace(/"/g, '\\"')}"` : "";
+      const cmd = wantStat
+        ? `${gitBase} --stat${fileArg} && ${gitBase}${fileArg}`
+        : `${gitBase}${fileArg}`;
+      const r = await runShell(cmd, abs, 60000, sanitizeEnv(), ctx.abortSignal);
       if (!r.ok) {
         if (/not a git repository/i.test(r.out)) return `该目录不是 Git 仓库：${abs}`;
         return r.out;
@@ -680,7 +751,8 @@ export const TOOLS: Record<string, ToolDef> = {
   run_test: {
     name: "run_test",
     description: "运行项目测试。自动检测测试框架（npm test / pytest / go test 等），或执行指定命令。",
-    risk: "medium",
+    // v2.10：跑测试降 low（主流自动执行；run_test 内部命令已走沙箱分派）
+    risk: "low",
     schema: z.object({
       command: z.string().optional().describe("自定义测试命令（默认自动检测）"),
       path: z.string().optional().describe("相对项目根的目录（默认根）"),
@@ -699,7 +771,21 @@ export const TOOLS: Record<string, ToolDef> = {
         else if (fs.existsSync(path.join(abs, "Cargo.toml"))) cmd = "cargo test";
         else return "未检测到测试框架，请用 command 参数指定";
       }
-      if (!(await guard(ctx, "run_test", "medium", `运行测试：${cmd}`))) return "用户拒绝：未运行测试";
+      // v3.1 审计修复：自定义 command 与 run_command 同门槛——高危命令 requireExplicit
+      // （无人值守/auto 档不放行）、普通命令 medium（此前 low 免审批 = 任意命令旁路通道；
+      // 自动检测出的标准测试命令仍 low 自动执行）
+      if (explicit) {
+        const policy = currentApprovalPolicy();
+        if (DANGEROUS.test(explicit) && !isCommandAllowed(explicit, policy.commandAllowlist)) {
+          if (!(await guard(ctx, "run_test", "high", `执行高风险测试命令：${explicit}`, true))) {
+            return "用户拒绝：高风险测试命令未执行";
+          }
+        } else if (!(await guard(ctx, "run_test", "medium", `运行测试：${explicit}`))) {
+          return "用户拒绝：未运行测试";
+        }
+      } else if (!(await guard(ctx, "run_test", "low", `运行测试：${cmd}`))) {
+        return "用户拒绝：未运行测试";
+      }
       // 断网策略：测试默认断网，外传命令拦截（run_test 无 network 参数，需去掉外传工具或改用 run_command）
       const egress = detectEgress(cmd);
       if (egress) {
@@ -707,8 +793,9 @@ export const TOOLS: Record<string, ToolDef> = {
         auditCommand(abs, cmd, false, msg, "egress-blocked");
         return `${msg}\n（受限沙箱·断网策略）测试未执行`;
       }
-      // 测试命令与 run_command 同走沙箱分派（docker / 受限沙箱 / 软沙箱）；signal 中止时 kill
-      const r = await execLocal(cmd, abs, 300000, ctx.abortSignal);
+      // 测试命令与 run_command 同走沙箱分派（docker / 受限沙箱 / 软沙箱）；signal 中止时 kill；
+      // v2.14 批 18：子智能体 agent 文件 sandbox 字段覆盖档位
+      const r = await execLocal(cmd, abs, 300000, ctx.abortSignal, ctx.sandboxMode);
       auditCommand(abs, cmd, r.ok, r.out, r.sandbox);
       return r.out + (r.ok ? `\n${sandboxTag(r.sandbox)}执行完成` : `\n${sandboxTag(r.sandbox)}`);
     },
@@ -752,7 +839,7 @@ export const TOOLS: Record<string, ToolDef> = {
         else if (base.endsWith(".csproj") && !detected.includes(flags["*.csproj"])) detected.push(flags["*.csproj"]);
       }
 
-      // 框架识别（package.json 依赖）
+      // 框架识别（package.json 依赖；v2.10 扩充常见框架/构建工具）
       let framework = "";
       try {
         const pj = JSON.parse(fs.readFileSync(path.join(abs, "package.json"), "utf-8"));
@@ -762,10 +849,34 @@ export const TOOLS: Record<string, ToolDef> = {
         else if (deps.angular || deps["@angular/core"]) framework = "Angular";
         else if (deps.svelte) framework = "Svelte";
         if (deps.next) framework += " + Next.js";
+        else if (deps.nuxt || deps["nuxt3"]) framework += " + Nuxt";
+        if (deps.astro) framework += " + Astro";
+        if (deps.tauri) framework += " + Tauri（桌面）";
+        if (deps.electron) framework += " + Electron（桌面）";
         if (deps["@nestjs/core"]) framework += " + NestJS";
         if (deps.express) framework += " + Express";
+        else if (deps.fastify) framework += " + Fastify";
+        if (deps.vite) framework += " + Vite";
+        else if (deps.webpack) framework += " + Webpack";
         if (deps["@infu/agent"] || deps.ai) framework += " + AI SDK";
+        if (deps.zustand || deps.redux) framework += " + 状态管理";
       } catch { /* 非 Node 项目 */ }
+
+      // v2.10：Python 框架识别（requirements.txt / pyproject.toml 依赖名）
+      if (!framework) {
+        try {
+          const req = fs.readFileSync(path.join(abs, "requirements.txt"), "utf-8").toLowerCase();
+          if (req.includes("fastapi")) framework = "FastAPI";
+          else if (req.includes("django")) framework = "Django";
+          else if (req.includes("flask")) framework = "Flask";
+        } catch { /* 无 requirements */ }
+        try {
+          const py = fs.readFileSync(path.join(abs, "pyproject.toml"), "utf-8").toLowerCase();
+          if (py.includes("fastapi")) framework = "FastAPI";
+          else if (py.includes("django")) framework = "Django";
+          else if (py.includes("flask")) framework = "Flask";
+        } catch { /* 无 pyproject */ }
+      }
 
       const entries = fs.readdirSync(abs, { withFileTypes: true });
       const tree = entries
@@ -792,6 +903,10 @@ export const TOOLS: Record<string, ToolDef> = {
     async execute(args, ctx) {
       const scope = (args.scope as "project" | "global" | undefined) ?? "project";
       const topic = typeof args.topic === "string" ? args.topic : undefined;
+      // v3 自由会话（默认会话根目录只读容器）只能读全局记忆
+      if (scope === "project" && isReadOnlySessionRoot(ctx.root)) {
+        return "错误：自由会话只能读取全局记忆（默认会话根目录为只读容器）——请用 scope=global，或先在侧栏选择/创建项目";
+      }
       const { text } = readMemory(scope, topic, ctx.root);
       return clip(text, MAX_OUTPUT);
     },
@@ -802,7 +917,8 @@ export const TOOLS: Record<string, ToolDef> = {
     description:
       "写入记忆主题文件：把**值得下次任务复用**的稳定知识记录到项目记忆 .infu/memory/ 或全局记忆 ~/.infu/memory/（全局记忆需 medium 审批）。" +
       "用途：项目约定（conventions）/踩坑教训（lessons）/用户偏好（preferences），或自建主题。要求简短准确可复用；不要记录任务过程流水账（系统自动归档历史）；不要重复已有内容。",
-    risk: "medium",
+    // v2.10 批 5：记忆写入降 low（对齐主流 memory 自动；敏感凭据检测与全局写保护仍在）
+    risk: "low",
     schema: z.object({
       scope: z.enum(["project", "global"]).optional().describe("记忆范围：project=当前项目（默认）；global=跨项目全局"),
       topic: z.string().describe("主题名（conventions/lessons/preferences 或自建；只能含字母数字下划线连字符）"),
@@ -818,12 +934,69 @@ export const TOOLS: Record<string, ToolDef> = {
       // 非法 topic（路径穿越/后缀逃逸）直接拒绝
       const err = validateTopic(topic);
       if (err) return `错误：${err}`;
+      // v3 自由会话（默认会话根目录只读容器）不能写项目记忆
+      if (scope === "project" && isReadOnlySessionRoot(ctx.root)) {
+        return "错误：自由会话不能写入项目记忆（默认会话根目录为只读容器）——请用 scope=global，或先在侧栏选择/创建项目";
+      }
       const desc = `${mode === "replace" ? "覆盖" : "追加到"}${scope === "global" ? "全局" : "项目"}记忆 ${topic}.md：\n${content.slice(0, 200)}`;
-      if (!(await guard(ctx, "memory_write", "medium", desc))) return "用户拒绝：未写入";
+      // v2.10 批 5：记忆写入降 low（自动放行；敏感凭据检测与全局写保护仍在）
+      if (!(await guard(ctx, "memory_write", "low", desc))) return "用户拒绝：未写入";
       const r = writeMemory(scope, topic, content, mode, ctx.root);
       return r.ok ? r.message : `错误：${r.message}`;
     },
   },
+
+  // ── v2.6 收尾新增：联网 / Git 提交链 / 任务协作（主流 coding agent 标配）──
+  ...webTools,
+  ...gitTools,
+  ...taskTools,
+  // ── v3.0 批 11 LSP 语义诊断（tsserver：类型错误/未使用变量等，远超正则）──
+  lsp_diagnostics: {
+    name: "lsp_diagnostics",
+    description:
+      "对单个 TS/JS 文件做语义级类型诊断（TypeScript tsserver 驱动——类型错误、未使用变量、隐式 any 等）。何时用：怀疑类型问题、编译报错定位、代码审查时。比 run_test 快（只查单文件不编译整个项目）；node_modules/typescript 缺失时自动返回不可用。",
+    risk: "low",
+    schema: z.object({
+      path: z.string().describe("相对项目根的 TS/JS 文件路径（如 src/agent/loop.ts）"),
+    }),
+    async execute(args, ctx) {
+      const rel = (args.path as string) || "";
+      if (!rel.trim()) return "错误：path 必填";
+      const r = await lspDiagnose(ctx.root, rel);
+      return r.ok ? r.message : r.message;
+    },
+  },
+
+  // ── v3.0 批 11 语义检索（BM25 + 中文分词；零依赖本地相关度排序）──
+  semantic_search: {
+    name: "semantic_search",
+    description:
+      "语义检索：按相关性在项目内搜索文本（BM25 相关度排序，支持中文——关键词不精确命中也能按相关度找到）。何时用：想找「做某事的代码/配置」但不确定关键词、或 search_code 正则找不到时。比 search_code 慢（全量扫描打分），优先用 search_code 精确匹配。",
+    risk: "low",
+    schema: z.object({
+      query: z.string().describe("自然语言查询（如 权限审批是怎么实现的）"),
+      max_results: z.number().int().min(1).max(30).optional().describe("最大结果数（默认 10）"),
+    }),
+    async execute(args, ctx) {
+      const q = (args.query as string) || "";
+      if (!q.trim()) return "错误：query 必填";
+      const max = (args.max_results as number | undefined) || 10;
+      const idx = loadIndex(ctx.root);
+      const files = idx ? idx.files.map((f) => path.resolve(ctx.root, f.file)) : walkFiles(ctx.root);
+      const hits = semanticSearch(q, files, ctx.root, max);
+      if (!hits.length) return `未找到与 "${q}" 相关的内容`;
+      return `找到 ${hits.length} 处相关：\n` + hits.map((h) => `${h.file}:${h.line}: ${h.text}`).join("\n");
+    },
+  },
+
+  // ── v2.12 新增：历史会话查询（Agent 复盘/复用；只读）──
+  ...sessionTools,
+  // ── v3.0 vision 底座：read_image（读图注入视觉）+ screen_*（computer-use 桌面操作）──
+  ...visionTools,
+  // ── v3.1 工具补齐：project_tree（目录树）/ file_ops（mv/cp/rm/mkdir）──
+  ...fsTools,
+  // ── v3.1 工具补齐：os_info / current_time（环境与时间，只读）──
+  ...envTools,
 
 };
 
@@ -841,9 +1014,28 @@ export function getReadOnlyTools(): Record<string, ToolDef> {
     project_scan: TOOLS.project_scan,
     git_status: TOOLS.git_status,
     git_diff: TOOLS.git_diff,
+    git_log: TOOLS.git_log,
+    read_files: TOOLS.read_files,
     use_skill: TOOLS.use_skill,
+    // v2.10：glob 按模式找路径（与 search_code 内容搜索互补；只读）
+    glob: TOOLS.glob,
     // v2.6：memory_read 只读（渐进式记忆加载）→ 进 Planner/Reviewer 白名单；memory_write 不注入
     memory_read: TOOLS.memory_read,
+    // v2.11：子智能体/后台任务管理只读工具（查状态/回收结果）
+    list_agents: TOOLS.list_agents,
+    report: TOOLS.report,
+    job_list: TOOLS.job_list,
+    job_output: TOOLS.job_output,
+    // v2.12：历史会话查询（只读）
+    session_search: TOOLS.session_search,
+    session_trace: TOOLS.session_trace,
+    // v3.0 批 11：语义检索 / LSP 诊断只读 → 进白名单
+    semantic_search: TOOLS.semantic_search,
+    lsp_diagnostics: TOOLS.lsp_diagnostics,
+    // v3.1：目录树 / 环境 / 时间（只读探索）
+    project_tree: TOOLS.project_tree,
+    os_info: TOOLS.os_info,
+    current_time: TOOLS.current_time,
   };
 }
 
@@ -851,6 +1043,20 @@ export function getReadOnlyTools(): Record<string, ToolDef> {
 export function getReviewerTools(): Record<string, ToolDef> {
   return {
     ...getReadOnlyTools(),
-    run_test: TOOLS.run_test,
+    // v3.0 审计修复（S2）：Reviewer 版 run_test 禁止自定义 command——
+    // 否则"只读审查"可通过 run_test {command:"rm -rf ..."} 无审批执行任意命令。
+    // ToolDef.schema 类型为 ZodType，构建期断言为 ZodObject 以使用 extend（保持原 schema 元信息）
+    run_test: {
+      ...TOOLS.run_test,
+      schema: (TOOLS.run_test.schema as z.ZodObject<any>).extend({
+        command: z.string().optional().describe("自定义测试命令（Reviewer 阶段不可用，仅自动检测框架）"),
+      }),
+      async execute(args, ctx) {
+        if (args.command) {
+          return "错误：审查阶段不允许自定义测试命令（仅可自动检测框架运行测试）。如需执行任意命令请改用 Executor 阶段。";
+        }
+        return (TOOLS.run_test.execute as (a: unknown, c: unknown) => Promise<string>)(args, ctx);
+      },
+    },
   };
 }

@@ -34,7 +34,7 @@ export interface ProviderConfig {
 export interface ModelConfig {
   id: string;
   name: string;
-  /** 上游模型 ID，如 deepseek-v4-flash、gpt-5.6-luna、glm-5.2 */
+  /** 上游模型 ID（供应商端定义的模型标识，如 my-model） */
   model: string;
   /** v2：所属供应商 id（providers[]）；v1 旧配置迁移后必有 */
   providerId?: string;
@@ -112,7 +112,7 @@ export interface McpToolMeta {
 // ── v2.3 批 2 插件系统架构 v1（从 MCP 适配器实例反推的插件协议）──
 
 /**
- * 插件配置（config.plugins[]）：引用 JS/TS 插件模块（opencode 式）。
+ * 插件配置（config.plugins[]）：引用 JS/TS 插件模块（函数式）。
  * 插件 = 可注册 工具/钩子/技能 的包；MCP 服务器是插件协议的另一个实例（独立通道）。
  */
 export interface PluginConfig {
@@ -122,6 +122,10 @@ export interface PluginConfig {
   path: string;
   /** 是否启用（默认 true） */
   enabled?: boolean;
+  /** v2.7 市场元数据：安装来源（如 "builtin" / 本地目录 / URL） */
+  source?: string;
+  /** v2.7 市场元数据：版本号 */
+  version?: string;
 }
 
 /** 钩子输入（工具调用上下文；pre/postToolUse 通用） */
@@ -150,7 +154,7 @@ export interface PostToolUseResult {
 export type HookFn = (input: ToolHookInput) => Promise<PreToolUseResult | PostToolUseResult | void>;
 
 /**
- * 插件定义（JS/TS 模块默认导出；opencode 式）。
+ * 插件定义（JS/TS 模块默认导出；函数式）。
  * tools 可为数组或函数（动态生成，便于引用 MCP 连接等运行时资源）。
  */
 export interface PluginDef {
@@ -175,8 +179,8 @@ export interface SkillMeta {
   description: string;
   /** SKILL.md 文件绝对路径 */
   path: string;
-  /** 来源层级：用户级 > 项目级（同名首个胜出） */
-  level: "user" | "project" | "config";
+  /** 来源层级：用户级 > 项目级 > 显式引用 > 插件自带 > 内置（同名首个胜出） */
+  level: "user" | "project" | "config" | "plugin" | "builtin";
 }
 
 /** skill 显式配置（config.skills[]：引用项目内或任意路径的 skill 目录） */
@@ -221,6 +225,10 @@ export interface SandboxConfig {
 export interface GeneralConfig {
   /** 默认项目根目录（Web 输入框初始值） */
   defaultRoot?: string;
+  /** 集成终端默认 shell（v3.0 批 12，常规设置参考）：auto（优先 Git Bash，回退 cmd）/ cmd / powershell / bash；缺省 auto */
+  terminalShell?: "auto" | "cmd" | "powershell" | "bash";
+  /** 开机自启（v3.0 批 12：桌面版可选，默认关闭——用户主动开启才生效） */
+  autoLaunch?: boolean;
 }
 
 /** 外观设置（v2.4：Web 界面偏好，随配置持久化） */
@@ -229,6 +237,22 @@ export interface AppearanceConfig {
   fontSize?: "xs" | "sm" | "base";
   /** 流式输出光标动画（缺省 true） */
   streamCursor?: boolean;
+  /** 主题（v2.8：深/浅，缺省 dark；桌面端标题栏 overlay 配色联动） */
+  theme?: "light" | "dark";
+}
+
+/** 记忆设置（v2.7：记忆系统开关） */
+export interface MemoryConfig {
+  /** 任务结束自动沉淀项目历史（.infu/history/）开关；缺省 true */
+  autoSediment?: boolean;
+}
+
+/** 浏览器设置（v2.7：browser-use 插件运行配置） */
+export interface BrowserConfig {
+  /** 无头模式（缺省 true：Agent 自动化用无头；false = 有头可见，调试用） */
+  headless?: boolean;
+  /** chromium 可执行文件路径；缺省自动探测（ms-playwright 缓存 / INFU_BROWSER_PATH） */
+  executablePath?: string;
 }
 
 /** 全局配置（v2：providers[] 凭据 + models[] 引用；未知字段保留前向兼容） */
@@ -259,6 +283,10 @@ export interface InfuConfig {
   general?: GeneralConfig;
   /** v2.4：外观设置 */
   appearance?: AppearanceConfig;
+  /** v2.7：浏览器设置（browser-use 插件运行配置） */
+  browser?: BrowserConfig;
+  /** v2.7：记忆设置（记忆系统开关） */
+  memory?: MemoryConfig;
 }
 
 /** 风险级别（审批挂钩） */
@@ -284,18 +312,35 @@ export type AgentEvent =
   | { type: "report"; content: string }
   | { type: "review"; content: string }
   | { type: "plan"; id: string; content: string }
-  | { type: "done"; text: string; toolCount: number; steps: number }
+  | { type: "done"; text: string; toolCount: number; steps: number; usage?: { cacheHit: number; cacheMiss: number; promptTokens: number; completionTokens: number } }
   | { type: "error"; message: string }
   // ── v2.2 模型可靠性新增 ──
   /** 模型降级切换（主模型失败 → 备用模型；Timeline 展示与审计） */
   | { type: "model-fallback"; from: string; to: string; reason: string; subagentId?: string }
   /** 上下文压缩（v2.2：历史超预算时摘要化，before/after 为估算 token；DB 事件流无损） */
   | { type: "context-compressed"; before: number; after: number; summary: string; subagentId?: string }
+  // ── v3.2：断网/瞬时故障重试可见性（对齐 主流 ModelRetryItem）──
+  /** 模型调用重试（429/5xx/网络/超时退避期间 emit；前端状态行显示倒计时，审计可查） */
+  | { type: "retry"; attempt: number; maxAttempts: number; delayMs: number; message: string; subagentId?: string }
+  // ── v3.0 UI 审查：统计页真实数据源 ──
+  /** 单次模型调用（loop 每轮成功流式结束后 emit；子 Agent 自动带 subagentId 归属；
+   *  统计页按天×模型聚合真实 token，替代 phase-start 阶段数占比近似） */
+  | { type: "model-call"; model: string; promptTokens: number; completionTokens: number; cacheHit?: number; cacheMiss?: number; subagentId?: string }
   // ── v2.5 子智能体委派新增 ──
-  /** 子智能体启动（delegate_task 委派；parentCallId 关联父级委派工具调用的 callId；readOnly=只读委派免审批） */
-  | { type: "subagent-start"; id: string; name: string; prompt: string; parentCallId?: string; model?: string; readOnly?: boolean }
+  /** 子智能体启动（delegate_task 委派；parentCallId 关联父级委派工具调用的 callId；readOnly=只读委派免审批；background=v2.11 后台模式） */
+  | { type: "subagent-start"; id: string; name: string; prompt: string; parentCallId?: string; model?: string; readOnly?: boolean; background?: boolean }
   /** 子智能体完成（结果回收：最终摘要文本/步数/工具次数） */
   | { type: "subagent-done"; id: string; text: string; steps: number; toolCount: number; ok: boolean }
+  // ── v2.11 子智能体控制新增 ──
+  /** 后台子智能体暂停等待父级消息（agent_message 工具；父级用 send_message 恢复） */
+  | { type: "agent-waiting"; id: string; name: string; message: string }
+  /** 后台子智能体被 send_message 恢复继续 */
+  | { type: "agent-resumed"; id: string }
+  // ── v2.11 后台任务（job）新增 ──
+  /** 后台命令启动（run_command background=true；job 工具管理） */
+  | { type: "job-start"; id: string; command: string }
+  /** 后台命令结束（正常退出/失败/被杀） */
+  | { type: "job-done"; id: string; code: number | null; ok: boolean }
   // ── v2.1 会话持久化新增 ──
   /** SSE 首帧：回传新会话 id（Web 端绑定 activeSessionId） */
   | { type: "session"; id: string }
@@ -303,7 +348,42 @@ export type AgentEvent =
   | { type: "user-message"; text: string }
   // ── v2.6 记忆系统新增 ──
   /** 任务结束自动沉淀（项目历史归档；path 为归档文件，summary 为条目摘要） */
-  | { type: "memory-sediment"; path: string; summary: string };
+  | { type: "memory-sediment"; path: string; summary: string }
+  // ── v2.6 收尾新增 ──
+  /** Agent 向用户提问（ask_user 工具；id 回填答案入口 POST /api/ask/:id；Web 弹窗/CLI 输入） */
+  | {
+      type: "ask-user";
+      id: string;
+      question: string;
+      /** v2.10：问题补充说明（弹窗展示） */
+      description?: string;
+      /** v2.10：多选（默认单选） */
+      multiSelect?: boolean;
+      /** v2.10：选项可结构化（label + desc + recommended）；旧事件为纯 string[] 兼容 */
+      options?: Array<string | { label: string; desc?: string; recommended?: boolean }>;
+      subagentId?: string;
+    }
+  // ── v3.1 附件新增 ──
+  /** 用户附加的文件/文件夹/图片（落库供重放展示；图片字节不落库，仅当次请求内走视觉） */
+  | { type: "attachments"; items: AttachmentMeta[] }
+  // ── v2.10 任务清单新增 ──
+  /** todo_write 任务清单快照（前端 Todo 面板展示；整体替换 last-write-wins） */
+  | { type: "todo-write"; items: Array<{ text: string; status: "pending" | "in_progress" | "completed" }> }
+  // ── v2.14 回滚标记新增 ──
+  /** 历史回滚标记（rewind 截断后落库；rebuild 时注入 system 提示——AI 意识到已回滚并知道位置） */
+  | { type: "rewind"; to: number; at: number };
+
+/** v3.1 附件元数据（重放展示用） */
+export interface AttachmentMeta {
+  /** 显示名（文件名或文件夹名） */
+  name: string;
+  /** 绝对路径（文件/文件夹引用）；图片为 null（字节不落库） */
+  path?: string;
+  /** 类型：file=文件 / dir=文件夹 / image=图片 */
+  kind: "file" | "dir" | "image";
+  /** 字节大小（文件/图片） */
+  size?: number;
+}
 
 /** 运行时模型信息（v2.5：ToolContext 携带，子智能体委派解析子模型用；结构同 registry toRuntimeModel 返回值） */
 export interface RuntimeModelInfo {
@@ -348,9 +428,30 @@ export interface ToolContext {
   callId?: string;
   /** v2.6：路径作用域规则（来自项目指令 INFU.md「路径作用域」节；文件类工具校验用） */
   scopeRules?: ScopeRule[];
+  /** v2.6 收尾：向用户提问（ask_user 工具；未接线时返回 null——工具层提示不可用） */
+  askUser?: (
+    question: string,
+    options?: Array<string | { label: string; desc?: string; recommended?: boolean }>
+  ) => Promise<string | null>;
+  /** v3.1 附件：用户附加文件/文件夹的只读白名单（read_file/read_files 放行；
+   *  写工具不放行——附件目录不可被 Agent 修改） */
+  extraReadDirs?: string[];
+  /** v2.9：当前会话 id（per-session 子 Agent 上限计数用；子智能体继承） */
+  sessionId?: string;
+  /** v2.11：后台子智能体的父级消息通道（agent_message 工具用；仅后台委派注入；
+   *  waitForMessage 暂停子循环等待父级 send_message 回复，父级中止时 resolve(null)） */
+  agentChannel?: {
+    waitForMessage: (message: string) => Promise<string | null>;
+  };
+  /** v2.14 批 18：沙箱档位覆盖（子智能体 agent 文件 sandbox 字段；缺省跟随全局设置） */
+  sandboxMode?: "off" | "soft" | "restricted" | "docker" | "auto";
+  /** v3.0 vision 底座：工具注入的视觉图片队列（base64 data URL）——
+   *  read_image / screen_capture 等把图片推入，loop 下一轮请求合并为 image part（视觉模型）；
+   *  非视觉模型由既有降级机制（图片转文本）兜底 */
+  visionQueue?: string[];
 }
 
-/** v2.6：路径作用域规则（INFU.md 声明式；语义对齐 Claude Code：deny > allow，命中禁止直接拒绝） */
+/** v2.6：路径作用域规则（INFU.md 声明式；语义对齐主流：deny > allow，命中禁止直接拒绝） */
 export interface ScopeRule {
   /** true=允许（白名单）；false=禁止（黑名单） */
   allow: boolean;
@@ -560,6 +661,8 @@ export const sandboxConfigSchema = z
 export const generalConfigSchema = z
   .object({
     defaultRoot: z.string().optional(),
+    terminalShell: z.enum(["auto", "cmd", "powershell", "bash"]).optional(),
+    autoLaunch: z.boolean().optional(),
   })
   .passthrough();
 
@@ -567,6 +670,20 @@ export const appearanceConfigSchema = z
   .object({
     fontSize: z.enum(["xs", "sm", "base"]).optional(),
     streamCursor: z.boolean().optional(),
+    theme: z.enum(["light", "dark", "system"]).optional(),
+  })
+  .passthrough();
+
+export const browserConfigSchema = z
+  .object({
+    headless: z.boolean().optional(),
+    executablePath: z.string().optional(),
+  })
+  .passthrough();
+
+export const memoryConfigSchema = z
+  .object({
+    autoSediment: z.boolean().optional(),
   })
   .passthrough();
 
@@ -591,6 +708,8 @@ export const infuConfigSchema = z
     sandbox: sandboxConfigSchema.optional(),
     general: generalConfigSchema.optional(),
     appearance: appearanceConfigSchema.optional(),
+    browser: browserConfigSchema.optional(),
+    memory: memoryConfigSchema.optional(),
     version: z.number().int().positive().default(1),
   })
   .passthrough();

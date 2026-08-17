@@ -27,6 +27,8 @@ export interface ChatDelta {
   toolCalls?: ToolCallDelta[];
   /** 流结束标记 */
   finishReason?: string;
+  /** v3：流式 usage（DeepSeek 末尾 chunk：prompt_cache_hit/miss tokens → 命中率统计；v2.12 加四桶） */
+  usage?: { cacheHit: number; cacheMiss: number; promptTokens: number; completionTokens: number };
 }
 
 /** OpenAI wire 格式消息（含 tool 调用/结果与 DeepSeek 思考字段） */
@@ -58,6 +60,16 @@ export class ModelApiError extends Error {
   }
 }
 
+/**
+ * v3.2 上下文窗口超限识别（对齐 主流 CONTEXT_WINDOW_EXCEEDED）：
+ * 400 且消息含上下文/长度/token 超限特征 → 调用方自动压缩后重试一次（估算可能低估）。
+ */
+export function isContextWindowExceeded(e: unknown): boolean {
+  if (!(e instanceof ModelApiError)) return false;
+  if (e.status !== 400) return false;
+  return /context|上下文|window|exceed|太长|too (long|large)|maximum|limit|token/i.test(e.message);
+}
+
 export interface RetryPolicy {
   /** 最大尝试次数（含首次），默认 3（= 失败后重试 2 次） */
   maxAttempts?: number;
@@ -79,6 +91,8 @@ export interface StreamChatOptions {
   timeoutMs?: number;
   /** 重试策略（瞬时故障指数退避；默认 3 次尝试） */
   retry?: RetryPolicy;
+  /** v3.2：每次退避重试前回调（前端重试倒计时/审计；断网可见性） */
+  onRetry?: (info: { attempt: number; maxAttempts: number; delayMs: number; message: string }) => void;
   /** 附加请求体字段（v2 思考级别参数等，按供应商协议透传） */
   extraBody?: Record<string, unknown>;
   /** 调试：打印原始请求/响应 */
@@ -131,7 +145,15 @@ async function* requestOnce(opts: {
   const controller = new AbortController();
   const onOuterAbort = () => controller.abort();
   signal?.addEventListener("abort", onOuterAbort, { once: true });
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  // v3.0 审计修复（B3）：原 timeoutMs 为「总时长」——长输出任务（长文/思考链）中途无
+  // 数据也正常，总时长会误杀已开始的流；改「空闲超时」——每次收到数据帧重置计时，
+  // 只有长时间无任何数据（服务端挂起/连接死掉）才中止
+  let timer: NodeJS.Timeout | undefined;
+  const resetIdle = () => {
+    clearTimeout(timer);
+    timer = setTimeout(() => controller.abort(), timeoutMs);
+  };
+  resetIdle();
 
   try {
     const body: Record<string, unknown> = {
@@ -182,11 +204,15 @@ async function* requestOnce(opts: {
     let buf = "";
     // 工具调用增量聚合：index → {id, name, arguments}
     const toolAcc: Record<number, { id: string; name: string; arguments: string }> = {};
+    // v3.1 审计修复：usage 最终快照（累计值，流结束时 yield 一次，防倍乘）
+    let lastUsage: ChatDelta["usage"] | null = null;
 
     try {
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
+        // v3.0 审计修复（B3）：收到数据帧 → 重置空闲计时
+        resetIdle();
         buf += decoder.decode(value, { stream: true });
 
         // SSE 按空行分帧
@@ -206,7 +232,30 @@ async function* requestOnce(opts: {
           }
 
           const choice = json.choices?.[0];
-          if (!choice) continue;
+          // v3.0 批 12：usage 解析从「仅末尾空 choices chunk」放宽为「任意 chunk 携带即收」
+          // （部分端点如 agnes/OpenAI 兼容在最后一个正常 chunk 携带 usage，原逻辑会漏）。
+          // v3.1 审计修复：usage 是**请求累计快照**而非增量——逐 chunk yield 会让 loop 累加倍乘
+          // （Azure/LiteLLM/网关代理类端点每 chunk 带 usage 时统计失真）；改为记录**最后一次**
+          // 快照，在流结束（finish/EOF）时统一 yield 一次。顺带修复「usage-only chunk 早产
+          // 置 started → 可恢复断流不重试」的副作用。
+          // v3.2：usage 语义对齐 主流 mapUsage——DeepSeek 系 wire 的 prompt_tokens **包含**缓存
+          // 命中；部分端点只回 prompt_cache_hit_tokens 缺 miss 字段 → miss 推导为
+          // prompt - hit（保证 cacheHit + cacheMiss == promptTokens 语义一致，命中率不虚高）
+          const u = json.usage;
+          if (u && (u.prompt_cache_hit_tokens || u.prompt_cache_miss_tokens || u.prompt_tokens || u.completion_tokens)) {
+            const hit = u.prompt_cache_hit_tokens ?? 0;
+            let miss = u.prompt_cache_miss_tokens;
+            if (miss == null && u.prompt_tokens) miss = Math.max(0, (u.prompt_tokens ?? 0) - hit);
+            lastUsage = {
+              cacheHit: hit,
+              cacheMiss: miss ?? 0,
+              promptTokens: u.prompt_tokens ?? 0,
+              completionTokens: u.completion_tokens ?? 0,
+            };
+          }
+          if (!choice) {
+            continue;
+          }
           const delta = choice.delta ?? {};
           const finish = choice.finish_reason;
 
@@ -232,6 +281,10 @@ async function* requestOnce(opts: {
             }
           }
           if (finish) {
+            if (lastUsage) {
+              yield { usage: lastUsage };
+              lastUsage = null;
+            }
             yield { finishReason: finish };
           }
         }
@@ -244,7 +297,11 @@ async function* requestOnce(opts: {
       throw new ModelApiError(`模型 API 流中断：${(e as Error).message}`, { retryable: true });
     }
 
-    // 流结束后输出聚合好的工具调用
+    // 流结束后输出聚合好的工具调用（无 finish 的流：usage 在此兜底 yield 一次）
+    if (lastUsage) {
+      yield { usage: lastUsage };
+      lastUsage = null;
+    }
     const finalCalls = Object.entries(toolAcc)
       .sort(([a], [b]) => Number(a) - Number(b))
       .map(([, v]) => ({
@@ -264,7 +321,9 @@ async function* requestOnce(opts: {
 
 /** 解析 SSE 流，逐 delta 产出（v2.2：瞬时故障指数退避重试） */
 export async function* streamChat(opts: StreamChatOptions): AsyncGenerator<ChatDelta> {
-  const { signal, timeoutMs = 120000, debug, retry: retryPolicy } = opts;
+  // v3.2：空闲超时 120s → 300s（对齐 主流 DEFAULT_STREAM_IDLE_TIMEOUT_MS）——
+  // 深度思考模型思考阶段可能长时间不吐字，120s 会误杀已开始的流
+  const { signal, timeoutMs = 300000, debug, retry: retryPolicy, onRetry } = opts;
   const maxAttempts = Math.max(1, retryPolicy?.maxAttempts ?? 3);
   const baseDelayMs = retryPolicy?.baseDelayMs ?? 1000;
 
@@ -299,6 +358,8 @@ export async function* streamChat(opts: StreamChatOptions): AsyncGenerator<ChatD
       let delay = baseDelayMs * 2 ** (attempt - 1);
       if (err.retryAfterMs != null) delay = Math.max(delay, err.retryAfterMs);
       delay += Math.random() * 200;
+      // v3.2：重试可见性——回调通知（前端状态行「正在重试」/审计）
+      onRetry?.({ attempt, maxAttempts, delayMs: Math.round(delay), message: err.message });
       if (debug) console.error(`[streamChat] 第 ${attempt}/${maxAttempts} 次尝试失败（${err.message}），${Math.round(delay)}ms 后重试`);
       await sleep(delay, signal);
     }

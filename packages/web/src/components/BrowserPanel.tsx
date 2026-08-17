@@ -1,0 +1,417 @@
+import { useEffect, useRef, useState } from "react";
+import { ArrowLeft, ArrowRight, RotateCw, X, Globe, Braces, MoreHorizontal, Smartphone, Tablet, Monitor, Plus, ExternalLink, Maximize2 } from "lucide-react";
+import { useStore } from "../store";
+import { useClickOutside } from "./useClickOutside";
+import type { BrowserViewState, InfuWebviewElement } from "../desktop";
+
+/**
+ * 嵌入式真浏览器面板（v3.0 批 8 定稿：<webview> 元素 + 主进程 CDP 桥）
+ *
+ * 架构（对齐主流「宿主注入」）：
+ *  - 每个 tab = 一个 <webview> 元素（DOM 层叠：圆角/阴影/菜单自然盖在浏览器之上，
+ *    即用户拍板「infu 覆盖浏览器」；自由尺寸 = 元素 CSS，无需主进程 bounds）
+ *  - 面板**常驻不卸载**（visible 切换 display）——webview 元素从 DOM 移除会销毁
+ *    guest webContents，所以会话切换/rightTabs 清空绝不能让本组件卸载；
+ *    销毁只发生在用户显式关闭浏览器 tab（×）→ browserCloseAll
+ *  - 本地 tabs 为事实源（元素生命周期），主进程广播仅校正销毁/导航状态；
+ *    open-request（Agent 建 tab）→ 本地创建元素 → dom-ready 上报 webContentsId
+ *    → 主进程 CDP 桥就绪（Agent 侧 __infuCdpSend 直发）
+ *
+ * 布局：
+ *  ┌ tab 条：标题 + × + ➕ 新建 ──────┐
+ *  │ ◀ ▶ ↻ 【地址输入】 📄尺寸 ⋯更多   │
+ *  │ 内容区（webview 元素；active 显示）│
+ */
+interface Tab {
+  id: string; // 本地稳定 key（t1/t2…）——绝不用 wcId 作 key（key 变化 → 元素重建 → 新 guest 无限循环）
+  wcId?: string; // 真实 webContents.id（dom-ready 后填充；与主进程注册表对应）
+  title: string;
+  url: string;
+  active: boolean;
+  pending?: boolean;
+}
+const EMPTY: BrowserViewState = { tabs: [], active: null };
+
+/** 地址栏显示过滤：起始页（data:）显示占位 */
+function displayUrl(url: string): string {
+  if (!url || url.startsWith("data:")) return "";
+  return url;
+}
+/** tab 标题：起始页显示「新标签页」 */
+function tabTitle(t: Tab): string {
+  if (!t.url || t.url.startsWith("data:") || t.url === "about:blank") return "新标签页";
+  if (t.title) return t.title.slice(0, 24);
+  return t.url.slice(0, 24);
+}
+
+/** 尺寸预设（手机/平板/桌面；fit = 适应窗口） */
+const VIEWPORTS = [
+  { label: "手机 375×667", icon: Smartphone, w: 375, h: 667 },
+  { label: "手机 375×812", icon: Smartphone, w: 375, h: 812 },
+  { label: "平板 768×1024", icon: Tablet, w: 768, h: 1024 },
+  { label: "适应窗口", icon: Monitor, fit: true as const },
+];
+
+/** Web 版占位（无桌面桥） */
+function BrowserPlaceholder() {
+  return (
+    <div className="flex h-full flex-col items-center justify-center gap-2 px-6 text-center">
+      <Globe className="h-8 w-8 text-sub" />
+      <div className="text-[13px] font-medium text-text">浏览器面板</div>
+      <div className="text-xs leading-5 text-caption">
+        将在桌面版提供（嵌入式真实浏览器，同款）。
+        <br />
+        当前 Web 版 Agent 浏览器截图保存在项目 <span className="font-mono text-sub">.infu/browser/</span> 目录
+      </div>
+    </div>
+  );
+}
+
+export default function BrowserPanel() {
+  const desktop = window.infuDesktop;
+  const [tabs, setTabs] = useState<Tab[]>([]);
+  const [navState, setNavState] = useState<{ canGoBack: boolean; canGoForward: boolean; isLoading: boolean }>({
+    canGoBack: false,
+    canGoForward: false,
+    isLoading: false,
+  });
+  const [editing, setEditing] = useState(false);
+  const [input, setInput] = useState("");
+  const [menu, setMenu] = useState<"viewport" | "more" | null>(null);
+  const [customOpen, setCustomOpen] = useState(false);
+  const [customW, setCustomW] = useState("375");
+  const [customH, setCustomH] = useState("812");
+  const [freeSize, setFreeSize] = useState<{ w?: number; h?: number } | null>(null);
+  const wvRefs = useRef(new Map<string, InfuWebviewElement>());
+  // v3.0 批 12：📄/⋯ 下拉菜单点击空白处自动收起
+  const menuRef = useClickOutside(() => setMenu(null));
+  const seqRef = useRef(0);
+  const tabsRef = useRef(tabs);
+  tabsRef.current = tabs;
+  const openRightTab = useStore((s) => s.openRightTab);
+
+  const active = tabs.find((t) => t.active) ?? null;
+  const activeEl = active ? wvRefs.current.get(active.id) : undefined;
+
+  /** 对活跃元素执行导航操作（webview 元素自带方法，无需 IPC） */
+  const act = <T,>(fn: (el: InfuWebviewElement) => T): T | undefined => {
+    const el = activeEl;
+    if (!el || active?.pending) return undefined;
+    return fn(el);
+  };
+
+  /** 新建 tab（用户 ➕ / Agent open-request）：本地 pending → webview dom-ready 后填充 wcId */
+  const createTab = (url?: string) => {
+    const id = `t${++seqRef.current}`;
+    setTabs((ts) => [...ts.map((t) => ({ ...t, active: false })), { id, title: "新标签页", url: url ?? "", active: true, pending: true }]);
+    setFreeSize(null);
+  };
+
+  /** 关闭单个 tab：本地移除 + 主进程销毁 guest（pending 未填充 wcId 时跳过——
+   *  主进程注册表 key = wcId，传本地 id 找不到会残留 guest） */
+  const closeTab = (tab: Tab) => {
+    if (desktop && tab.wcId) desktop.browserCloseTab(tab.wcId);
+    setTabs((ts) => ts.filter((t) => t.id !== tab.id));
+  };
+
+  // ── 订阅主进程广播 ──
+  // 状态广播（Agent 销毁全部 → 本地清空；导航能力 → 工具栏）
+  useEffect(() => {
+    if (!desktop) return;
+    return desktop.onBrowserState((s) => {
+      setNavState((prev) => ({
+        canGoBack: s.active?.canGoBack ?? prev.canGoBack,
+        canGoForward: s.active?.canGoForward ?? prev.canGoForward,
+        isLoading: s.active?.isLoading ?? prev.isLoading,
+      }));
+      // Agent 销毁了全部 tab（browser_close）→ 本地清空（元素移除 = guest 销毁）
+      if (s.tabs.length === 0 && tabsRef.current.length > 0) {
+        setTabs([]);
+        setFreeSize(null);
+      }
+    });
+  }, [desktop]);
+
+  // open-request（Agent 建 tab / 面板打开但主进程无 tab）→ 确保浏览器 tab 在侧栏 + 建元素
+  useEffect(() => {
+    if (!desktop) return;
+    return desktop.onOpenRequest((url) => {
+      openRightTab({ id: "browser", kind: "browser", label: "浏览器" });
+      createTab(url ?? undefined);
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [desktop]);
+
+  // select（Agent 切 tab）→ 本地 active 跟随（id = wcId）
+  useEffect(() => {
+    if (!desktop) return;
+    return desktop.onBrowserSelect((id) => {
+      setTabs((ts) => ts.map((t) => ({ ...t, active: t.wcId === id })));
+    });
+  }, [desktop]);
+
+  // Agent 设置 viewport → 面板贴合（freeSize；fit = 恢复 100%）
+  useEffect(() => {
+    if (!desktop) return;
+    return desktop.onViewportChanged((opts) => {
+      if (opts.fit) setFreeSize(null);
+      else if (opts.width && opts.height) setFreeSize({ w: opts.width, h: opts.height });
+    });
+  }, [desktop]);
+
+  // 面板打开且无 tab：**不自动开浏览器**（批 9.7 用户反馈——打开右侧栏应显示初始
+  // 选择界面；浏览器只由 Agent 请求（onOpenRequest）或用户显式点 ➕ 创建）
+
+  /** webview 元素挂载后初始化（React 19 对 webview 属性用 property 会丢失 → setAttribute） */
+  const attachWebview = (el: InfuWebviewElement | null, tabId: string) => {
+    if (!el) {
+      wvRefs.current.delete(tabId);
+      return;
+    }
+    wvRefs.current.set(tabId, el);
+    const tab = tabsRef.current.find((t) => t.id === tabId);
+    if (!tab) return;
+    // 属性兜底（React 19 property 赋值 webpreferences 会静默丢失；sandbox=no 是
+    // 本机加固环境 webview 渲染进程不崩溃的命门——批 8 验证）
+    el.setAttribute("webpreferences", "contextIsolation=yes,nodeIntegration=no,sandbox=no,backgroundThrottling=no");
+    const src = tab.url || START_URL;
+    if (el.getAttribute("src") !== src) el.setAttribute("src", src);
+
+    // 元素事件 → 本地状态（只绑一次）
+    if (!(el as InfuWebviewElement & { __infuBound?: boolean }).__infuBound) {
+      (el as InfuWebviewElement & { __infuBound?: boolean }).__infuBound = true;
+      const update = (patch: Partial<Tab>) =>
+        setTabs((ts) => ts.map((t) => (t.id === tabId ? { ...t, ...patch } : t)));
+
+      el.addEventListener("did-navigate", () => update({ url: el.getURL() }));
+      el.addEventListener("did-navigate-in-page", () => update({ url: el.getURL() }));
+      el.addEventListener("page-title-updated", () => update({ title: el.getTitle() }));
+      el.addEventListener("did-start-loading", () => setNavState((s) => ({ ...s, isLoading: true })));
+      el.addEventListener("did-stop-loading", () => setNavState((s) => ({ ...s, isLoading: false })));
+      el.addEventListener("dom-ready", () => {
+        // 填充真实 webContentsId（主进程注册表 key + CDP 桥就绪）；
+        // ⚠️ 绝不能拿 wcId 当 React key（key 变化 → 元素重建 → 新 guest 无限循环）
+        const wcId = String(el.getWebContentsId());
+        setTabs((ts) =>
+          ts.map((t) => (t.id === tabId ? { ...t, wcId, pending: false, url: el.getURL() || t.url } : t))
+        );
+        // 主进程激活同步（did-attach-webview 已注册 CDP，这里上报激活）
+        if (desktop) desktop.browserSelectTab(wcId);
+      });
+    }
+  };
+
+  if (!desktop) return <BrowserPlaceholder />;
+
+  const navBtn =
+    "flex h-7 w-7 shrink-0 cursor-pointer items-center justify-center rounded-lg text-sub transition-colors hover:bg-hover hover:text-text disabled:cursor-default disabled:opacity-30 disabled:hover:bg-transparent";
+  const menuBtn = "flex h-7 w-7 shrink-0 cursor-pointer items-center justify-center rounded-lg text-sub transition-colors hover:bg-hover hover:text-text";
+  const addr = displayUrl(active?.url ?? "");
+
+  // 自由尺寸：预设/自定义 → 元素 CSS 宽高；fit/null = 100%
+  const freeCss =
+    freeSize && freeSize.w
+      ? { width: `${freeSize.w}px`, height: `${freeSize.h}px`, left: "50%", transform: "translateX(-50%)" }
+      : {};
+
+  return (
+    <div className="flex h-full min-h-0 flex-col">
+      {/* ── tab 条 ── */}
+      <div className="no-scrollbar flex h-9 shrink-0 items-center gap-0.5 overflow-x-auto px-1.5">
+        {tabs.map((t) => (
+          <div
+            key={t.id}
+            className={`group flex h-7 min-w-0 max-w-[150px] shrink-0 cursor-pointer items-center gap-1.5 rounded-md px-2 text-xs transition-colors ${
+              t.active ? "bg-hover text-text" : "text-sub hover:bg-hover/60 hover:text-text"
+            }`}
+            onClick={() => {
+              setTabs((ts) => ts.map((x) => ({ ...x, active: x.id === t.id })));
+              if (desktop && t.wcId) desktop.browserSelectTab(t.wcId);
+            }}
+            title={displayUrl(t.url) || "新标签页"}
+          >
+            <span className="min-w-0 flex-1 truncate">{tabTitle(t)}</span>
+            <button
+              className="flex h-4 w-4 shrink-0 cursor-pointer items-center justify-center rounded text-caption opacity-0 transition-opacity hover:bg-line hover:text-text group-hover:opacity-100"
+              onClick={(e) => {
+                e.stopPropagation();
+                closeTab(t);
+              }}
+              title="关闭标签页"
+            >
+              <X className="h-3 w-3" />
+            </button>
+          </div>
+        ))}
+        <button className={menuBtn} onClick={() => createTab()} title="新建标签页">
+          <Plus className="h-4 w-4" />
+        </button>
+      </div>
+
+      {/* ── 工具栏 ── */}
+      <div ref={menuRef} className="relative flex h-10 shrink-0 items-center gap-1 px-2">
+        <button className={navBtn} onClick={() => act((el) => el.goBack())} disabled={!navState.canGoBack || !!active?.pending} title="后退">
+          <ArrowLeft className="h-4 w-4" />
+        </button>
+        <button className={navBtn} onClick={() => act((el) => el.goForward())} disabled={!navState.canGoForward || !!active?.pending} title="前进">
+          <ArrowRight className="h-4 w-4" />
+        </button>
+        <button
+          className={navBtn}
+          onClick={() => (navState.isLoading ? act((el) => el.stop()) : act((el) => el.reload()))}
+          title={navState.isLoading ? "停止" : "刷新"}
+        >
+          {navState.isLoading ? <X className="h-4 w-4" /> : <RotateCw className="h-4 w-4" />}
+        </button>
+        <div className="relative min-w-0 flex-1">
+          <input
+            className="h-7 w-full rounded-lg border border-line bg-hover px-2.5 text-xs text-text outline-none transition-colors placeholder:text-caption focus:border-info/60"
+            value={editing ? input : addr}
+            placeholder="输入网址后回车"
+            spellCheck={false}
+            onFocus={() => {
+              setEditing(true);
+              setInput(addr);
+            }}
+            onBlur={() => setEditing(false)}
+            onChange={(e) => setInput(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" && input.trim()) {
+                const url = normalizeUrl(input.trim());
+                if (url) act((el) => void el.loadURL(url));
+                (e.target as HTMLInputElement).blur();
+              }
+            }}
+          />
+        </div>
+        {/* 📄 自由尺寸（面板贴合 = 元素 CSS；内容模拟 = Agent CDP Emulation） */}
+        <div className="relative">
+          <button className={menuBtn} onClick={() => setMenu(menu === "viewport" ? null : "viewport")} title="选择视口尺寸（自由尺寸模式）">
+            <Maximize2 className="h-4 w-4" />
+          </button>
+          {menu === "viewport" && (
+            <div className="absolute right-0 top-full z-50 mt-1 w-[180px] rounded-xl border border-line bg-elevated p-1 shadow-lv3">
+              {VIEWPORTS.map((v) => (
+                <button
+                  key={v.label}
+                  className="flex w-full cursor-pointer items-center gap-2 rounded-lg px-2.5 py-1.5 text-left text-xs text-text transition-colors hover:bg-hover"
+                  onClick={() => {
+                    setMenu(null);
+                    setFreeSize("fit" in v ? null : { w: v.w, h: v.h });
+                  }}
+                >
+                  <v.icon className="h-3.5 w-3.5 text-sub" />
+                  <span>{v.label}</span>
+                </button>
+              ))}
+              <button
+                className="flex w-full cursor-pointer items-center gap-2 rounded-lg px-2.5 py-1.5 text-left text-xs text-text transition-colors hover:bg-hover"
+                onClick={() => setCustomOpen(!customOpen)}
+              >
+                <Maximize2 className="h-3.5 w-3.5 text-sub" />
+                <span>自定义尺寸…</span>
+              </button>
+              {customOpen && (
+                <div className="mt-1 flex items-center gap-1 border-t border-line px-1 pt-1.5">
+                  <input
+                    className="h-6 w-14 rounded-md border border-line bg-hover px-1.5 text-center text-xs text-text outline-none focus:border-info/60"
+                    value={customW}
+                    onChange={(e) => setCustomW(e.target.value.replace(/\D/g, ""))}
+                    placeholder="宽"
+                  />
+                  <span className="text-xs text-caption">×</span>
+                  <input
+                    className="h-6 w-14 rounded-md border border-line bg-hover px-1.5 text-center text-xs text-text outline-none focus:border-info/60"
+                    value={customH}
+                    onChange={(e) => setCustomH(e.target.value.replace(/\D/g, ""))}
+                    placeholder="高"
+                  />
+                  <button
+                    className="ml-auto h-6 cursor-pointer rounded-md bg-primary px-2 text-xs text-primary-fg transition-colors hover:bg-primary-hover"
+                    onClick={() => {
+                      const w = parseInt(customW, 10);
+                      const h = parseInt(customH, 10);
+                      if (w > 100 && h > 100 && w < 4000 && h < 4000) {
+                        setFreeSize({ w, h });
+                        setCustomOpen(false);
+                        setMenu(null);
+                      }
+                    }}
+                  >
+                    应用
+                  </button>
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+        {/* ⋯ 更多浏览器操作 */}
+        <div className="relative">
+          <button className={menuBtn} onClick={() => setMenu(menu === "more" ? null : "more")} title="更多浏览器操作">
+            <MoreHorizontal className="h-4 w-4" />
+          </button>
+          {menu === "more" && (
+            <div className="absolute right-0 top-full z-50 mt-1 w-[180px] rounded-xl border border-line bg-elevated p-1 shadow-lv3">
+              <button
+                className="flex w-full cursor-pointer items-center gap-2 rounded-lg px-2.5 py-1.5 text-left text-xs text-text transition-colors hover:bg-hover"
+                onClick={() => {
+                  setMenu(null);
+                  if (addr) desktop.browserOpenExternal(addr);
+                }}
+              >
+                <ExternalLink className="h-3.5 w-3.5 text-sub" />
+                <span>在默认浏览器中打开</span>
+              </button>
+              <button
+                className="flex w-full cursor-pointer items-center gap-2 rounded-lg px-2.5 py-1.5 text-left text-xs text-text transition-colors hover:bg-hover"
+                onClick={() => {
+                  setMenu(null);
+                  act((el) => el.openDevTools({ mode: "detach" }));
+                }}
+              >
+                <Braces className="h-3.5 w-3.5 text-sub" />
+                <span>调试工具（DevTools）</span>
+              </button>
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* ── 内容区：webview 元素（active 显示；元素永不从 DOM 移除——移除即销毁 guest）── */}
+      <div className="relative min-h-0 flex-1 overflow-hidden rounded-xl border border-line bg-surface">
+        {tabs.length === 0 && (
+          <div className="absolute inset-0 flex flex-col items-center justify-center gap-2 text-center">
+            <Globe className="h-8 w-8 text-sub" />
+            <div className="text-[13px] font-medium text-text">浏览器</div>
+            <div className="text-xs text-caption">点击「+」或让 Agent 打开网页</div>
+          </div>
+        )}
+        {tabs.map((t) => (
+          <webview
+            key={t.id}
+            ref={(el) => attachWebview(el as InfuWebviewElement | null, t.id)}
+            className={`absolute inset-0 h-full w-full transition-opacity ${
+              t.active ? "opacity-100" : "pointer-events-none opacity-0"
+            }`}
+            style={t.active ? freeCss : undefined}
+          />
+        ))}
+      </div>
+    </div>
+  );
+}
+
+/** 起始页（data: URL 美化提示——与主进程 START_URL 一致；webview 元素渲染） */
+const START_HTML = `<html><body style="background:#151517;margin:0;height:100vh;display:flex;align-items:center;justify-content:center;font-family:system-ui,-apple-system,sans-serif"><div style="text-align:center"><svg viewBox="0 0 24 24" width="56" height="56" fill="none" stroke="#56575C" stroke-width="1.5"><circle cx="12" cy="12" r="10"/><path d="M2 12h20M12 2c2.5 2.6 3.9 6.2 3.9 10S14.5 19.4 12 22c-2.5-2.6-3.9-6.2-3.9-10S9.5 4.6 12 2z"/></svg><div style="font-size:16px;color:#F9FAFB;font-weight:600;margin-top:16px">浏览器</div><div style="font-size:13px;color:#8E8E93;margin-top:8px">粘贴或输入 URL 以打开网页。</div></div></body></html>`;
+const START_URL = `data:text/html;charset=utf-8,${encodeURIComponent(START_HTML)}`;
+
+/** 地址栏规范化（同主进程 navUrl；v3.1 审计修复：拒绝 file:/// 等非 Web scheme——
+ *  嵌入式 webview 带 sandbox=no，file:// 可直读磁盘任意文件 → 非法输入返回空串，
+ *  调用方不加载（地址栏 Enter / Agent 导航共用） */
+function normalizeUrl(raw: string): string {
+  const u = raw.trim();
+  if (/^https?:/i.test(u)) return u;
+  if (u === "about:blank") return u;
+  if (/^[\w-]+(\.[\w-]+)+(\/.*)?$/.test(u)) return `https://${u}`;
+  return "";
+}

@@ -13,7 +13,7 @@
 import { TOOLS } from "../src/tools/index.js";
 import {
   resolveApprovalPolicy, shouldAutoApprove, matchOverride, isToolDisabled, resolveToolRisk,
-  globToRegExp, isCommandAllowed, DEFAULT_POLICY,
+  globToRegExp, isCommandAllowed, DEFAULT_POLICY, DEFAULT_COMMAND_ALLOWLIST,
 } from "../src/approval/policy.js";
 import { CONFIG_PATH, saveConfig } from "../src/providers/registry.js";
 import { readFileSync, writeFileSync, existsSync, copyFileSync, rmSync } from "node:fs";
@@ -36,12 +36,12 @@ console.log("\n=== 审批策略自测（v2.4）===\n");
 console.log("▶ resolveApprovalPolicy");
 {
   const none = resolveApprovalPolicy(null);
-  check("无配置 → smart 默认", none.mode === "smart" && none.toolOverrides.length === 0 && none.commandAllowlist.length === 0);
+  check("无配置 → smart 默认 + 内置默认白名单", none.mode === "smart" && none.toolOverrides.length === 0 && none.commandAllowlist.length > 0);
   const empty = resolveApprovalPolicy({ models: [] });
   check("空配置 → 默认", empty.mode === DEFAULT_POLICY.mode);
   const partial = resolveApprovalPolicy({ models: [], approvalPolicy: { mode: "auto", toolOverrides: [{ tool: "git*", risk: "low" }] } });
   check("部分配置：mode 生效", partial.mode === "auto");
-  check("部分配置：缺省白名单补空", partial.commandAllowlist.length === 0);
+  check("部分配置：白名单 = 内置默认 + 用户配置", partial.commandAllowlist.length >= DEFAULT_COMMAND_ALLOWLIST.length && partial.commandAllowlist.includes("git status*"));
   check("部分配置：toolOverrides 保留", partial.toolOverrides.length === 1);
   const confirm = resolveApprovalPolicy({ models: [], approvalPolicy: { mode: "confirm" } });
   check("confirm 档解析", confirm.mode === "confirm");
@@ -140,15 +140,14 @@ console.log("▶ guard 集成（write_file × 档位）");
     check("auto 档：执行成功", autoOut.includes("已写入"), autoOut);
     check("auto 档：不触发审批", approvals.length === 0, JSON.stringify(approvals));
 
-    // smart 档（默认）：medium 弹窗（mock 批准）
+    // smart 档（默认）：v2.10 文件编辑降 low → 自动放行（对齐主流：写文件不弹窗）
     saveConfig({ models: [], approvalPolicy: { mode: "smart" } });
     approvals.length = 0;
     const smartOut = await TOOLS.write_file.execute({ path: "b.txt", content: "x" }, mkCtx());
     check("smart 档：执行成功", smartOut.includes("已写入"), smartOut);
-    check("smart 档：触发一次审批", approvals.length === 1, JSON.stringify(approvals));
-    check("smart 档：审批风险为 medium", approvals[0]?.risk === "medium");
+    check("smart 档：写文件自动放行不弹窗", approvals.length === 0, JSON.stringify(approvals));
 
-    // confirm 档：medium 也弹窗
+    // confirm 档：全部弹窗（含 low 文件编辑）
     saveConfig({ models: [], approvalPolicy: { mode: "confirm" } });
     approvals.length = 0;
     await TOOLS.write_file.execute({ path: "c.txt", content: "x" }, mkCtx());

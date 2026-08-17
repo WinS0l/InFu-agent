@@ -96,15 +96,17 @@ console.log("▶ loadPlugins");
   ];
   const events: AgentEvent[] = [];
   const r = await loadPlugins(plugins, (e) => events.push(e));
-  check("正常插件：2 个工具", r.tools.length === 2, r.tools.map((t) => t.name).join(","));
-  check("工具名透传", r.tools[0].name === "hello");
+  // 注：loadPlugins 现在会合并内置官方插件（browser-use 7 工具），断言只看用户插件的工具
+  check("正常插件工具加载", r.tools.some((t) => t.name === "hello") && r.tools.some((t) => t.name === "no_risk"), r.tools.map((t) => t.name).join(","));
+  check("工具名透传", r.tools.some((t) => t.name === "hello"));
   check("risk 缺省默认 medium", r.tools.find((t) => t.name === "no_risk")?.risk === "medium");
   check("声明 risk 保留", r.tools.find((t) => t.name === "hello")?.risk === "low");
   check("钩子挂载（pre+post）", r.hooks.preToolUse.length === 1 && r.hooks.postToolUse.length === 1);
   check("坏导出跳过并记录", r.failures.some((f) => f.id === "bad" && f.message.includes("default")));
   check("导入抛错跳过并记录", r.failures.some((f) => f.id === "throw"));
-  check("enabled=false 不加载（2 工具 2 失败）", r.tools.length === 2 && r.failures.length === 2);
-  check("加载事件提示", events.some((e) => e.type === "text" && e.text.includes("好插件")));
+  check("enabled=false 不加载（2 失败）", r.failures.length === 2);
+  check("内置插件默认加载（browser_navigate）", r.tools.some((t) => t.name === "browser_navigate"));
+  // v3：成功加载不再 emit text（避免对话流环境噪音；工具/技能描述已注入 system）
   check("失败事件提示", events.some((e) => e.type === "text" && e.text.includes("加载失败")));
   // 重名加前缀
   const r2 = await loadPlugins([
@@ -112,9 +114,9 @@ console.log("▶ loadPlugins");
     { id: "b", path: goodPlugin },
   ], emit);
   check("跨插件重名加前缀", r2.tools.some((t) => t.name === "b_hello"), r2.tools.map((t) => t.name).join(","));
-  // 无插件
+  // 无用户插件 → 仍有内置插件，但无失败
   const r3 = await loadPlugins(undefined, emit);
-  check("无插件 → 空结果", r3.tools.length === 0 && r3.failures.length === 0);
+  check("无用户插件 → 内置插件加载且无失败", r3.failures.length === 0 && r3.tools.some((t) => t.name === "browser_navigate"));
 }
 
 // ── 2. 函数式钩子 ──
@@ -171,6 +173,8 @@ console.log("\n▶ skill 加载");
   check("无 frontmatter → null", parseSkillFrontmatter("# 无 frontmatter") === null);
   const fm2 = parseSkillFrontmatter("---\nname: x\ndescription: y\nlicense: MIT\n---\n");
   check("可选字段保留", fm2?.license === "MIT");
+  const fmBom = parseSkillFrontmatter("\uFEFF---\nname: bom\ndescription: d\n---\n");
+  check("容忍 BOM 前缀", fmBom?.name === "bom");
 
   // readSkillMeta：合法/缺描述/目录名不一致
   const good = readSkillMeta(join(skillDir, "good-skill"), "project");
@@ -183,8 +187,9 @@ console.log("\n▶ skill 加载");
   // listSkills：项目级发现 + 坏 skill 过滤
   const cfg0 = { models: [] };
   const skills = listSkills(cfg0, proj);
-  check("项目级发现（坏 skill 过滤后 2 个）", skills.length === 2, skills.map((s) => s.name).join(","));
-  check("来源层级 project", skills.every((s) => s.level === "project"));
+  const projectSkills = skills.filter((s) => s.level === "project");
+  check("项目级发现（坏 skill 过滤后 2 个）", projectSkills.length === 2, projectSkills.map((s) => s.name).join(","));
+  check("来源层级 project", projectSkills.every((s) => s.level === "project"));
 
   // config 显式引用（path 指向 skill 目录；同名去重——项目级已发现则引用不重复）
   const cfg1 = { models: [], skills: [{ name: "good-skill", path: join(skillDir, "good-skill") }] };
@@ -194,6 +199,9 @@ console.log("\n▶ skill 加载");
   const cfg2 = { models: [], skills: [{ name: "config-only", path: configSkillDir }] };
   const skills3 = listSkills(cfg2, proj);
   check("config 显式引用（新名）加入", skills3.some((s) => s.name === "config-only" && s.level === "config"));
+  // YAML 折叠块（>）description 解析（Anthropic document-skills 写法）
+  const fmFold = parseSkillFrontmatter("---\nname: pdf\ndescription: >\n  第一行\n  第二行\nlicense: MIT\n---\n");
+  check("折叠块 description 拼接", fmFold?.description === "第一行 第二行", JSON.stringify(fmFold));
 
   // buildSkillsPrompt
   const prompt = buildSkillsPrompt([{ name: "demo", description: "描述", path: "x", level: "user" }]);
@@ -268,11 +276,14 @@ console.log("\n▶ /api/plugins + /api/skills API");
       body: JSON.stringify({ id: "x" }),
     });
     check("缺 path → 400", r.status === 400);
-    // 列表
+    // 列表（v2.7：内置官方插件默认显示 + 用户插件）
     r = await call("/api/plugins");
     j = await r.json();
-    check("列表 1 个", j.plugins.length === 1);
-    // probe：正常插件（2 工具 + 钩子）
+    const listIds = (j.plugins ?? []).map((x: any) => x.id);
+    check("列表含用户插件 good", listIds.includes("good"));
+    check("列表含 3 个内置官方插件", ["browser-use", "document-skills", "skill-creator"].every((id) => listIds.includes(id)), JSON.stringify(listIds));
+    check("内置插件带 builtin 标记", (j.plugins ?? []).filter((x: any) => x.builtin).length === 3);
+    // probe：正常插件（2 工具 + 钩子；不合并内置插件）
     r = await call("/api/plugins/good/probe", { method: "POST" });
     j = await r.json();
     check("probe 成功（2 工具 + pre/post 钩子）",
@@ -356,8 +367,9 @@ console.log("\n▶ /api/plugins + /api/skills API");
     // skills：列表（项目级 2 个）
     r = await call("/api/skills");
     j = await r.json();
-    check("技能列表（项目级 2 个）", j.skills.length === 2, JSON.stringify(j.skills?.map((s: any) => s.name)));
-    check("列表含来源层级", j.skills.every((s: any) => s.level === "project"));
+    const apiProject = (j.skills ?? []).filter((s: any) => s.level === "project");
+    check("技能列表（项目级 2 个）", apiProject.length === 2, JSON.stringify(j.skills?.map((s: any) => s.name)));
+    check("列表含来源层级 project", apiProject.every((s: any) => s.level === "project"));
     // 添加显式引用（path）
     r = await call("/api/skills", {
       method: "POST", headers: { "content-type": "application/json" },

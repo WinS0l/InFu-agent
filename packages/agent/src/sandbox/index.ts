@@ -106,7 +106,7 @@ export function buildDockerArgs(
   opts: { image?: string; timeoutMs?: number } = {}
 ): string[] {
   const image = opts.image ?? detectImage(root);
-  // Windows 路径转 docker 挂载格式：E:\InFu(test) → E:/InFu(test)
+  // Windows 路径转 docker 挂载格式：C:\Users\me\proj → C:/Users/me/proj
   const hostPath = root.replace(/\\/g, "/");
   const mount = `${hostPath}:/workspace:ro`;
   return [

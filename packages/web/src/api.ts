@@ -1,9 +1,35 @@
 import type { AgentEvent, RiskLevel, SessionMeta, StoredEvent, TaskTemplate } from "@infu/shared";
 import { useStore } from "./store";
 
+/**
+ * v3.0 桌面端：API 基址——桌面 dev 模式前端跑在 vite（5199）、后端在 agent 端口
+ * （常驻 4317 可能被占用自动递增）→ 主进程 loadURL 带 ?infuAgentPort= 传实际端口，
+ * 这里拼绝对地址跨域直连；生产模式（同端口静态托管）与 Web 版无 query → 保持同源零改动。
+ */
+const API_BASE = (() => {
+  if (typeof window === "undefined") return "";
+  const port = new URLSearchParams(window.location.search).get("infuAgentPort");
+  return port ? `http://127.0.0.1:${port}` : "";
+})();
+async function apiFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
+  const url = typeof input === "string" && input.startsWith("/") ? API_BASE + input : input;
+  // v3.1 审计修复：本地令牌——生产模式（同端口静态托管）服务端注入
+  // window.__INFU_TOKEN__（见 server.ts），所有 API 请求带 X-InFu-Token；
+  // vite dev 无注入 → 不带头（服务端未启用令牌校验）
+  const token = (globalThis as { __INFU_TOKEN__?: string }).__INFU_TOKEN__;
+  if (token) {
+    const headers = new Headers(init?.headers);
+    headers.set("X-InFu-Token", token);
+    return fetch(url, { ...init, headers });
+  }
+  return fetch(url, init);
+}
+// v3.0 审计修复（S7）：导出供 store/组件复用（裸 fetch 绕过 API_BASE，桌面 dev 端口错）
+export { apiFetch };
+
 /** 加载模型列表 */
 export async function fetchModels() {
-  const res = await fetch("/api/models");
+  const res = await apiFetch("/api/models");
   if (!res.ok) throw new Error(`模型列表加载失败: ${res.status}`);
   const data = await res.json();
   useStore.getState().setModels(data.models ?? []);
@@ -23,14 +49,14 @@ export interface ProviderInfo {
 
 /** 供应商列表 */
 export async function fetchProviders(): Promise<ProviderInfo[]> {
-  const res = await fetch("/api/providers");
+  const res = await apiFetch("/api/providers");
   if (!res.ok) throw new Error(`供应商加载失败: ${res.status}`);
   const data = await res.json();
   return data.providers ?? [];
 }
 
 async function providerApi<T>(url: string, method: string, body?: unknown): Promise<T> {
-  const res = await fetch(url, {
+  const res = await apiFetch(url, {
     method,
     headers: { "content-type": "application/json" },
     body: body ? JSON.stringify(body) : undefined,
@@ -48,7 +74,7 @@ export const deleteProvider = (id: string) => providerApi(`/api/providers/${enco
 
 /** 从上游获取模型列表（OpenAI 兼容 /models） */
 export async function fetchProviderModels(id: string): Promise<Array<{ id: string; name: string }>> {
-  const res = await fetch(`/api/providers/${encodeURIComponent(id)}/models`, { method: "POST" });
+  const res = await apiFetch(`/api/providers/${encodeURIComponent(id)}/models`, { method: "POST" });
   const data = await res.json();
   if (!res.ok || data.ok === false) throw new Error(data.message || `获取模型失败: ${res.status}`);
   return data.models ?? [];
@@ -63,14 +89,14 @@ export interface RoleConfig {
 }
 
 export async function fetchRoles(): Promise<RoleConfig[]> {
-  const res = await fetch("/api/roles");
+  const res = await apiFetch("/api/roles");
   if (!res.ok) throw new Error(`角色配置加载失败: ${res.status}`);
   const data = await res.json();
   return data.roles ?? [];
 }
 
 export async function saveRoles(body: Record<string, { model?: string; thinkingLevel?: number } | undefined>) {
-  const res = await fetch("/api/roles", {
+  const res = await apiFetch("/api/roles", {
     method: "PUT",
     headers: { "content-type": "application/json" },
     body: JSON.stringify(body),
@@ -96,7 +122,7 @@ export interface McpServerInfo {
 }
 
 export async function fetchMcpServers(): Promise<McpServerInfo[]> {
-  const res = await fetch("/api/mcp");
+  const res = await apiFetch("/api/mcp");
   if (!res.ok) throw new Error(`MCP 服务器加载失败: ${res.status}`);
   const data = await res.json();
   return data.servers ?? [];
@@ -127,7 +153,7 @@ export const deleteMcpServer = (id: string) => providerApi(`/api/mcp/${encodeURI
 
 /** 探测连接：拉取服务器工具列表（名称/描述/有效风险；15s 超时） */
 export async function probeMcpTools(id: string): Promise<McpToolProbe[]> {
-  const res = await fetch(`/api/mcp/${encodeURIComponent(id)}/tools`, { method: "POST" });
+  const res = await apiFetch(`/api/mcp/${encodeURIComponent(id)}/tools`, { method: "POST" });
   const data = await res.json();
   if (!res.ok || data.ok === false) throw new Error(data.message || `探测失败: ${res.status}`);
   return data.tools ?? [];
@@ -139,10 +165,14 @@ export interface PluginInfo {
   id: string;
   path: string;
   enabled?: boolean;
+  name?: string;
+  version?: string;
+  source?: string;
+  builtin?: boolean;
 }
 
 export async function fetchPlugins(): Promise<PluginInfo[]> {
-  const res = await fetch("/api/plugins");
+  const res = await apiFetch("/api/plugins");
   if (!res.ok) throw new Error(`插件加载失败: ${res.status}`);
   const data = await res.json();
   return data.plugins ?? [];
@@ -154,7 +184,7 @@ export interface PluginProbeResult {
 }
 
 export async function probePlugin(id: string): Promise<PluginProbeResult> {
-  const res = await fetch(`/api/plugins/${encodeURIComponent(id)}/probe`, { method: "POST" });
+  const res = await apiFetch(`/api/plugins/${encodeURIComponent(id)}/probe`, { method: "POST" });
   const data = await res.json();
   if (!res.ok || data.ok === false) throw new Error(data.message || `探测失败: ${res.status}`);
   return data;
@@ -180,7 +210,7 @@ export interface SkillInfo {
 }
 
 export async function fetchSkills(): Promise<SkillInfo[]> {
-  const res = await fetch("/api/skills");
+  const res = await apiFetch("/api/skills");
   if (!res.ok) throw new Error(`技能加载失败: ${res.status}`);
   const data = await res.json();
   return data.skills ?? [];
@@ -206,7 +236,7 @@ export interface AgentInfo {
 }
 
 export async function fetchAgents(): Promise<AgentInfo[]> {
-  const res = await fetch("/api/agents");
+  const res = await apiFetch("/api/agents");
   if (!res.ok) throw new Error(`子智能体加载失败: ${res.status}`);
   const data = await res.json();
   return data.agents ?? [];
@@ -241,23 +271,119 @@ export interface SettingsConfig {
     dockerAvailable?: boolean;
     winRestrictedOk?: boolean;
   };
-  general: { defaultRoot?: string };
-  appearance: { fontSize?: "xs" | "sm" | "base"; streamCursor?: boolean };
+  general: { defaultRoot?: string; terminalShell?: "auto" | "cmd" | "powershell" | "bash"; autoLaunch?: boolean };
+  appearance: { fontSize?: "xs" | "sm" | "base"; streamCursor?: boolean; theme?: "light" | "dark" | "system" };
+  browser?: { headless?: boolean; executablePath?: string };
+  memory?: { autoSediment?: boolean };
   defaultModelId: string | null;
+}
+
+/** v2.7 浏览器状态（browser-use 插件 + chromium 探测） */
+export interface BrowserStatus {
+  available: boolean;
+  chromiumPath: string | null;
+  headless: boolean;
+  executablePath: string;
+  pluginEnabled: boolean;
+}
+export async function fetchBrowserStatus(): Promise<BrowserStatus> {
+  const res = await apiFetch(`/api/browser/status`);
+  if (!res.ok) throw new Error(`浏览器状态加载失败: ${res.status}`);
+  return res.json();
+}
+
+/** v2.7 记忆查看（全局/项目主题 + 指令文件） */
+export interface MemoryTopicInfo { name: string; hint: string; content: string; }
+export interface MemoryInfo {
+  globalDir: string;
+  projectDir: string;
+  global: MemoryTopicInfo[];
+  project: MemoryTopicInfo[];
+  instruction: { path: string; content: string } | null;
+}
+export async function fetchMemory(): Promise<MemoryInfo> {
+  const res = await apiFetch(`/api/memory`);
+  if (!res.ok) throw new Error(`记忆加载失败: ${res.status}`);
+  return res.json();
+}
+
+/** v2.7 使用统计（v3.0 UI 审查：dailyTrend 加 byModel——按天×模型真实 token） */
+export interface UsageStats {
+  rangeDays: number;
+  tokens: number;
+  sessions: number;
+  messages: number;
+  activeDays: number;
+  streak: number;
+  topModel: { model: string; share: number } | null;
+  modelUsage: Array<{ model: string; tokens: number; share: number }>;
+  dailyTrend: Array<{
+    date: string;
+    tokens: number;
+    prompt: number;
+    completion: number;
+    cacheHit: number;
+    cacheMiss: number;
+    estimated: boolean;
+    byModel: Array<{ model: string; tokens: number }>;
+  }>;
+}
+export async function fetchStats(days: number): Promise<UsageStats> {
+  const res = await apiFetch(`/api/stats?days=${days}`);
+  if (!res.ok) throw new Error(`统计加载失败: ${res.status}`);
+  return res.json();
+}
+
+/** v2.7 索引库状态 */
+export interface IndexStatus {
+  built: boolean;
+  fileCount: number;
+  builtAt: number | null;
+  sizeBytes: number;
+  path: string | null;
+}
+export async function fetchIndexStatus(): Promise<IndexStatus> {
+  const root = useStore.getState().root;
+  const res = await apiFetch(`/api/index/status?root=${encodeURIComponent(root ?? "")}`);
+  if (!res.ok) throw new Error(`索引状态加载失败: ${res.status}`);
+  return res.json();
+}
+export async function rebuildIndex(): Promise<{ fileCount: number }> {
+  const root = useStore.getState().root;
+  const res = await apiFetch("/api/index/rebuild", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ root }),
+  });
+  const data = await res.json();
+  if (!res.ok || data.ok === false) throw new Error(data.message || `重建失败: ${res.status}`);
+  return data;
+}
+
+/** 清除浏览器数据（cache=保留 Cookie 与站点数据；all=全部清除） */
+export async function clearBrowserData(scope: "cache" | "all"): Promise<string> {
+  const res = await apiFetch(`/api/browser/clear`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ scope }),
+  });
+  const data = await res.json();
+  if (!res.ok || data.ok === false) throw new Error(data.message || `清理失败: ${res.status}`);
+  return data.message;
 }
 
 /** 读取设置四节（权限/沙箱/常规/外观 + 默认模型） */
 export async function fetchConfig(): Promise<SettingsConfig> {
-  const res = await fetch("/api/config");
+  const res = await apiFetch("/api/config");
   if (!res.ok) throw new Error(`设置加载失败: ${res.status}`);
   return res.json();
 }
 
 /** 保存设置（服务端白名单：只接受四节 + defaultModelId；写入后落盘 ~/.infu/config.json） */
 export async function updateConfig(
-  body: Partial<Pick<SettingsConfig, "approvalPolicy" | "sandbox" | "general" | "appearance">> & { defaultModelId?: string | null }
+  body: Partial<Pick<SettingsConfig, "approvalPolicy" | "sandbox" | "general" | "appearance" | "browser" | "memory">> & { defaultModelId?: string | null }
 ) {
-  const res = await fetch("/api/config", {
+  const res = await apiFetch("/api/config", {
     method: "PUT",
     headers: { "content-type": "application/json" },
     body: JSON.stringify(body),
@@ -278,7 +404,7 @@ export interface TerminalSessionInfo {
 
 /** 创建终端会话（cwd = 项目根；shell 可选 cmd/powershell/bash） */
 export async function terminalStart(cwd?: string, shell?: string): Promise<TerminalSessionInfo> {
-  const res = await fetch("/api/terminal", {
+  const res = await apiFetch("/api/terminal", {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ cwd, shell }),
@@ -302,7 +428,7 @@ export async function terminalInput(
   id: string,
   body: { data: string; command?: string; confirmed?: boolean }
 ): Promise<TerminalInputResult> {
-  const res = await fetch(`/api/terminal/${encodeURIComponent(id)}/input`, {
+  const res = await apiFetch(`/api/terminal/${encodeURIComponent(id)}/input`, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify(body),
@@ -314,7 +440,7 @@ export async function terminalInput(
 
 /** 同步 PTY 尺寸（xterm fit 后调用） */
 export async function terminalResize(id: string, cols: number, rows: number) {
-  await fetch(`/api/terminal/${encodeURIComponent(id)}/resize`, {
+  await apiFetch(`/api/terminal/${encodeURIComponent(id)}/resize`, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ cols, rows }),
@@ -323,30 +449,36 @@ export async function terminalResize(id: string, cols: number, rows: number) {
 
 /** 终止会话（kill 进程树） */
 export async function terminalKill(id: string) {
-  await fetch(`/api/terminal/${encodeURIComponent(id)}`, { method: "DELETE" });
+  await apiFetch(`/api/terminal/${encodeURIComponent(id)}`, { method: "DELETE" });
 }
 
 /** 模板任务列表（小白引导） */
 export async function fetchTemplates(): Promise<TaskTemplate[]> {
-  const res = await fetch("/api/templates");
+  const res = await apiFetch("/api/templates");
   if (!res.ok) throw new Error(`模板加载失败: ${res.status}`);
   return res.json();
 }
 
-/** SSE 事件分发 */
-function handleEvent(ev: AgentEvent) {
+/** SSE 事件分发（v3.1：按连接会话路由——并行多会话时事件写各自缓存，不串扰） */
+function handleEvent(ev: AgentEvent, connSid: string | null) {
   const st = useStore.getState();
+  // 事件路由目标 = 本连接会话（与当前视图不同才切换，避免每次 set 触发订阅）
+  if (connSid && connSid !== st.eventTarget) st.setEventTarget(connSid);
   // v2.5：子智能体内部过程事件（带 subagentId）→ 路由进委派卡片的迷你时间线，不进主消息流
   if (ev && "subagentId" in ev && ev.subagentId) {
     st.updateSubagent(ev);
-    // 子智能体内部的高危审批也必须进同一审批队列（否则服务端挂起死等）
+    // 子智能体内部的高危审批/提问也必须进同一队列（否则服务端挂起死等）
     if (ev.type === "approval-required") st.requestApproval(ev);
+    if (ev.type === "ask-user") st.setAskQuestion({ id: ev.id, question: ev.question, options: ev.options });
     return;
   }
   switch (ev.type) {
     case "session":
       // v2.1：SSE 首帧回传新会话 id，绑定当前会话
       st.setActiveSessionId(ev.id);
+      st.setEventTarget(ev.id);
+      // v3.1：新建会话即进入运行态（runningIds 标记，侧栏徽标）
+      st.setSessionRunning(ev.id, true);
       // 立即刷新会话列表（任务运行中卡片即出现，带「运行中」徽标）
       fetchSessions().catch(() => {});
       break;
@@ -371,11 +503,22 @@ function handleEvent(ev: AgentEvent) {
     case "approval-required":
       st.requestApproval(ev);
       break;
+    case "ask-user":
+      st.setAskQuestion({ id: ev.id, question: ev.question, options: ev.options });
+      break;
     case "approval-result":
       // 弹窗已由 resolveApproval 关闭
       break;
     case "report":
       st.setReport(ev.content);
+      break;
+    case "attachments":
+      // v3.1：附件挂到当前用户消息（附件行展示）
+      st.handleAttachments(ev);
+      break;
+    case "todo-write":
+      // v2.10：任务清单（Todo 面板）
+      st.setTodos(ev.items);
       break;
     case "review":
       st.setReview(ev.content);
@@ -385,9 +528,21 @@ function handleEvent(ev: AgentEvent) {
       break;
     case "done":
       st.finishAssistant();
+      // v2.13：usage 按会话存（视图切换后 StatsLine 显示该会话自己的数字）；
+      // 非当前视图会话完成 → 额外刷新列表（侧栏 done 提醒）
+      if (ev.usage) st.setUsageFor(connSid ?? st.activeSessionId ?? "", ev.usage);
+      if (connSid && connSid !== useStore.getState().activeSessionId) {
+        fetchSessions().catch(() => {});
+      }
+      // v3.1：任务正常完成 → 自动消费该会话队列下一条（停止/异常不消费——队列保留待用户处理）
+      void consumeQueue(connSid);
       break;
     case "model-fallback":
       st.appendFallback(ev.from, ev.to, ev.reason);
+      break;
+    case "retry":
+      // v3.2：断网/瞬时故障重试 → 运行状态行倒计时显示（当前视图会话直接显示）
+      st.setRetry(connSid ?? st.activeSessionId ?? "", { attempt: ev.attempt, maxAttempts: ev.maxAttempts, delayMs: ev.delayMs, message: ev.message });
       break;
     case "context-compressed":
       st.appendCompressed(ev.before, ev.after, ev.summary);
@@ -397,6 +552,13 @@ function handleEvent(ev: AgentEvent) {
       break;
     case "subagent-done":
       st.finishSubagent(ev);
+      break;
+    case "agent-waiting":
+      // v2.13：后台子 Agent 暂停等父级消息 → 线程追加等待提示（前端状态不失真）
+      st.agentWaiting(ev);
+      break;
+    case "agent-resumed":
+      st.agentResumed(ev);
       break;
     case "error":
       st.addError(ev.message);
@@ -412,7 +574,7 @@ export interface WorktreeInfo {
 }
 
 export async function createWorktree(root: string): Promise<WorktreeInfo> {
-  const res = await fetch("/api/worktree", {
+  const res = await apiFetch("/api/worktree", {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ root }),
@@ -423,7 +585,7 @@ export async function createWorktree(root: string): Promise<WorktreeInfo> {
 }
 
 export async function mergeWorktree(root: string, name: string) {
-  const res = await fetch(`/api/worktree/${encodeURIComponent(name)}/merge`, {
+  const res = await apiFetch(`/api/worktree/${encodeURIComponent(name)}/merge`, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ root }),
@@ -434,7 +596,7 @@ export async function mergeWorktree(root: string, name: string) {
 }
 
 export async function discardWorktree(root: string, name: string) {
-  const res = await fetch(`/api/worktree/${encodeURIComponent(name)}/discard`, {
+  const res = await apiFetch(`/api/worktree/${encodeURIComponent(name)}/discard`, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ root }),
@@ -446,7 +608,7 @@ export async function discardWorktree(root: string, name: string) {
 
 /** 计划确认（v2.3 计划卡片：提交 = {plan 编辑后文本, feedback 用户回复}；取消 = cancelled） */
 export async function postPlanDecision(id: string, body: { plan?: string; feedback?: string } | { cancelled: true }) {
-  const res = await fetch(`/api/plan/${encodeURIComponent(id)}`, {
+  const res = await apiFetch(`/api/plan/${encodeURIComponent(id)}`, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify(body),
@@ -460,7 +622,7 @@ export async function postPlanDecision(id: string, body: { plan?: string; feedba
 
 /** 会话列表（刷新 store） */
 export async function fetchSessions(): Promise<SessionMeta[]> {
-  const res = await fetch("/api/sessions");
+  const res = await apiFetch("/api/sessions");
   if (!res.ok) throw new Error(`会话列表加载失败: ${res.status}`);
   const data = await res.json();
   const sessions: SessionMeta[] = data.sessions ?? [];
@@ -470,24 +632,25 @@ export async function fetchSessions(): Promise<SessionMeta[]> {
 
 /** 会话详情（全量事件流 → 重放历史） */
 export async function fetchSessionEvents(id: string): Promise<{ session: SessionMeta; events: StoredEvent[] }> {
-  const res = await fetch(`/api/sessions/${encodeURIComponent(id)}`);
+  const res = await apiFetch(`/api/sessions/${encodeURIComponent(id)}`);
   if (!res.ok) throw new Error(`会话加载失败: ${res.status}`);
   return res.json();
 }
 
 /** 删除会话 */
 export async function deleteSession(id: string) {
-  const res = await fetch(`/api/sessions/${encodeURIComponent(id)}`, { method: "DELETE" });
+  const res = await apiFetch(`/api/sessions/${encodeURIComponent(id)}`, { method: "DELETE" });
   const data = await res.json();
   if (!res.ok || data.ok === false) throw new Error(data.message || "删除失败");
 }
 
 /** Rewind：回滚到检查点（seq 及之后的事件删除） */
-export async function rewindSession(id: string, seq: number) {
-  const res = await fetch(`/api/sessions/${encodeURIComponent(id)}/rewind`, {
+/** v2.14 批 10：marker=false = 编辑截断（不落回滚标记，AI 无需感知）；默认 true = 回滚（AI 感知） */
+export async function rewindSession(id: string, seq: number, marker = true) {
+  const res = await apiFetch(`/api/sessions/${encodeURIComponent(id)}/rewind`, {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ seq }),
+    body: JSON.stringify({ seq, marker }),
   });
   const data = await res.json();
   if (!res.ok || data.ok === false) throw new Error(data.message || "回滚失败");
@@ -499,7 +662,7 @@ export async function rewindSession(id: string, seq: number) {
  */
 export async function maybeMigrateV1(): Promise<boolean> {
   try {
-    const res = await fetch("/api/sessions");
+    const res = await apiFetch("/api/sessions");
     const data = await res.json();
     if ((data.sessions ?? []).length > 0) return false; // DB 已有会话，不迁移
     const raw = localStorage.getItem("infu-chat");
@@ -531,7 +694,7 @@ export async function maybeMigrateV1(): Promise<boolean> {
     if (!events.length) return false;
 
     const firstUser = msgs.find((m) => m.role === "user");
-    const created = await fetch("/api/sessions", {
+    const created = await apiFetch("/api/sessions", {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
@@ -542,7 +705,7 @@ export async function maybeMigrateV1(): Promise<boolean> {
     });
     const { id } = await created.json();
     if (!id) return false;
-    const imported = await fetch(`/api/sessions/${encodeURIComponent(id)}/events`, {
+    const imported = await apiFetch(`/api/sessions/${encodeURIComponent(id)}/events`, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ events }),
@@ -559,9 +722,38 @@ export async function maybeMigrateV1(): Promise<boolean> {
   }
 }
 
-/** 发起 Agent 任务（SSE 流式，支持停止；v2.1 绑定当前会话） */
-export async function sendChat(prompt: string) {
+/**
+ * 发起 Agent 任务（SSE 流式，支持停止；v2.1 绑定当前会话；v3.1 事件按连接会话路由）。
+ * opts.sessionId：指定目标会话（后台队列消费用）；缺省 = 当前视图会话。
+ * opts.root：后台队列消费用该会话自己的 root。
+ * opts.attachments/files/images：v3.1 附件（文件内容 base64 上传暂存；图片 dataURL 走视觉）。
+ */
+export interface ChatAttachmentInput {
+  name: string;
+  kind: "file" | "dir";
+  size?: number;
+}
+export interface ChatFileInput {
+  name: string;
+  rel: string; // 相对路径（文件夹内文件带目录结构）
+  data: string; // base64 内容
+}
+export async function sendChat(
+  prompt: string,
+  opts?: {
+    sessionId?: string | null;
+    root?: string;
+    attachments?: ChatAttachmentInput[];
+    files?: ChatFileInput[];
+    images?: string[];
+    /** v3.0 批 12：桌面版附件路径引用（真实绝对路径，不复制内容） */
+    paths?: string[];
+  }
+): Promise<boolean> {
   const st = useStore.getState();
+  // v3.1：本连接的目标会话（续跑 = 当前会话；新建 = 待 session 事件回传后绑定）
+  let connSid: string | null = opts?.sessionId ?? st.activeSessionId ?? null;
+  st.setEventTarget(connSid);
   st.addUserMsg(prompt);
   st.ensureAssistant();
 
@@ -569,11 +761,12 @@ export async function sendChat(prompt: string) {
   const controller = new AbortController();
   st.setAbortController(controller);
 
-  // 任务工作树模式：为每个任务创建独立 git worktree（主代码零污染）
-  let effectiveRoot = st.root;
+  // 任务工作树模式：为每个任务创建独立 git worktree（主代码零污染）。
+  // v3.1：后台队列消费用该会话自己的 root（opts.root），前台用当前视图 root
+  let effectiveRoot = opts?.root ?? st.root;
   if (st.useWorktree) {
     try {
-      const wt = await createWorktree(st.root);
+      const wt = await createWorktree(effectiveRoot);
       st.setWorktree(wt);
       effectiveRoot = wt.path;
     } catch (e) {
@@ -582,20 +775,27 @@ export async function sendChat(prompt: string) {
   }
 
   try {
-    const res = await fetch("/api/chat", {
+    const res = await apiFetch("/api/chat", {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
         prompt,
-        root: effectiveRoot,
+        // v2.9：root = 会话归属目录（项目匹配/记忆）；execRoot = 执行目录（worktree 模式 = 临时工作树）
+        // v2.13：续跑会话不传 root——服务端用会话自身 root（修复视图 root 与会话 root 脱钩时
+        // 后台/续跑任务跑错目录；新会话才用视图 root）
+        root: opts?.sessionId ? undefined : st.root,
+        execRoot: effectiveRoot,
         modelId: st.modelId,
         // v2 思考级别（4 档，按模型实际级别数自动映射）
         thinkingLevel: st.thinkingLevel,
         // v2.2 动态步数启发式参考（模板任务）
         templateId: st.templateId ?? undefined,
-        planApproval: true,
-        // v2.1：绑定当前会话（null = 服务端新建并回传 session 事件）
-        sessionId: st.activeSessionId ?? undefined,
+        // v2.1：绑定目标会话（null = 服务端新建并回传 session 事件）
+        sessionId: opts?.sessionId ?? st.activeSessionId ?? undefined,
+        // v3.1 附件：元数据（kind/name/size）+ 文件内容（base64，服务端暂存 ~/.infu/attachments/）+ 图片（dataURL 视觉）
+        attachments: opts?.attachments,
+        files: opts?.files,
+        images: opts?.images,
       }),
       signal: controller.signal,
     });
@@ -618,32 +818,62 @@ export async function sendChat(prompt: string) {
         if (!dataLine) continue;
         try {
           const ev = JSON.parse(dataLine.slice(5).trim()) as AgentEvent;
-          handleEvent(ev);
+          // v3.1：session 事件绑定本连接会话 id（后续事件路由依据）
+          if (ev.type === "session") connSid = ev.id;
+          handleEvent(ev, connSid);
         } catch {
           /* 忽略坏帧 */
         }
       }
     }
+    return true; // v2.13：成功（队列消费判断失败插回）
   } catch (e) {
+    // v2.13：错误写入**本连接**会话（原实现读全局 eventTarget——并行时错误行写错会话）
+    const errSid = connSid ?? st.activeSessionId ?? "";
     if ((e as Error).name === "AbortError") {
-      useStore.getState().addError("已手动停止任务");
+      useStore.getState().addErrorFor(errSid, "已手动停止任务");
     } else {
-      useStore.getState().addError((e as Error).message);
+      useStore.getState().addErrorFor(errSid, (e as Error).message);
     }
+    return false; // v2.13：失败（队列消费据此插回队首）
   } finally {
-    useStore.getState().setAbortController(null);
-    useStore.getState().finishAssistant();
-    // 计划未确认就中断（停止/异常/断流）时清理计划卡片，避免残留
-    useStore.getState().clearPlan();
-    // 任务结束：重拉事件补全回滚锚点（实时流消息无 seqStart，重放后即可回滚）
-    const sid = useStore.getState().activeSessionId;
-    if (sid) {
-      fetchSessionEvents(sid)
-        .then(({ events }) => useStore.getState().loadSession(events))
+    // v2.13：只清理本连接的 controller/计划/收尾（原实现清全局——并行会话 stop 失效/计划卡被误清）
+    if (connSid) useStore.getState().clearAbortController(connSid);
+    useStore.getState().finishAssistantFor(connSid ?? st.activeSessionId ?? "");
+    if (connSid) useStore.getState().clearPlanFor(connSid);
+    // 任务结束：重拉事件补全回滚锚点（实时流消息无 seqStart，重放后即可回滚）。
+    // v2.13：被新 run 接管（队列连发 run2 已启动）→ 跳过重放（否则整体替换覆盖新 run 实时缓存）；
+    // 后台会话 → 只写缓存（loadSessionCache，不污染视图全局字段）
+    if (connSid && !useStore.getState().runningIds.includes(connSid)) {
+      const cid = connSid; // 闭包内 let 收窄失效（.then 回调）——先固化
+      fetchSessionEvents(cid)
+        .then(({ events }) => {
+          const stNow = useStore.getState();
+          if (cid === stNow.activeSessionId) stNow.loadSession(events, cid);
+          else stNow.loadSessionCache(events, cid);
+        })
         .catch(() => {});
     }
     // 会话列表刷新（新会话/状态更新）
     fetchSessions().catch(() => {});
+    // v3.1：队列消费只由 done 事件驱动（正常完成才消费；停止/异常保留队列）
+  }
+}
+
+/** v3.1 排队消费：会话空闲时取队首自动发送（连续消费直到队列空） */
+async function consumeQueue(sid: string | null) {
+  if (!sid) return;
+  const st = useStore.getState();
+  if (st.runningIds.includes(sid)) return; // 仍在跑（如旧连接刚 abort 新连接已接管）不重复消费
+  const item = st.shiftQueue(sid);
+  if (item) {
+    // 用该会话自己的 root（后台消费时视图 root 可能指向其他会话）
+    const meta = st.sessions.find((s) => s.id === sid);
+    const ok = await sendChat(item.text, { sessionId: sid, root: meta?.root ?? undefined });
+    // v2.13：发送失败（网络/异常）→ 队列项插回队首（原实现 shift 后即丢，失败永久丢失）
+    if (!ok && !useStore.getState().runningIds.includes(sid)) {
+      useStore.getState().unshiftQueue(sid!, item);
+    }
   }
 }
 
@@ -660,7 +890,7 @@ export interface ProjectInfo {
 
 /** 项目列表（注册表 + 各项目未归档会话统计与最近会话） */
 export async function fetchProjects(): Promise<ProjectInfo[]> {
-  const res = await fetch("/api/projects");
+  const res = await apiFetch("/api/projects");
   if (!res.ok) throw new Error(`项目列表加载失败: ${res.status}`);
   const data = await res.json();
   return data.projects ?? [];
@@ -668,7 +898,7 @@ export async function fetchProjects(): Promise<ProjectInfo[]> {
 
 /** 创建项目（注册文件夹；root 必须为已存在目录） */
 export async function createProjectApi(root: string, name?: string): Promise<void> {
-  const res = await fetch("/api/projects", {
+  const res = await apiFetch("/api/projects", {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ root, name }),
@@ -679,7 +909,7 @@ export async function createProjectApi(root: string, name?: string): Promise<voi
 
 /** 移除项目（只删注册；会话保留为自由会话，文件夹不删） */
 export async function removeProjectApi(id: string): Promise<void> {
-  const res = await fetch(`/api/projects/${encodeURIComponent(id)}`, { method: "DELETE" });
+  const res = await apiFetch(`/api/projects/${encodeURIComponent(id)}`, { method: "DELETE" });
   const data = await res.json();
   if (!res.ok || data.ok === false) throw new Error(data.message || "移除项目失败");
 }
@@ -689,11 +919,63 @@ export async function updateSessionApi(
   id: string,
   body: { title?: string; pinned?: boolean; archived?: boolean }
 ): Promise<void> {
-  const res = await fetch(`/api/sessions/${encodeURIComponent(id)}`, {
+  const res = await apiFetch(`/api/sessions/${encodeURIComponent(id)}`, {
     method: "PATCH",
     headers: { "content-type": "application/json" },
     body: JSON.stringify(body),
   });
   const data = await res.json();
   if (!res.ok || data.ok === false) throw new Error(data.message || "更新会话失败");
+}
+
+// ── v2.9 审查（审查式：文件列表 + 行级 diff）──
+
+export interface ReviewFileInfo {
+  path: string;
+  added: number;
+  removed: number;
+}
+
+/** 审查文件列表（改动文件 + 增删行数；含未跟踪新文件） */
+export async function fetchReviewFiles(root: string): Promise<ReviewFileInfo[]> {
+  const res = await apiFetch(`/api/review/files?root=${encodeURIComponent(root)}`);
+  const data = await res.json();
+  if (!res.ok || data.ok === false) return [];
+  return data.files ?? [];
+}
+
+/** 单文件 unified diff 文本（未跟踪文件 = 全新增行） */
+export async function fetchReviewFileDiff(root: string, path: string): Promise<string> {
+  const res = await apiFetch(`/api/review/file?root=${encodeURIComponent(root)}&path=${encodeURIComponent(path)}`);
+  const data = await res.json();
+  if (!res.ok || data.ok === false) return "";
+  return data.diff ?? "";
+}
+
+// ── v2.9 代码界面（项目代码浏览器：文件树 + 内容预览）──
+
+export interface FsTreeFile {
+  path: string;
+  added: number;
+  removed: number;
+  untracked: boolean;
+}
+
+/** 项目文件树（git 已跟踪 + 未跟踪 + 改动统计；非 git 递归扫描） */
+export async function fetchFsTree(root: string): Promise<FsTreeFile[]> {
+  const res = await apiFetch(`/api/fs/tree?root=${encodeURIComponent(root)}`);
+  const data = await res.json();
+  if (!res.ok || data.ok === false) return [];
+  return data.files ?? [];
+}
+
+/** 文件内容（超大/二进制提示） */
+export async function fetchFsFile(
+  root: string,
+  path: string
+): Promise<{ content: string; binary?: boolean; size?: number; truncated?: boolean }> {
+  const res = await apiFetch(`/api/fs/file?root=${encodeURIComponent(root)}&path=${encodeURIComponent(path)}`);
+  const data = await res.json();
+  if (!res.ok || data.ok === false) return { content: "", binary: false };
+  return data;
 }

@@ -1,60 +1,433 @@
 @import "tailwindcss";
 
-/* ═══ InFu 设计系统（ui-ux-pro-max: Dark Mode OLED + Code dark / Run green）═══ */
-@theme {
-  --color-ink: #0f172a;        /* 页面背景 */
-  --color-panel: #1e293b;      /* 面板背景 */
-  --color-panel-2: #334155;    /* 次级面板 */
-  --color-muted: #272f42;      /* 弱化背景 */
-  --color-line: #475569;       /* 边框 */
-  --color-text: #f8fafc;       /* 主文字 */
-  --color-sub: #94a3b8;        /* 次级文字 */
-  --color-accent: #22c55e;     /* 运行/成功绿 */
-  --color-warn: #eab308;       /* 警告黄 */
-  --color-danger: #ef4444;     /* 错误红 */
-  --font-sans: "Inter", "Microsoft YaHei", "PingFang SC", system-ui, sans-serif;
-  --font-mono: "JetBrains Mono", "Cascadia Code", Consolas, monospace;
+/* ═══ InFu 设计系统 v3（UI 打磨：全面对齐 deepseek-harness）═══
+   主题变量在 :root（浅色）与 html[data-theme="dark"]（深色，默认）下翻转；
+   @theme inline 把 Tailwind 工具类映射到这些变量 → 全站既有类名自动双主题。
+   基调：主强调 = 中性灰（近墨/近白主按钮）；语义色 = 成功绿 / 链接信息蓝 / 警告黄 / 错误红 / 进行中蓝。 */
+
+:root {
+  color-scheme: light;
+  /* 中性蓝灰阶（harness light 取值） */
+  --bg-base: #ffffff;
+  --bg-layer-1: #f5f6f7;
+  --bg-layer-2: #ebeef2;
+  --bg-layer-3: #e1e5ec;
+  --bg-sidebar: #f9fafb;
+  --bg-input: #ffffff;
+  --bg-elevated: #ffffff;
+  --bg-hover: #ebeef2;
+  --bg-selected: #ebeef2;
+  --bg-code: #f5f6f7;
+  --bubble-user: #edf3fe;
+  /* 文字四级 */
+  --text-primary: #0f1115;
+  --text-secondary: #61666b;
+  --text-tertiary: #81858c;
+  --text-caption: #adb2b8;
+  /* 透明度边框 l1–l4 */
+  --border-l1: rgba(0, 0, 0, 0.04);
+  --border-l2: rgba(0, 0, 0, 0.1);
+  --border-l3: rgba(0, 0, 0, 0.12);
+  --border-l4: rgba(0, 0, 0, 0.16);
+  /* 主强调 = 中性灰（近墨主按钮） */
+  --primary-fill: #0f1115;
+  --primary-fg: #ffffff;
+  --primary-hover: #434446;
+  /* 语义色 */
+  --success: #22c55e;
+  --success-soft: #e6faed;
+  --info: #4176e6;
+  --info-soft: #edf3fe;
+  --warn: #dd8629;
+  --warn-soft: #fef5e7;
+  --danger: #ec1313;
+  --danger-soft: rgba(236, 19, 19, 0.05);
+  --ongoing: #5686fe;
+  --glow: #6187d8;
+  /* v2.14 批 5：底层装饰光晕（磨砂玻璃透出物） */
+  --glow-a: rgba(97, 135, 216, 0.14);
+  --glow-b: rgba(97, 135, 216, 0.08);
+  /* shimmer 渐变端点 */
+  --shimmer-a: #4176e6;
+  --shimmer-b: #d3e2ff;
+  /* 滚动条 / 遮罩 */
+  --scroll-thumb: rgba(0, 0, 0, 0.22);
+  --scroll-thumb-hover: rgba(0, 0, 0, 0.32);
+  --mask: rgba(0, 0, 0, 0.24);
+  --ease: cubic-bezier(0.4, 0, 0.2, 1);
+  /* markdown 渲染（harness 规格：code-block 50 / banner 50 / inline 100） */
+  --bg-code-block: #f9fafb;
+  --bg-code-banner: #f9fafb;
+  --bg-inline-code: #ebeef2;
 }
 
-/* 基础 */
+html[data-theme="dark"] {
+  color-scheme: dark;
+  --bg-base: #151517;
+  --bg-layer-1: #232325;
+  --bg-layer-2: #2c2c2e;
+  --bg-layer-3: #353638;
+  --bg-sidebar: #1b1b1c;
+  --bg-input: #2c2c2e;
+  --bg-elevated: #2c2c2e;
+  --bg-hover: #2c2c2e;
+  --bg-selected: #2c2c2e;
+  --bg-code: #232325;
+  --bubble-user: #2c2c2e;
+  --text-primary: #f9fafb;
+  --text-secondary: #cfd3d6;
+  --text-tertiary: #adb2b8;
+  --text-caption: #81858c;
+  --border-l1: rgba(255, 255, 255, 0.06);
+  --border-l2: rgba(255, 255, 255, 0.12);
+  --border-l3: rgba(255, 255, 255, 0.16);
+  --border-l4: rgba(255, 255, 255, 0.2);
+  --primary-fill: #f9fafb;
+  --primary-fg: #0f1115;
+  --primary-hover: #cfd3d6;
+  --success: #22c55e;
+  --success-soft: rgba(34, 197, 94, 0.12);
+  --info: #679efe;
+  --info-soft: rgba(103, 158, 254, 0.14);
+  --warn: #f7ad31;
+  --warn-soft: rgba(247, 173, 49, 0.12);
+  --danger: #f25a5a;
+  --danger-soft: rgba(242, 90, 90, 0.15);
+  --ongoing: #5686fe;
+  --glow: #6187d8;
+  /* v2.14 批 5：底层装饰光晕（磨砂玻璃透出物） */
+  --glow-a: rgba(103, 158, 254, 0.10);
+  --glow-b: rgba(103, 158, 254, 0.05);
+  --shimmer-a: #679efe;
+  --shimmer-b: #4176e6;
+  --scroll-thumb: rgba(255, 255, 255, 0.16);
+  --scroll-thumb-hover: rgba(255, 255, 255, 0.28);
+  --mask: rgba(0, 0, 0, 0.5);
+  /* markdown 渲染（harness 规格：code-block 900 / banner 850 / inline 850） */
+  --bg-code-block: #1b1b1c;
+  --bg-code-banner: #2c2c2e;
+  --bg-inline-code: #2c2c2e;
+}
+
+@theme inline {
+  /* 兼容旧类名 + 新语义类名 → 主题变量（inline = 工具类直接引用变量，随主题翻转） */
+  --color-ink: var(--bg-base);
+  --color-panel: var(--bg-layer-1);
+  --color-panel-2: var(--bg-layer-2);
+  --color-muted: var(--bg-layer-2);
+  --color-line: var(--border-l2);
+  --color-text: var(--text-primary);
+  --color-sub: var(--text-tertiary);
+  --color-accent: var(--primary-fill); /* 主强调 = 中性灰 */
+  --color-primary: var(--primary-fill);
+  --color-primary-fg: var(--primary-fg);
+  --color-primary-hover: var(--primary-hover);
+  --color-success: var(--success);
+  --color-success-soft: var(--success-soft);
+  --color-info: var(--info);
+  --color-info-soft: var(--info-soft);
+  --color-warn: var(--warn);
+  --color-warn-soft: var(--warn-soft);
+  --color-danger: var(--danger);
+  --color-danger-soft: var(--danger-soft);
+  --color-ongoing: var(--ongoing);
+  --color-sidebar: var(--bg-sidebar);
+  --color-elevated: var(--bg-elevated);
+  --color-hover: var(--bg-hover);
+  --color-input: var(--bg-input);
+  --color-code: var(--bg-code);
+  --color-code-block: var(--bg-code-block);
+  --color-code-banner: var(--bg-code-banner);
+  --color-inline-code: var(--bg-inline-code);
+  --color-bubble: var(--bubble-user);
+  --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Helvetica Neue", Helvetica, Arial, sans-serif;
+  --font-mono: "SF Mono", "JetBrains Mono", "Fira Code", "Cascadia Code", Consolas, "Liberation Mono", Menlo, Courier, "PingFang SC", "Microsoft YaHei", monospace;
+}
+
+@theme {
+  /* 阴影（harness lv1–3，双主题一致） */
+  --shadow-lv1: 0 2px 4px 0 rgba(0, 0, 0, 0.05);
+  --shadow-lv2: 0 4px 12px 0 rgba(0, 0, 0, 0.02), 0 2px 8px 0 rgba(0, 0, 0, 0.04);
+  --shadow-lv3: 0 0 1px 0 rgba(0, 0, 0, 0.2), 0 0 4px 0 rgba(0, 0, 0, 0.02), 0 12px 32px 0 rgba(0, 0, 0, 0.08);
+}
+
+/* ── 基础 ── */
 html, body, #root { height: 100%; }
 body {
-  background: var(--color-ink);
-  color: var(--color-text);
+  background: var(--bg-base);
+  color: var(--text-primary);
   font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+  transition: background-color 0.2s var(--ease), color 0.2s var(--ease);
 }
 
-/* 滚动条（深色） */
+/* 滚动条（8px 薄款，深浅自适应；Firefox fallback） */
 ::-webkit-scrollbar { width: 8px; height: 8px; }
-::-webkit-scrollbar-thumb { background: #334155; border-radius: 4px; }
-::-webkit-scrollbar-thumb:hover { background: #475569; }
+::-webkit-scrollbar-thumb { background: var(--scroll-thumb); border-radius: 4px; }
+::-webkit-scrollbar-thumb:hover { background: var(--scroll-thumb-hover); }
 ::-webkit-scrollbar-track { background: transparent; }
+* { scrollbar-width: thin; scrollbar-color: var(--scroll-thumb) transparent; }
 
-/* 焦点可见（可访问性） */
+/* 焦点可见（可访问性；信息蓝环） */
 :focus-visible {
-  outline: 2px solid var(--color-accent);
+  outline: 2px solid var(--info);
   outline-offset: 2px;
   border-radius: 2px;
+}
+/* v3：输入框聚焦无蓝框（全局 :focus-visible 优先级高于 Tailwind outline-none，这里强制） */
+textarea:focus,
+textarea:focus-visible,
+input:focus,
+input:focus-visible {
+  outline: none !important;
+  box-shadow: none !important;
 }
 
 /* 流式光标 */
 .stream-cursor::after {
   content: "▍";
-  color: var(--color-accent);
+  color: var(--info);
   animation: blink 1s steps(2) infinite;
 }
 @keyframes blink { 50% { opacity: 0; } }
 
-/* v2.4 外观设置（html data 属性由 App 按 store.appearance 应用）：
-   字号 = root rem 缩放（Tailwind rem 基准 16px，sm 为默认 15px 微缩）；流式光标可关 */
-html[data-font-size="xs"] { font-size: 14px; }
-html[data-font-size="sm"] { font-size: 15px; }
-html[data-font-size="base"] { font-size: 16px; }
+/* v2.4 外观设置：字号 = root rem 缩放；流式光标可关 */
+html[data-font-size="xs"] { font-size: 13px; }
+html[data-font-size="sm"] { font-size: 14px; }
+html[data-font-size="base"] { font-size: 15px; }
 html[data-stream-cursor="off"] .stream-cursor::after { display: none; }
 
-/* 工具卡片闪烁 */
+/* ── harness 动效细节 ── */
+/* 状态行 shimmer 文字（运行中/降级重试：蓝渐变扫光） */
+@keyframes text-shimmer {
+  0% { background-position: 200% center; }
+  100% { background-position: -200% center; }
+}
+.shimmer-text {
+  background: linear-gradient(90deg, var(--shimmer-a), var(--shimmer-b) 40%, var(--shimmer-a) 60%, var(--shimmer-b));
+  background-size: 200% auto;
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  animation: text-shimmer 1.8s linear infinite;
+}
+
+/* 运行中的折叠行扫光带（思考/工具行，2.6s 一轮） */
+@keyframes glare-sweep {
+  0% { transform: translateX(-130%); }
+  60%, 100% { transform: translateX(230%); }
+}
+.glare-sweep { position: relative; overflow: hidden; }
+.glare-sweep::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 45%;
+  background: linear-gradient(90deg, transparent, color-mix(in srgb, var(--text-primary) 7%, transparent), transparent);
+  animation: glare-sweep 2.6s ease-out infinite;
+  pointer-events: none;
+}
+
+/* 2×2 点分隔符（折叠行标题与摘要之间） */
+.dot-sep { width: 2px; height: 2px; border-radius: 999px; background: var(--text-caption); }
+
+/* Hero 蓝色椭圆光晕（空态输入框背后） */
+.hero-glow {
+  position: absolute;
+  left: 50%;
+  top: 62%;
+  width: 680px;
+  height: 320px;
+  transform: translate(-50%, -50%);
+  background: radial-gradient(ellipse at center, color-mix(in srgb, var(--glow) 9%, transparent), transparent 70%);
+  filter: blur(26px);
+  pointer-events: none;
+}
+
+/* ── 助手 Markdown（.infu-md：Streamdown 输出容器；v3 对齐 harness MarkdownText）── */
+.infu-md { min-width: 0; overflow-wrap: anywhere; font-size: 15px; line-height: 25px; color: var(--text-primary); }
+.infu-md strong { font-weight: 600; }
+.infu-md h1 { font-size: 24px; line-height: 34px; font-weight: 700; margin: 32px 0 16px; }
+.infu-md h2 { font-size: 22px; line-height: 32px; font-weight: 700; margin: 32px 0 16px; }
+.infu-md h3 { font-size: 20px; line-height: 30px; font-weight: 700; margin: 32px 0 16px; }
+.infu-md h4 { font-size: 15px; line-height: 25px; font-weight: 600; margin: 16px 0; }
+.infu-md h5, .infu-md h6 { font-size: 15px; line-height: 25px; font-weight: 600; margin: 16px 0; }
+.infu-md p { margin: 16px 0; }
+.infu-md ul, .infu-md ol { margin: 16px 0; padding-left: 18px; }
+.infu-md ul { list-style: disc; }
+.infu-md ol { list-style: decimal; }
+.infu-md li:not(:first-child) { margin-top: 6px; }
+.infu-md li > ul, .infu-md li > ol { margin-top: 4px; }
+.infu-md li::marker { line-height: 28px; color: var(--text-secondary); }
+.infu-md li > *:first-child { margin-top: 0; }
+.infu-md li > *:last-child { margin-bottom: 0; }
+/* 链接：信息蓝 + hover 下划线 + 透明点击区 */
+.infu-md a {
+  color: var(--info);
+  text-decoration: none;
+  position: relative;
+  border-left: 3px solid rgb(255 255 255 / 0);
+  border-right: 3px solid rgb(255 255 255 / 0);
+  border-top: 2px solid rgb(255 255 255 / 0);
+  border-bottom: 2px solid rgb(255 255 255 / 0);
+  margin-left: -3px;
+  margin-right: -3px;
+}
+.infu-md a:hover, .infu-md a:focus {
+  outline: none;
+  text-decoration: underline var(--info);
+}
+.infu-md a:focus-visible { box-shadow: 0 0 0 2px var(--info); }
+.infu-md hr { border: none; height: 1px; margin: 32px 0; background: var(--border-l2); }
+.infu-md blockquote { border-left: 2px solid var(--text-caption); margin: 16px 0; padding-left: 14px; }
+/* 内联代码（harness：0.875em、r6、inline-flex、chip 底） */
+.infu-md :not(pre) > code {
+  display: inline-flex;
+  align-items: center;
+  box-sizing: border-box;
+  font-family: var(--font-mono);
+  font-size: 0.875em !important;
+  background-color: var(--bg-inline-code);
+  border-radius: 6px;
+  padding: 0 5px;
+}
+.infu-md :where(h1, h2, h3, h4, h5, h6) code { font: inherit; font-family: var(--font-mono); }
+/* 代码块（v3 极简：无背景无边框，等宽字体直接嵌在文本流里） */
+.infu-md pre {
+  margin: 12px 0;
+  font-family: var(--font-mono);
+  font-size: 13px;
+  line-height: 22px;
+  color: var(--text-primary);
+  background: transparent;
+  overflow-x: auto;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+.infu-md pre code {
+  display: block;
+  background: none;
+  padding: 0;
+  font: inherit;
+}
+/* 表格（v3 极简：纯表格，无卡片包装——包装由 ChatPanel 内联样式去框；这里只负责表格本体） */
+.infu-md table {
+  display: block;
+  overflow-x: auto;
+  overscroll-behavior-x: contain;
+  max-width: 100%;
+  border-collapse: collapse;
+  width: max-content;
+  margin: 12px 0;
+  background: transparent;
+}
+.infu-md th {
+  text-align: start;
+  padding: 8px 16px;
+  border-bottom: 1px solid var(--border-l3);
+  font-size: 14px;
+  line-height: 23px;
+  font-weight: 500;
+  max-width: min(30vw, 320px);
+  min-width: 100px;
+}
+.infu-md td {
+  padding: 8px 16px;
+  border-bottom: 1px solid var(--border-l2);
+  font-size: 14px;
+  line-height: 23px;
+  max-width: min(30vw, 320px);
+  min-width: 100px;
+}
+.infu-md th:first-child, .infu-md td:first-child { padding-left: 0; }
+.infu-md td:last-child { padding-right: 0; }
+.infu-md table code { font-size: 13px; }
+.infu-md input[type="checkbox"] { margin: 0 8px 0 0; accent-color: var(--info); }
+.infu-md img { display: block; max-width: 100%; height: auto; border-radius: 8px; }
+.infu-md > *:first-child, .infu-md p:first-child { margin-top: 0 !important; }
+.infu-md > *:last-child, .infu-md p:last-child { margin-bottom: 0 !important; }
+
+/* 工具卡片闪烁（运行中工具行收尾前保留，主样式已由 Timeline 接管） */
 @keyframes pulse-glow {
-  0%, 100% { box-shadow: 0 0 0 0 rgba(34, 197, 94, 0); }
-  50% { box-shadow: 0 0 8px 1px rgba(34, 197, 94, 0.35); }
+  0%, 100% { box-shadow: 0 0 0 0 rgba(86, 134, 254, 0); }
+  50% { box-shadow: 0 0 8px 1px rgba(86, 134, 254, 0.35); }
 }
 .tool-running { animation: pulse-glow 1.2s ease-in-out infinite; }
+
+/* 动效减弱偏好 */
+@media (prefers-reduced-motion: reduce) {
+  .shimmer-text, .glare-sweep::after, .stream-cursor::after, .tool-running { animation: none; }
+  body { transition: none; }
+}
+
+/* v3：隐藏滚动条但保留滚动（浮标列等窄条滚动区） */
+.no-scrollbar {
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
+}
+
+/* v3.1 消息操作行时间标签（对齐 harness MessageIconActions）：消息悬停（或键盘焦点内）
+   时间淡入 80ms；无 hover 设备（触屏）常显 */
+@media (hover: hover) {
+  [data-time-hover-root] .time-hover {
+    opacity: 0;
+    transition: opacity 80ms ease;
+  }
+  [data-time-hover-root]:hover .time-hover,
+  [data-time-hover-root]:focus-within .time-hover {
+    opacity: 1;
+  }
+}
+
+/* v2.9 代码界面语法高亮（VSCode 式 token 色，随双主题变量翻转） */
+.codeview-hl .hljs-keyword,
+.codeview-hl .hljs-selector-tag,
+.codeview-hl .hljs-literal,
+.codeview-hl .hljs-operator {
+  color: var(--info);
+}
+.codeview-hl .hljs-string,
+.codeview-hl .hljs-regexp,
+.codeview-hl .hljs-attr,
+.codeview-hl .hljs-symbol {
+  color: var(--success);
+}
+.codeview-hl .hljs-comment,
+.codeview-hl .hljs-quote {
+  color: var(--text-caption);
+  font-style: italic;
+}
+.codeview-hl .hljs-number,
+.codeview-hl .hljs-bullet {
+  color: var(--warn);
+}
+.codeview-hl .hljs-title,
+.codeview-hl .hljs-title.function_,
+.codeview-hl .hljs-section {
+  color: var(--info);
+}
+.codeview-hl .hljs-built_in,
+.codeview-hl .hljs-type,
+.codeview-hl .hljs-class .hljs-title {
+  color: var(--ongoing);
+}
+.codeview-hl .hljs-variable,
+.codeview-hl .hljs-template-variable,
+.codeview-hl .hljs-params {
+  color: var(--text-primary);
+}
+.codeview-hl .hljs-meta,
+.codeview-hl .hljs-doctag {
+  color: var(--text-caption);
+}
+.codeview-hl .hljs-emphasis {
+  font-style: italic;
+}
+.codeview-hl .hljs-strong {
+  font-weight: 600;
+}
+

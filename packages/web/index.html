@@ -1,9 +1,31 @@
 <!doctype html>
-<html lang="zh-CN">
+<html lang="zh-CN" data-theme="dark">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>InFu - 软件工程智能体</title>
+    <meta name="theme-color" content="#151517" />
+    <link
+      rel="icon"
+      href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Crect width='24' height='24' rx='6' fill='%23151517'/%3E%3Cpath d='M12 3.5L5.5 8v8l6.5 4.5 6.5-4.5V8L12 3.5z' fill='none' stroke='%23679EFE' stroke-width='1.8' stroke-linejoin='round'/%3E%3Cpath d='M12 20.5v-8.5M5.5 8l6.5 4 6.5-4' stroke='%23679EFE' stroke-width='1.8' stroke-linecap='round'/%3E%3C/svg%3E"
+    />
+    <title>InFu</title>
+    <script>
+      // 渲染前恢复主题（避免深/浅色闪烁）；zustand persist 结构为 { state: {...} }
+      (function () {
+        var theme = "dark";
+        try {
+          var raw = localStorage.getItem("infu-chat");
+          if (raw) {
+            var parsed = JSON.parse(raw);
+            var data = parsed && parsed.state ? parsed.state : parsed;
+            if (data.theme === "light" || data.theme === "dark") theme = data.theme;
+          }
+        } catch (e) {
+          /* 损坏的 localStorage 忽略，回落深色 */
+        }
+        document.documentElement.dataset.theme = theme;
+      })();
+    </script>
   </head>
   <body>
     <div id="root"></div>

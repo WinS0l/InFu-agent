@@ -1,6 +1,7 @@
 import { create } from "zustand";
 import { persist } from "zustand/middleware";
-import type { AgentEvent, ModelConfig, PhaseId, SessionMeta, StoredEvent } from "@infu/shared";
+import { apiFetch } from "./api";
+import type { AgentEvent, AttachmentMeta, ModelConfig, PhaseId, SessionMeta, StoredEvent } from "@infu/shared";
 
 /** 单条消息（含其触发的工具调用与交付报告） */
 export interface ChatMsg {
@@ -8,6 +9,8 @@ export interface ChatMsg {
   role: "user" | "assistant";
   text: string;
   streaming?: boolean;
+  /** v3：消息时间戳（用户消息 hover 操作行时间显示；历史重放用事件 ts） */
+  ts?: number;
   tools: ToolEventState[];
   report?: string;
   /** 思考过程（reasoning 流式追加） */
@@ -22,6 +25,10 @@ export interface ChatMsg {
   compressed?: Array<{ before: number; after: number; summary: string }>;
   /** v2.1：该轮第一条事件的 seq（Rewind 回滚锚点；历史重放时标记） */
   seqStart?: number;
+  /** v3.1：用户消息附加的文件/文件夹/图片（attachments 事件挂载；渲染附件行） */
+  attachments?: AttachmentMeta[];
+  /** v3.1：turn 结束时间戳（finishAssistant 记录；turn 尾操作行「· 运行 Xs」） */
+  endedAt?: number;
 }
 
 /** 工具事件状态（UI 呈现） */
@@ -57,7 +64,7 @@ export interface SubagentMsg {
 }
 
 /**
- * 子智能体完整线程（v2.5 返工：对齐 opencode/Claude Code——子 Agent 独立会话视图，
+ * 子智能体完整线程（v2.5 返工：对齐主流——子 Agent 独立会话视图，
  * 右侧栏弹窗展示完整消息流；主对话流只显示派出条目，点击打开）
  */
 export interface SubagentThread {
@@ -82,14 +89,85 @@ export interface ApprovalState {
   risk: string;
 }
 
+/** v2.6 收尾：Agent 执行中提问（ask_user 工具）弹窗状态；v2.10 支持多选/描述/结构化选项 */
+export interface AskOption {
+  label: string;
+  desc?: string;
+  recommended?: boolean;
+}
+export interface AskState {
+  id: string;
+  question: string;
+  description?: string;
+  multiSelect?: boolean;
+  options?: Array<string | AskOption>;
+}
+
+/** v2.9 右侧栏标签页（浏览器式）类型 */
+export type RightTabKind = "review" | "browser" | "subagent" | "subagents" | "computeruse";
+/** v2.9 右侧栏标签页：review=审查 / browser=浏览器（占位）/ subagent=子 Agent 详情 / subagents=子 Agent 列表 */
+export interface RightTab {
+  id: string;
+  kind: RightTabKind;
+  label: string;
+  subagentId?: string;
+}
+
+/** v3.1 排队发送：会话运行中预输入的下一条消息（队列项） */
+export interface QueueItem {
+  id: string;
+  text: string;
+  ts: number;
+}
+
+/** 设置弹窗 Tab（SettingsModal 导航；类型放 store 防 SettingsModal→store 循环 import） */
+export type SettingsTab =
+  | "general" | "appearance" | "model" | "browser"
+  | "memory" | "plugins" | "skills" | "subagent" | "mcp" | "commands" | "hooks"
+  | "index" | "stats" | "schedule";
+
 interface StoreState {
   models: ModelConfig[];
   modelId: string;
   root: string;
   messages: ChatMsg[];
+  /** v3.1：全局运行中会话集合（多会话并行：每会话独立运行态；running 是当前视图会话的派生值） */
+  runningIds: string[];
   running: boolean;
+  /** v3.1：每会话消息缓存（多会话并行：流式事件写对应缓存；切换会话秒切，不丢流式状态） */
+  sessionCache: Record<string, ChatMsg[]>;
+  /** v3.1：SSE 事件路由目标会话（api.ts 每连接设置；null = 当前视图会话） */
+  eventTarget: string | null;
+  /** v3.1：每会话编排阶段/步数（流式事件写缓存时用，防跨会话污染视图 currentStep/currentPhase） */
+  sessionPhase: Record<string, PhaseId | null>;
+  sessionStep: Record<string, number>;
+  setEventTarget: (id: string | null) => void;
+  setSessionRunning: (sid: string, r: boolean) => void;
+  /** v3.2：断网/瞬时故障重试信息（按会话；运行状态行倒计时显示；done/error 清空） */
+  retryBySession: Record<string, { attempt: number; maxAttempts: number; delayMs: number; message: string }>;
+  setRetry: (sid: string, r: { attempt: number; maxAttempts: number; delayMs: number; message: string }) => void;
+  clearRetry: (sid: string) => void;
+  /** v3.1 排队发送：每会话待发队列（会话运行中输入 → 入队；done 后自动消费队首） */
+  queuesBySession: Record<string, QueueItem[]>;
+  enqueue: (text: string) => void;
+  removeQueueItem: (sid: string, id: string) => void;
+  updateQueueItem: (sid: string, id: string, text: string) => void;
+  reorderQueue: (sid: string, from: number, to: number) => void;
+  /** 取队首（消费；返回 null 表示队列空） */
+  shiftQueue: (sid: string) => QueueItem | null;
+  /** v2.13：队列项插回队首（发送失败恢复；按 id 去重防重复插入） */
+  unshiftQueue: (sid: string, item: QueueItem) => void;
+  /** v3.1：attachments 事件 → 挂到消息流最后一条用户消息（实时流本地已 addUserMsg） */
+  handleAttachments: (ev: Extract<AgentEvent, { type: "attachments" }>) => void;
+  /** v2.10：任务清单（todo_write 事件驱动；Todo 面板展示） */
+  todos: Array<{ text: string; status: "pending" | "in_progress" | "completed" }>;
+  setTodos: (items: Array<{ text: string; status: "pending" | "in_progress" | "completed" }>) => void;
+  /** v2.13：任务清单按会话存（后台会话 todo-write 不再覆盖视图会话的 Todo 面板） */
+  todosBySession: Record<string, Array<{ text: string; status: "pending" | "in_progress" | "completed" }>>;
   /** 审批队列（Agent 可能并发发起多个审批，逐个排队处理） */
   approvals: ApprovalState[];
+  /** v2.6 收尾：Agent 提问（ask_user 工具；null = 无提问） */
+  askQuestion: AskState | null;
   /** 当前阶段号（Timeline 分组） */
   currentStep: number;
   /** 各阶段开始时间戳（思考耗时计算，键 = 阶段:步骤 复合键） */
@@ -107,7 +185,32 @@ interface StoreState {
   /** v2.4 外观（来自 /api/config appearance 节；设置弹窗保存后即时应用） */
   fontSize: "xs" | "sm" | "base";
   streamCursor: boolean;
-  setAppearance: (a: { fontSize?: "xs" | "sm" | "base"; streamCursor?: boolean }) => void;
+  setAppearance: (a: { fontSize?: "xs" | "sm" | "base"; streamCursor?: boolean; theme?: "light" | "dark" | "system" }) => void;
+  /** v3 UI 打磨：主题（深色默认；设置→外观切换，双主题 token 全站翻转） */
+  theme: "light" | "dark" | "system";
+  setTheme: (t: "light" | "dark" | "system") => void;
+  // ── v3 三栏布局（：侧栏可折叠 rail、右详情栏可开合，均支持拖拽宽度）──
+  sidebarCollapsed: boolean;
+  sidebarWidth: number;
+  browserMenuOpen: boolean;
+  browserOpenTick: number;
+  browserOpenUrl?: string;
+  setBrowserMenuOpen: (v: boolean) => void;
+  bumpBrowserOpen: (url?: string) => void;
+  clearBrowserOpenUrl: () => void;
+  clearBrowserOpenTick: () => void;
+  detailsOpen: boolean;
+  detailsWidth: number;
+  setSidebarCollapsed: (v: boolean) => void;
+  setSidebarWidth: (w: number) => void;
+  setDetailsOpen: (v: boolean) => void;
+  setDetailsWidth: (w: number) => void;
+  /** v3：Web 交互式终端（仅聊天列内显示；开关按钮在输入框左上方） */
+  terminalOpen: boolean;
+  setTerminalOpen: (v: boolean) => void;
+  /** v3：顶部推拉视图（对话/代码）——代码模式终端按钮/面板隐藏 */
+  viewMode: "chat" | "code";
+  setViewMode: (v: "chat" | "code") => void;
 
   setModels: (models: ModelConfig[]) => void;
   setModelId: (id: string) => void;
@@ -119,17 +222,17 @@ interface StoreState {
   activeSessionId: string | null;
   setSessions: (s: SessionMeta[]) => void;
   setActiveSessionId: (id: string | null) => void;
+  /** 加载历史会话（事件流重放为消息；跳过 plan/审批交互事件；v3.1 写入对应会话缓存） */
+  loadSession: (events: StoredEvent[], sessionId?: string, forceView?: boolean) => void;
   // ── v2.6.1 侧栏会话中枢（UI 状态）──
   /** 搜索框聚焦信号（Ctrl+K 递增触发 Sidebar 聚焦） */
   searchFocusTick: number;
   focusSearch: () => void;
-  /** 设置弹窗初始 Tab（技能/定时任务按钮定位用） */
-  settingsTab: string;
-  setSettingsTab: (tab: string) => void;
+  /** 设置弹窗初始 Tab（技能/定时任务按钮定位用；v3.0 UI 审查：从 string 收紧为字面量联合） */
+  settingsTab: SettingsTab;
+  setSettingsTab: (tab: SettingsTab) => void;
   /** 新建会话：清空聊天区并脱离当前会话（下一轮任务由服务端新建） */
   newSession: () => void;
-  /** 加载历史会话（事件流重放为消息；跳过 plan/审批交互事件） */
-  loadSession: (events: StoredEvent[]) => void;
   /**
    * v2.1 Rewind 待定态（微信撤回式）：点「回滚到此」后不立即删除，
    * 消息进入待回滚状态；编辑发送 = 提交回滚（截断+重发），取消 = 恢复原样。
@@ -150,9 +253,11 @@ interface StoreState {
   startTool: (ev: Extract<AgentEvent, { type: "tool-start" }>) => void;
   finishTool: (ev: Extract<AgentEvent, { type: "tool-result" }>) => void;
   setRunning: (r: boolean) => void;
-  abortController: AbortController | null;
+  // v2.13：abortController 单例 → 按会话 Map（并行会话互相踩，stop 失效/停错对象）
+  abortControllers: Record<string, AbortController>;
   setAbortController: (c: AbortController | null) => void;
-  abortRun: () => void;
+  clearAbortController: (sid: string) => void;
+  abortRun: (sid?: string) => void;
   /** 任务工作树模式（每任务独立 git worktree） */
   useWorktree: boolean;
   setUseWorktree: (v: boolean) => void;
@@ -161,20 +266,22 @@ interface StoreState {
   setWorktree: (wt: { name: string; path: string } | null) => void;
   addWorktreeNote: (note: string) => void;
   clearWorktree: () => void;
-  /** 分层编排（M4）：开启 = Planner→Executor→Reviewer 三层 */
-  orchestrate: boolean;
-  setOrchestrate: (v: boolean) => void;
-  /** 任务模式（三档：分层编排 / 直接执行 / 只出方案） */
-  /** 当前编排阶段（phase-start 事件更新，新消息按此打标） */
+  /** 当前编排阶段（phase-start 事件更新，新消息按此打标；默认单一循环无阶段） */
   currentPhase: PhaseId | null;
   setPhase: (ev: Extract<AgentEvent, { type: "phase-start" }>) => void;
   setReview: (content: string) => void;
   /** 待确认的执行计划（计划卡片，POST /api/plan/:id 决策） */
   plan: { id: string; content: string } | null;
   setPlan: (p: { id: string; content: string } | null) => void;
+  /** v2.13：计划按会话存（后台会话挂起等确认时，其他会话收尾不能清掉它的计划卡） */
+  plansBySession: Record<string, { id: string; content: string } | null>;
+  clearPlanFor: (sid: string) => void;
   clearPlan: () => void;
   requestApproval: (ev: Extract<AgentEvent, { type: "approval-required" }>) => void;
   resolveApproval: (approved: boolean) => void;
+  resolveAllApprovals: (approved: boolean) => void;
+  setAskQuestion: (q: AskState | null) => void;
+  resolveAskQuestion: (answer: string | null) => void;
   // ── v2.5 子智能体（主对话流条目 + 右侧栏详情弹窗）──
   startSubagent: (ev: Extract<AgentEvent, { type: "subagent-start" }>) => void;
   updateSubagent: (ev: AgentEvent) => void;
@@ -182,12 +289,33 @@ interface StoreState {
   /** 子智能体线程（右侧栏弹窗数据：与父 Agent 同构的消息流） */
   subagentThreads: Record<string, SubagentThread>;
   /** 当前打开的详情弹窗（subagentId；null = 关闭） */
-  subagentViewer: string | null;
-  openSubagentViewer: (id: string) => void;
-  closeSubagentViewer: () => void;
+  /** v2.9 右侧栏标签页（浏览器式） */
+  rightTabs: RightTab[];
+  activeRightTab: string | null;
+  openRightTab: (tab: { id?: string; kind: RightTabKind; label: string; subagentId?: string }) => void;
+  closeRightTab: (id: string) => void;
+  setActiveRightTab: (id: string) => void;
   setReport: (content: string) => void;
+  /** v3：LLM usage（done 事件携带的缓存命中统计 → StatsLine；v2.12 四桶：uncached=miss/output=completion/cacheRead=hit） */
+  usage: { cacheHit: number; cacheMiss: number; promptTokens: number; completionTokens: number };
+  setUsage: (u: { cacheHit: number; cacheMiss: number; promptTokens: number; completionTokens: number }) => void;
+  /** v2.13：usage 按会话存（切换会话后 StatsLine 显示该会话自己的数字） */
+  usageBySession: Record<string, { cacheHit: number; cacheMiss: number; promptTokens: number; completionTokens: number }>;
+  setUsageFor: (sid: string, u: { cacheHit: number; cacheMiss: number; promptTokens: number; completionTokens: number }) => void;
   finishAssistant: () => void;
+  /** v2.13：按显式会话收尾（sendChat finally/catch 用本连接 connSid——修复跨会话清 running/写错会话） */
+  finishAssistantFor: (sid: string) => void;
   addError: (msg: string) => void;
+  /** v2.13：按显式会话追加错误消息（同上） */
+  addErrorFor: (sid: string, msg: string) => void;
+  /** v2.13：agent-waiting/resumed → 子 Agent 线程追加等待/恢复提示（前端状态不失真） */
+  agentWaiting: (ev: Extract<AgentEvent, { type: "agent-waiting" }>) => void;
+  agentResumed: (ev: Extract<AgentEvent, { type: "agent-resumed" }>) => void;
+  /** v2.14：工具行文件链接 → 打开代码界面定位文件（外部触发；CodeView 消费后清空） */
+  codeViewFile: string | null;
+  setCodeViewFile: (path: string | null) => void;
+  /** v2.13：仅写会话缓存的重放（后台会话重放不污染视图全局字段；被新 run 接管时跳过由调用方判断） */
+  loadSessionCache: (events: { seq: number; ts: number; event: AgentEvent }[], sessionId: string) => void;
   reset: () => void;
 }
 
@@ -197,6 +325,47 @@ const nextId = () => `m${++msgSeq}`;
 /** 阶段+步骤复合键（各阶段 step 独立编号，防止时间戳/分组冲突） */
 export function stepKey(phase: PhaseId | null | undefined, step: number): string {
   return `${phase ?? "agent"}:${step}`;
+}
+
+/**
+ * v3.1 多会话并行：事件/消息写入的目标会话。
+ * SSE 事件流用 eventTarget（api.ts 按连接设置）；用户操作（输入/重放）用 activeSessionId。
+ */
+function targetId(s: StoreState): string | null {
+  return s.eventTarget ?? s.activeSessionId;
+}
+
+/**
+ * v3.1 消息补丁（核心路由）：把 fn 应用到目标会话的消息数组。
+ * - 目标 = 当前视图会话 → 同步更新 sessionCache 与 messages（组件渲染的视图）
+ * - 目标 = 其他会话（并行流式）→ 只更新 sessionCache，不打扰当前视图
+ * - 无目标（新会话首帧前）→ 直接改 messages（后续 session 事件建立缓存时以它为底）
+ */
+function patchMsgs(s: StoreState, fn: (msgs: ChatMsg[]) => ChatMsg[]): Partial<StoreState> {
+  const sid = targetId(s);
+  if (!sid) return { messages: fn(s.messages) };
+  const base = s.sessionCache[sid] ?? (sid === s.activeSessionId ? s.messages : []);
+  const next = fn(base);
+  const sessionCache = { ...s.sessionCache, [sid]: next };
+  if (sid === s.activeSessionId) return { sessionCache, messages: next };
+  return { sessionCache };
+}
+
+/** v3.1 运行状态补丁：更新 runningIds；目标为视图会话时同步派生值 running */
+function patchRunning(s: StoreState, sid: string | null, r: boolean): Partial<StoreState> {
+  if (!sid) return { running: r };
+  const set = new Set(s.runningIds);
+  if (r) set.add(sid);
+  else set.delete(sid);
+  const runningIds = [...set];
+  const out: Partial<StoreState> = { runningIds };
+  if (sid === s.activeSessionId) out.running = r;
+  return out;
+}
+
+/** v3.1 视图会话消息（渲染用）：缓存优先，缺省回退 messages */
+function viewMsgs(s: StoreState, sid: string | null): ChatMsg[] {
+  return sid && s.sessionCache[sid] ? s.sessionCache[sid] : s.messages;
 }
 
 /**
@@ -272,7 +441,8 @@ function routeSubagentEvent(threads: Record<string, SubagentThread>, ev: AgentEv
       break;
     }
     case "text":
-      if (!cur) msgs.push({ id: `${id}-s1`, text: "", tools: [], step: 1 });
+      // v2.14 批 3：工具调用之后的文本独立成消息（子线程同构）
+      if (!cur || cur.tools.length > 0) msgs.push({ id: `${id}-s${(cur?.step ?? 0) + 1}`, text: "", tools: [], step: cur?.step ?? 1 });
       msgs[msgs.length - 1].text += ev.text;
       break;
     case "reasoning":
@@ -314,20 +484,106 @@ export const useStore = create<StoreState>()(
   modelId: "",
   root: "", // v2.6.2：初始为空——由设置 defaultRoot 或侧栏项目选择填充（不再指向测试占位目录）
   messages: [],
+  runningIds: [],
   running: false,
+  sessionCache: {},
+  eventTarget: null,
+  sessionPhase: {},
+  sessionStep: {},
+  plansBySession: {},
+  usageBySession: {},
+  abortControllers: {},
+  setEventTarget: (id) => set({ eventTarget: id }),
+  setSessionRunning: (sid, r) => set((s) => patchRunning(s, sid, r)),
+  retryBySession: {},
+  setRetry: (sid, r) => set((s) => ({ retryBySession: { ...s.retryBySession, [sid]: r } })),
+  clearRetry: (sid) =>
+    set((s) => {
+      if (!s.retryBySession[sid]) return {};
+      const retryBySession = { ...s.retryBySession };
+      delete retryBySession[sid];
+      return { retryBySession };
+    }),
+  queuesBySession: {},
+  enqueue: (text) =>
+    set((s) => {
+      const sid = s.activeSessionId ?? null;
+      if (!sid) return {};
+      const item: QueueItem = { id: `q${++msgSeq}`, text, ts: Date.now() };
+      return { queuesBySession: { ...s.queuesBySession, [sid]: [...(s.queuesBySession[sid] ?? []), item] } };
+    }),
+  removeQueueItem: (sid, id) =>
+    set((s) => ({
+      queuesBySession: {
+        ...s.queuesBySession,
+        [sid]: (s.queuesBySession[sid] ?? []).filter((x) => x.id !== id),
+      },
+    })),
+  updateQueueItem: (sid, id, text) =>
+    set((s) => ({
+      queuesBySession: {
+        ...s.queuesBySession,
+        [sid]: (s.queuesBySession[sid] ?? []).map((x) => (x.id === id ? { ...x, text } : x)),
+      },
+    })),
+  reorderQueue: (sid, from, to) =>
+    set((s) => {
+      const q = [...(s.queuesBySession[sid] ?? [])];
+      if (from < 0 || from >= q.length || to < 0 || to >= q.length || from === to) return {};
+      const [item] = q.splice(from, 1);
+      q.splice(to, 0, item);
+      return { queuesBySession: { ...s.queuesBySession, [sid]: q } };
+    }),
+  shiftQueue: (sid) => {
+    const s = get();
+    const q = s.queuesBySession[sid];
+    if (!q || !q.length) return null;
+    const [item, ...rest] = q;
+    set({ queuesBySession: { ...s.queuesBySession, [sid]: rest } });
+    return item;
+  },
+  /** v2.13：队列项插回队首（发送失败恢复；成功消费的项不重复） */
+  unshiftQueue: (sid, item) =>
+    set((s) => {
+      const q = s.queuesBySession[sid] ?? [];
+      if (q.some((x) => x.id === item.id)) return {};
+      return { queuesBySession: { ...s.queuesBySession, [sid]: [item, ...q] } };
+    }),
+  handleAttachments: (ev) =>
+    set((s) =>
+      patchMsgs(s, (m) => {
+        // 挂到最后一条用户消息（实时流：本地 addUserMsg 已加；找不到则附加到末尾）
+        const idx = [...m].reverse().findIndex((x) => x.role === "user");
+        if (idx >= 0) {
+          const i = m.length - 1 - idx;
+          return m.map((x, n) => (n === i ? { ...x, attachments: [...(x.attachments ?? []), ...ev.items] } : x));
+        }
+        return [...m, { id: nextId(), role: "user", text: "", tools: [], attachments: ev.items, ts: Date.now() }];
+      })
+    ),
   approvals: [],
+  askQuestion: null,
   sessions: [],
   activeSessionId: null,
   pendingRollback: null,
   useWorktree: true,
   worktree: null,
   worktreeNote: "",
-  orchestrate: true,
   currentPhase: null,
-  mode: "orchestrate",
   plan: null,
   subagentThreads: {},
-  subagentViewer: null,
+  rightTabs: [],
+  activeRightTab: null,
+  todos: [],
+  todosBySession: {},
+  setTodos: (items) =>
+    set((s) => {
+      const sid = targetId(s) ?? s.activeSessionId ?? "";
+      const todosBySession = { ...s.todosBySession, [sid]: items };
+      const out: Partial<StoreState> = { todosBySession };
+      if (!sid || sid === s.activeSessionId) out.todos = items;
+      return out;
+    }),
   currentStep: 1,
   stepStartTimes: {},
   diffContent: "",
@@ -337,8 +593,35 @@ export const useStore = create<StoreState>()(
   thinkingLevel: 2,
   fontSize: "sm",
   streamCursor: true,
+  theme: "dark",
+  sidebarCollapsed: false,
+  sidebarWidth: 280,
+  // v3.0 批 3：右侧栏「新建 tab」菜单打开标记（浏览器面板据此让位视图，防原生层覆盖）
+  browserMenuOpen: false,
+  browserOpenTick: 0,
+  browserOpenUrl: undefined as string | undefined,
+  detailsOpen: true,
+  detailsWidth: 360,
+  terminalOpen: false,
+  setTerminalOpen: (v) => set({ terminalOpen: v }),
+  viewMode: "chat",
+  setViewMode: (v) => set({ viewMode: v }),
 
-  setAppearance: (a) => set((s) => ({ fontSize: a.fontSize ?? s.fontSize, streamCursor: a.streamCursor ?? s.streamCursor })),
+  setAppearance: (a) =>
+    set((s) => ({
+      fontSize: a.fontSize ?? s.fontSize,
+      streamCursor: a.streamCursor ?? s.streamCursor,
+      theme: a.theme ?? s.theme,
+    })),
+  setTheme: (t) => set({ theme: t }),
+  setSidebarCollapsed: (v) => set({ sidebarCollapsed: v }),
+  setSidebarWidth: (w) => set({ sidebarWidth: Math.max(264, Math.min(420, w)) }),
+  setBrowserMenuOpen: (v) => set({ browserMenuOpen: v }),
+  bumpBrowserOpen: (url) => set((s) => ({ browserOpenTick: s.browserOpenTick + 1, browserOpenUrl: url })),
+  clearBrowserOpenUrl: () => set({ browserOpenUrl: undefined }),
+  clearBrowserOpenTick: () => set({ browserOpenTick: 0 }),
+  setDetailsOpen: (v) => set({ detailsOpen: v }),
+  setDetailsWidth: (w) => set({ detailsWidth: Math.max(300, Math.min(520, w)) }),
 
   setModels: (models) => {
     const cur = get().modelId;
@@ -357,7 +640,17 @@ export const useStore = create<StoreState>()(
   focusSearch: () => set((s) => ({ searchFocusTick: s.searchFocusTick + 1 })),
   settingsTab: "general",
   setSettingsTab: (tab) => set({ settingsTab: tab }),
-  setActiveSessionId: (id) => set({ activeSessionId: id }),
+  setActiveSessionId: (id) =>
+    set((s) => {
+      const out: Partial<StoreState> = { activeSessionId: id };
+      // v2.13：切换会话 → 视图派生字段跟随该会话（todos/usage/plan 按会话存储后回填）
+      if (id) {
+        out.todos = s.todosBySession[id] ?? [];
+        out.usage = s.usageBySession[id] ?? { cacheHit: 0, cacheMiss: 0, promptTokens: 0, completionTokens: 0 };
+        out.plan = s.plansBySession[id] ?? null;
+      }
+      return out;
+    }),
   setPendingRollback: (p) => set({ pendingRollback: p }),
   clearPendingRollback: () => set({ pendingRollback: null }),
   newSession: () =>
@@ -367,6 +660,7 @@ export const useStore = create<StoreState>()(
       pendingRollback: null,
       running: false,
       approvals: [],
+      askQuestion: null,
       diffContent: "",
       fileChanges: [],
       currentStep: 1,
@@ -375,11 +669,15 @@ export const useStore = create<StoreState>()(
       phaseModels: {},
       plan: null,
       subagentThreads: {},
-      subagentViewer: null,
+      rightTabs: [],
+      activeRightTab: null,
+      todos: [],
+      // v3.1：runningIds/sessionCache 不动——其他会话的后台任务继续跑、缓存保留
     }),
 
-  /** 历史会话重放：事件流 → 消息（复用消息结构，右侧 Diff/文件改动一并恢复） */
-  loadSession: (events) => {
+  /** 历史会话重放：事件流 → 消息（复用消息结构，右侧 Diff/文件改动一并恢复）。
+   *  v3.1：写入 sessionId 对应缓存；sessionId === activeSessionId 或未传时同步视图 messages */
+  loadSession: (events, sessionId, forceView = false) => {
     let msgs: ChatMsg[] = [];
     const fileChanges: string[] = [];
     let diffContent = "";
@@ -387,6 +685,8 @@ export const useStore = create<StoreState>()(
     let phase: PhaseId | undefined;
     const phaseModels: Partial<Record<PhaseId, string>> = {}; // v2.2 阶段模型记录
     let currentStep = 1;
+    let todos: Array<{ text: string; status: "pending" | "in_progress" | "completed" }> = []; // v2.10 任务清单
+    let usage: { cacheHit: number; cacheMiss: number; promptTokens: number; completionTokens: number } | null = null; // v2.13 usage 重放恢复
     // v2.5：子智能体线程重建（右侧栏详情数据源；主对话流只挂条目 id）
     const subagentThreads: Record<string, SubagentThread> = {};
     for (const { seq, ts, event } of events) {
@@ -395,9 +695,20 @@ export const useStore = create<StoreState>()(
       switch (event.type) {
         case "user-message":
           // seqStart 记 user-message 事件 seq（回滚锚点：编辑重发 = 替换这条用户消息）
-          msgs.push({ id: nextId(), role: "user", text: event.text, tools: [], seqStart: seq });
+          msgs.push({ id: nextId(), role: "user", text: event.text, tools: [], seqStart: seq, ts });
           cur = null;
           break;
+        case "todo-write": {
+          // v2.10：任务清单恢复（Todo 面板）
+          todos = event.items;
+          break;
+        }
+        case "attachments": {
+          // v3.1：附件挂到最后一条用户消息（重放展示附件行；图片字节不落库只显名称）
+          const lastUser = [...msgs].reverse().find((x) => x.role === "user");
+          if (lastUser) lastUser.attachments = [...(lastUser.attachments ?? []), ...event.items];
+          break;
+        }
         case "phase-start":
           phase = event.phase;
           if (event.model) phaseModels[event.phase] = event.model;
@@ -405,21 +716,22 @@ export const useStore = create<StoreState>()(
           break;
         case "step-start": {
           // 检查点锚点：该轮第一条事件的 seq（Rewind 用）
-          cur = { id: nextId(), role: "assistant", text: "", tools: [], phase, seqStart: seq };
+          cur = { id: nextId(), role: "assistant", text: "", tools: [], phase, seqStart: seq, ts };
           msgs.push(cur);
           currentStep = event.step;
           break;
         }
         case "text":
-          if (!cur) { cur = { id: nextId(), role: "assistant", text: "", tools: [], phase }; msgs.push(cur); }
+          // v2.14 批 3：工具调用之后的文本独立成消息（中间文本穿插工具之间）
+          if (!cur || cur.tools.length > 0) { cur = { id: nextId(), role: "assistant", text: "", tools: [], phase, ts }; msgs.push(cur); }
           cur.text += event.text;
           break;
         case "reasoning":
-          if (!cur) { cur = { id: nextId(), role: "assistant", text: "", tools: [], phase }; msgs.push(cur); }
+          if (!cur) { cur = { id: nextId(), role: "assistant", text: "", tools: [], phase, ts }; msgs.push(cur); }
           cur.reasoning = (cur.reasoning ?? "") + event.text;
           break;
         case "tool-start": {
-          if (!cur) { cur = { id: nextId(), role: "assistant", text: "", tools: [], phase }; msgs.push(cur); }
+          if (!cur) { cur = { id: nextId(), role: "assistant", text: "", tools: [], phase, ts }; msgs.push(cur); }
           cur.tools.push({
             id: `${cur.id}-t${cur.tools.length}-${event.tool}`,
             tool: event.tool,
@@ -473,6 +785,11 @@ export const useStore = create<StoreState>()(
           break;
         case "done":
           if (cur) { cur.streaming = false; cur.seqStart = cur.seqStart ?? seq; }
+          // v2.13：usage 重放恢复（per-session StatsLine）
+          {
+            const u = (event as unknown as { usage?: { cacheHit: number; cacheMiss: number; promptTokens: number; completionTokens: number } }).usage;
+            if (u) usage = u;
+          }
           break;
         case "model-fallback":
           // 降级记录附加到当前轮次（徽标展示）；无当前轮则忽略
@@ -487,7 +804,7 @@ export const useStore = create<StoreState>()(
           }
           break;
         case "error":
-          msgs.push({ id: nextId(), role: "assistant", text: `⚠️ ${event.message}`, tools: [] });
+          msgs.push({ id: nextId(), role: "assistant", text: `⚠️ ${event.message}`, tools: [], ts });
           cur = null;
           break;
         // 跳过：plan（历史计划已决策，不显示确认卡片）、approval-*、session（非流事件）
@@ -498,118 +815,267 @@ export const useStore = create<StoreState>()(
       m.streaming = false;
       for (const t of m.tools) if (t.status === "running") t.status = "error";
     }
-    set({
-      messages: msgs,
-      fileChanges,
-      diffContent,
-      currentStep,
-      stepStartTimes: {},
-      currentPhase: null,
-      phaseModels,
-      plan: null,
-      pendingRollback: null,
-      running: false,
-      approvals: [],
-      subagentThreads,
-      subagentViewer: null,
-    });
+    const sid = sessionId ?? undefined;
+    // v2.13：非视图会话重放只写缓存 + per-session 字段（todos/usage），
+    // 不污染视图全局（fileChanges/diffContent/rightTabs/approvals 等）；forceView
+    // 用于 Sidebar 切换路径（loadSession 时 activeSessionId 尚未切换）
+    const isView = forceView || !sid || sid === get().activeSessionId;
+    const out: Partial<StoreState> = {};
+    if (isView) {
+      out.fileChanges = fileChanges;
+      out.diffContent = diffContent;
+      out.currentStep = currentStep;
+      out.stepStartTimes = {};
+      out.currentPhase = null;
+      out.phaseModels = phaseModels;
+      out.plan = null;
+      out.pendingRollback = null;
+      out.approvals = [];
+      out.subagentThreads = subagentThreads;
+      out.rightTabs = [];
+      out.activeRightTab = null;
+      out.todos = todos;
+    }
+    // per-session 字段总是写（切换会话回填用）
+    out.todosBySession = { ...get().todosBySession, [sid ?? ""]: todos };
+    if (usage) out.usageBySession = { ...get().usageBySession, [sid ?? ""]: usage };
+    if (sid) {
+      out.sessionCache = { ...get().sessionCache, [sid]: msgs };
+      out.sessionPhase = { ...get().sessionPhase, [sid]: null };
+      out.sessionStep = { ...get().sessionStep, [sid]: currentStep };
+      // runningIds 不在此清理：调用方负责（done 已由 finishAssistant 移除；重放不改变运行集合，
+      // 避免误删「done 后立即消费队列」新任务的运行标记）
+      if (sid === get().activeSessionId) {
+        out.messages = msgs;
+        out.running = false;
+      }
+    } else {
+      out.messages = msgs;
+      out.running = false;
+    }
+    set(out);
+  },
+
+  /** v2.13：仅写会话缓存与 per-session 字段的重放（后台会话收尾重放用——
+   *  不写视图全局字段；被新 run 接管的跳过判断由调用方（api.ts finally）负责） */
+  loadSessionCache: (events, sessionId) => {
+    let msgs: ChatMsg[] = [];
+    let cur: ChatMsg | null = null;
+    let phase: PhaseId | undefined;
+    let currentStep = 1;
+    let todos: Array<{ text: string; status: "pending" | "in_progress" | "completed" }> = [];
+    let usage: { cacheHit: number; cacheMiss: number; promptTokens: number; completionTokens: number } | null = null;
+    for (const { seq, ts, event } of events) {
+      switch (event.type) {
+        case "user-message":
+          msgs.push({ id: nextId(), role: "user", text: event.text, tools: [], seqStart: seq, ts });
+          cur = null;
+          break;
+        case "phase-start":
+          phase = event.phase;
+          cur = null;
+          break;
+        case "step-start":
+          cur = { id: nextId(), role: "assistant", text: "", tools: [], phase, seqStart: seq, ts };
+          msgs.push(cur);
+          currentStep = event.step;
+          break;
+        case "text":
+          // v2.14 批 3：工具调用之后的文本独立成消息（中间文本穿插工具之间）
+          if (!cur || cur.tools.length > 0) { cur = { id: nextId(), role: "assistant", text: "", tools: [], phase, ts }; msgs.push(cur); }
+          cur.text += event.text;
+          break;
+        case "reasoning":
+          if (!cur) { cur = { id: nextId(), role: "assistant", text: "", tools: [], phase, ts }; msgs.push(cur); }
+          cur.reasoning = (cur.reasoning ?? "") + event.text;
+          break;
+        case "tool-start": {
+          if (!cur) { cur = { id: nextId(), role: "assistant", text: "", tools: [], phase, ts }; msgs.push(cur); }
+          cur.tools.push({
+            id: `${cur.id}-t${cur.tools.length}-${event.tool}`,
+            tool: event.tool,
+            args: event.args,
+            risk: event.risk,
+            status: "running",
+            step: currentStep,
+            phase,
+            startedAt: ts,
+            callId: event.callId,
+          });
+          break;
+        }
+        case "tool-result": {
+          if (cur) {
+            const t = cur.tools.find((x) => x.status === "running" && x.tool === event.tool);
+            if (t) { t.status = event.ok ? "ok" : "error"; t.summary = event.summary; t.output = event.summary; }
+          }
+          break;
+        }
+        case "todo-write":
+          todos = event.items;
+          break;
+        case "done":
+          if (cur) { cur.streaming = false; cur.seqStart = cur.seqStart ?? seq; }
+          {
+            const u = (event as unknown as { usage?: { cacheHit: number; cacheMiss: number; promptTokens: number; completionTokens: number } }).usage;
+            if (u) usage = u;
+          }
+          break;
+        case "error":
+          msgs.push({ id: nextId(), role: "assistant", text: `⚠️ ${event.message}`, tools: [], ts });
+          cur = null;
+          break;
+        default:
+          break;
+      }
+    }
+    for (const m of msgs) {
+      m.streaming = false;
+      for (const t of m.tools) if (t.status === "running") t.status = "error";
+    }
+    const out: Partial<StoreState> = {
+      sessionCache: { ...get().sessionCache, [sessionId]: msgs },
+      todosBySession: { ...get().todosBySession, [sessionId]: todos },
+    };
+    if (usage) out.usageBySession = { ...get().usageBySession, [sessionId]: usage };
+    if (sessionId === get().activeSessionId) {
+      out.messages = msgs;
+      out.todos = todos;
+      if (usage) out.usage = usage;
+    }
+    set(out);
   },
 
   addUserMsg: (text) =>
-    set((s) => ({
-      messages: [...s.messages, { id: nextId(), role: "user", text, tools: [] }],
-      running: true,
-      diffContent: "",
-      fileChanges: [],
-    })),
+    set((s) => {
+      // v3.1：目标 = eventTarget（SSE 连接会话，含后台队列消费）?? 当前视图会话
+      const sid = targetId(s);
+      return {
+        ...patchMsgs(s, (m) => [...m, { id: nextId(), role: "user", text, tools: [], ts: Date.now() }]),
+        ...patchRunning(s, sid, true),
+        diffContent: "",
+        fileChanges: [],
+      };
+    }),
 
   ensureAssistant: () => {
     const s = get();
-    const last = s.messages[s.messages.length - 1];
+    const sid = targetId(s);
+    const msgs = viewMsgs(s, sid);
+    const last = msgs[msgs.length - 1];
     if (last && last.role === "assistant") return last;
-    const msg: ChatMsg = { id: nextId(), role: "assistant", text: "", streaming: true, tools: [] };
-    set((st) => ({ messages: [...st.messages, msg] }));
+    const msg: ChatMsg = { id: nextId(), role: "assistant", text: "", streaming: true, tools: [], ts: Date.now() };
+    set((st) => patchMsgs(st, (m) => [...m, msg]));
     return msg;
   },
 
   appendText: (text) =>
     set((s) => {
+      const sid = targetId(s);
       // 审查阶段：文本不流式进消息（最终内容由 review 事件独立渲染，避免重复）
-      if (s.currentPhase === "reviewer") return s;
-      return {
-        messages: s.messages.map((m, i) =>
-          i === s.messages.length - 1 && m.role === "assistant"
-            ? { ...m, text: m.text + text }
-            : m
-        ),
-      };
+      const ph = sid && s.sessionPhase[sid] !== undefined ? s.sessionPhase[sid] : s.currentPhase;
+      return patchMsgs(s, (m) => {
+        if (ph === "reviewer") return m;
+        const last = m[m.length - 1];
+        // v2.14 批 3：已有工具调用之后的文本 → 开新消息（AI 中间文本独立成块，
+        // 对齐 主流：每段文本穿插在工具调用之间，不合并到最后一条）
+        if (last?.role === "assistant" && last.tools.length > 0) {
+          return [...m, { id: nextId(), role: "assistant", text, tools: [], ts: Date.now(), phase: last.phase }];
+        }
+        return m.map((x, i) =>
+          i === m.length - 1 && x.role === "assistant" ? { ...x, text: x.text + text } : x
+        );
+      });
     }),
 
   appendReasoning: (text) =>
-    set((s) => ({
-      messages: s.messages.map((m, i) =>
-        i === s.messages.length - 1 && m.role === "assistant"
-          ? { ...m, reasoning: (m.reasoning ?? "") + text }
-          : m
-      ),
-    })),
+    set((s) =>
+      patchMsgs(s, (m) =>
+        m.map((x, i) =>
+          i === m.length - 1 && x.role === "assistant"
+            ? { ...x, reasoning: (x.reasoning ?? "") + text }
+            : x
+        )
+      )
+    ),
 
   /** v2.2 模型降级记录：附加到当前 assistant 轮次（徽标展示与审计） */
   appendFallback: (from, to, reason) => {
     const msg = get().ensureAssistant();
-    set((s) => ({
-      messages: s.messages.map((m) =>
-        m.id === msg.id
-          ? { ...m, fallbacks: [...(m.fallbacks ?? []), { from, to, reason }] }
-          : m
-      ),
-    }));
+    set((s) =>
+      patchMsgs(s, (m) =>
+        m.map((x) =>
+          x.id === msg.id ? { ...x, fallbacks: [...(x.fallbacks ?? []), { from, to, reason }] } : x
+        )
+      )
+    );
   },
 
   /** v2.2 上下文压缩记录：附加到当前 assistant 轮次（提示条展示） */
   appendCompressed: (before, after, summary) => {
     const msg = get().ensureAssistant();
-    set((s) => ({
-      messages: s.messages.map((m) =>
-        m.id === msg.id
-          ? { ...m, compressed: [...(m.compressed ?? []), { before, after, summary }] }
-          : m
-      ),
-    }));
+    set((s) =>
+      patchMsgs(s, (m) =>
+        m.map((x) =>
+          x.id === msg.id ? { ...x, compressed: [...(x.compressed ?? []), { before, after, summary }] } : x
+        )
+      )
+    );
   },
 
   beginStep: (n) =>
     set((s) => {
-      const msgs = [...s.messages];
-      const last = msgs[msgs.length - 1];
-      // 当前最后一条 assistant 消息已有内容（文本/思考/工具）→ 开新消息（新轮次），
-      // 并把上一轮消息的 streaming 置 false（结束其闪烁光标）
-      const hasContent =
-        last?.role === "assistant" &&
-        (!!last.text || !!last.reasoning || last.tools.length > 0);
-      if (hasContent) {
-        msgs[msgs.length - 1] = { ...last, streaming: false };
-        msgs.push({ id: nextId(), role: "assistant", text: "", streaming: true, tools: [], phase: s.currentPhase ?? undefined });
-      }
-      return {
-        messages: msgs,
-        currentStep: n,
-        stepStartTimes: { ...s.stepStartTimes, [stepKey(s.currentPhase, n)]: Date.now() },
+      const sid = targetId(s);
+      const out = patchMsgs(s, (m) => {
+        const msgs = [...m];
+        const last = msgs[msgs.length - 1];
+        // 当前最后一条 assistant 消息已有内容（文本/思考/工具）→ 开新消息（新轮次），
+        // 并把上一轮消息的 streaming 置 false（结束其闪烁光标）
+        const hasContent =
+          last?.role === "assistant" &&
+          (!!last.text || !!last.reasoning || last.tools.length > 0);
+        if (hasContent) {
+          msgs[msgs.length - 1] = { ...last, streaming: false };
+          msgs.push({ id: nextId(), role: "assistant", text: "", streaming: true, tools: [], phase: (sid && s.sessionPhase[sid] !== undefined ? s.sessionPhase[sid] : s.currentPhase) ?? undefined, ts: Date.now() });
+        }
+        return msgs;
+      });
+      const sessionStep = sid ? { ...s.sessionStep, [sid]: n } : s.sessionStep;
+      const stepStartTimes = {
+        ...s.stepStartTimes,
+        [stepKey(sid && s.sessionPhase[sid] !== undefined ? s.sessionPhase[sid] : s.currentPhase, n)]: Date.now(),
       };
+      if (sid && sid !== s.activeSessionId) return { ...out, sessionStep };
+      return { ...out, currentStep: n, sessionStep, stepStartTimes };
     }),
 
   /** 编排阶段切换：结束上一条消息，开启带阶段标记的新消息 */
   setPhase: (ev) =>
     set((s) => {
-      const msgs = [...s.messages];
-      const last = msgs[msgs.length - 1];
-      const hasContent =
-        last?.role === "assistant" &&
-        (!!last.text || !!last.reasoning || last.tools.length > 0);
-      if (hasContent) msgs[msgs.length - 1] = { ...last, streaming: false };
-      msgs.push({ id: nextId(), role: "assistant", text: "", streaming: true, tools: [], phase: ev.phase });
+      const sid = targetId(s);
+      const out = patchMsgs(s, (m) => {
+        const msgs = [...m];
+        const last = msgs[msgs.length - 1];
+        // v2.14 批 17：最后一条 assistant 为空（ensureAssistant 预建）→ 复用打阶段标记，
+        // 不再新开——否则发送后出现「两个正在思考」（预建空消息 + phase-start 新消息都渲染）
+        const isEmpty =
+          last?.role === "assistant" && !last.text && !last.reasoning && last.tools.length === 0;
+        if (isEmpty) {
+          msgs[msgs.length - 1] = { ...last, phase: ev.phase };
+          return msgs;
+        }
+        const hasContent =
+          last?.role === "assistant" &&
+          (!!last.text || !!last.reasoning || last.tools.length > 0);
+        if (hasContent) msgs[msgs.length - 1] = { ...last, streaming: false };
+        msgs.push({ id: nextId(), role: "assistant", text: "", streaming: true, tools: [], phase: ev.phase, ts: Date.now() });
+        return msgs;
+      });
+      const sessionPhase = sid ? { ...s.sessionPhase, [sid]: ev.phase } : s.sessionPhase;
+      if (sid && sid !== s.activeSessionId) return { ...out, sessionPhase };
       return {
-        messages: msgs,
+        ...out,
+        sessionPhase,
         currentPhase: ev.phase,
         // v2.2 角色路由可视化：记录该阶段使用的模型（旧会话无 model 字段则忽略）
         phaseModels: ev.model ? { ...s.phaseModels, [ev.phase]: ev.model } : s.phaseModels,
@@ -617,73 +1083,115 @@ export const useStore = create<StoreState>()(
     }),
 
   setReview: (content) =>
-    set((s) => ({
-      messages: s.messages.map((m, i) =>
-        i === s.messages.length - 1 && m.role === "assistant"
-          ? { ...m, review: content }
-          : m
-      ),
-    })),
+    set((s) =>
+      patchMsgs(s, (m) =>
+        m.map((x, i) =>
+          i === m.length - 1 && x.role === "assistant" ? { ...x, review: content } : x
+        )
+      )
+    ),
 
   startTool: (ev) => {
     const msg = get().ensureAssistant();
+    const s = get();
+    const sid = targetId(s);
     const toolState: ToolEventState = {
       id: `${msg.id}-t${msg.tools.length}-${ev.tool}`,
       tool: ev.tool,
       args: ev.args,
       risk: ev.risk,
       status: "running",
-      step: get().currentStep,
-      phase: get().currentPhase ?? undefined,
+      step: sid && s.sessionStep[sid] !== undefined ? s.sessionStep[sid] : s.currentStep,
+      phase: (sid && s.sessionPhase[sid] !== undefined ? s.sessionPhase[sid] : s.currentPhase) ?? undefined,
       startedAt: Date.now(),
       callId: ev.callId,
     };
-    set((s) => ({
-      messages: s.messages.map((m) =>
-        m.id === msg.id ? { ...m, tools: [...m.tools, toolState] } : m
-      ),
-    }));
+    set((st) =>
+      patchMsgs(st, (m) => m.map((x) => (x.id === msg.id ? { ...x, tools: [...x.tools, toolState] } : x)))
+    );
   },
 
   finishTool: (ev) => {
     const s = get();
-    const msg = s.messages[s.messages.length - 1];
+    const sid = targetId(s);
+    const msgs = viewMsgs(s, sid);
+    const msg = msgs[msgs.length - 1];
     if (!msg || msg.role !== "assistant") return;
-    // 收集 diff 输出 → 右侧面板
-    if (ev.tool === "git_diff" || /^diff --git/m.test(ev.summary)) {
-      set({ diffContent: ev.summary });
+    // 收集 diff 输出 → 右侧面板（仅视图会话）
+    if (sid === s.activeSessionId || !sid) {
+      if (ev.tool === "git_diff" || /^diff --git/m.test(ev.summary)) {
+        set({ diffContent: ev.summary });
+      }
+      if (ev.tool === "write_file" || ev.tool === "edit_file") {
+        set((st) => ({ fileChanges: [...st.fileChanges, ev.summary] }));
+      }
     }
-    if (ev.tool === "write_file" || ev.tool === "edit_file") {
-      set((st) => ({ fileChanges: [...st.fileChanges, ev.summary] }));
-    }
-    set((st) => ({
-      messages: st.messages.map((m) =>
-        m.id === msg.id
-          ? {
-              ...m,
-              tools: m.tools.map((t) =>
-                t.tool === ev.tool && t.status === "running"
-                  ? { ...t, status: ev.ok ? "ok" : "error", summary: ev.summary, output: ev.summary }
-                  : t
-              ),
-            }
-          : m
-      ),
-    }));
+    set((st) =>
+      patchMsgs(st, (m) =>
+        m.map((x) =>
+          x.id === msg.id
+            ? {
+                ...x,
+                tools: x.tools.map((t) =>
+                  t.tool === ev.tool && t.status === "running"
+                    ? { ...t, status: ev.ok ? "ok" : "error", summary: ev.summary, output: ev.summary }
+                    : t
+                ),
+              }
+            : x
+        )
+      )
+    );
   },
 
-  setRunning: (r) => set({ running: r }),
-  abortController: null as AbortController | null,
-  setAbortController: (c) => set({ abortController: c }),
-  abortRun: () => {
-    get().abortController?.abort();
-    set({ abortController: null });
+  setRunning: (r) => set((s) => patchRunning(s, s.activeSessionId, r)),
+  // v2.13：abortController 按会话存（并行会话互相踩——stop 失效/停错对象修复）
+  setAbortController: (c) =>
+    set((s) => {
+      const sid = targetId(s) ?? s.activeSessionId ?? "";
+      if (!sid) return {};
+      const abortControllers = { ...s.abortControllers };
+      if (c) abortControllers[sid] = c;
+      else delete abortControllers[sid];
+      return { abortControllers };
+    }),
+  clearAbortController: (sid) =>
+    set((s) => {
+      if (!sid || !s.abortControllers[sid]) return {};
+      const abortControllers = { ...s.abortControllers };
+      delete abortControllers[sid];
+      return { abortControllers };
+    }),
+  abortRun: (sid) => {
+    const st = useStore.getState();
+    const target = sid ?? st.activeSessionId ?? "";
+    st.abortControllers[target]?.abort();
+    if (target && st.abortControllers[target]) {
+      const abortControllers = { ...st.abortControllers };
+      delete abortControllers[target];
+      useStore.setState({ abortControllers });
+    }
   },
 
   setUseWorktree: (v) => set({ useWorktree: v }),
-  setOrchestrate: (v) => set({ orchestrate: v }),
-  setPlan: (p) => set({ plan: p }),
+  setPlan: (p) =>
+    set((s) => {
+      const sid = targetId(s) ?? s.activeSessionId ?? "";
+      const plansBySession = { ...s.plansBySession, [sid]: p };
+      const out: Partial<StoreState> = { plansBySession };
+      if (!sid || sid === s.activeSessionId) out.plan = p;
+      return out;
+    }),
   clearPlan: () => set({ plan: null }),
+  clearPlanFor: (sid) =>
+    set((s) => {
+      if (!sid || !(sid in s.plansBySession)) return {};
+      const plansBySession = { ...s.plansBySession };
+      delete plansBySession[sid];
+      const out: Partial<StoreState> = { plansBySession };
+      if (sid === s.activeSessionId) out.plan = null;
+      return out;
+    }),
   setWorktree: (wt) => set({ worktree: wt, worktreeNote: "" }),
   addWorktreeNote: (note) => set({ worktreeNote: note }),
   clearWorktree: () => set({ worktree: null, worktreeNote: "" }),
@@ -698,19 +1206,59 @@ export const useStore = create<StoreState>()(
     if (!a) return;
     // 从队列移除当前审批（弹窗自动显示下一个）
     set((s) => ({ approvals: s.approvals.slice(1) }));
-    fetch(`/api/approvals/${a.id}`, {
+    apiFetch(`/api/approvals/${a.id}`, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ approved }),
     }).catch(() => {});
   },
 
+  /** v3.1 审批流优化：批量决策（并行工具调用堆积多个审批时一键全允/全拒） */
+  resolveAllApprovals: (approved) => {
+    const list = get().approvals;
+    if (!list.length) return;
+    set({ approvals: [] });
+    for (const a of list) {
+      apiFetch(`/api/approvals/${a.id}`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ approved }),
+      }).catch(() => {});
+    }
+  },
+
+  setAskQuestion: (q) => set({ askQuestion: q }),
+  resolveAskQuestion: (answer) => {
+    const q = get().askQuestion;
+    if (!q) return;
+    set({ askQuestion: null });
+    apiFetch(`/api/ask/${q.id}`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ answer }),
+    }).catch(() => {});
+  },
+
   /** v2.5：subagent-start → 主对话流委派条目挂 subagentId + 初始化线程（右侧栏详情数据源） */
+  /** v2.5：subagent-start → 主对话流委派条目挂 subagentId + 初始化线程（右侧栏详情数据源）。
+   *  v2.9：自动打开右侧栏子 Agent tab（label = Agent 名）+ 激活（实时跟随） */
   startSubagent: (ev) =>
-    set((s) => ({
-      messages: attachSubagentId(s.messages, ev),
-      subagentThreads: { ...s.subagentThreads, [ev.id]: newSubagentThread(ev) },
-    })),
+    set((s) => {
+      const out = patchMsgs(s, (m) => attachSubagentId(m, ev));
+      const tab: RightTab = { id: `subagent:${ev.id}`, kind: "subagent", label: ev.name, subagentId: ev.id };
+      const exists = s.rightTabs.some((t) => t.id === tab.id);
+      const subagentThreads = { ...s.subagentThreads, [ev.id]: newSubagentThread(ev) };
+      // v2.13：后台会话的子 Agent 不污染视图右侧栏（不加 tab 不抢 activeRightTab；
+      // 线程数据仍记录——用户切到该会话后手动打开 tab 可见）
+      const isViewConn = !s.eventTarget || s.eventTarget === s.activeSessionId;
+      if (!isViewConn) return { ...out, subagentThreads };
+      return {
+        ...out,
+        subagentThreads,
+        rightTabs: exists ? s.rightTabs : [...s.rightTabs, tab],
+        activeRightTab: tab.id, // 实时跟随：新子 Agent 启动即切换显示
+      };
+    }),
 
   /** v2.5：带 subagentId 的子智能体内部事件 → 收集进线程消息流（不进入主消息流） */
   updateSubagent: (ev) => {
@@ -740,51 +1288,153 @@ export const useStore = create<StoreState>()(
     }),
 
   /** v2.5：打开/关闭右侧栏子智能体详情弹窗 */
-  openSubagentViewer: (id) => set({ subagentViewer: id }),
-  closeSubagentViewer: () => set({ subagentViewer: null }),
+  /** v2.9：打开右侧栏 tab（已存在则激活；subagent-start 自动调用） */
+  openRightTab: (tab) =>
+    set((s) => {
+      const id = tab.id ?? `${tab.kind}:${tab.subagentId ?? Date.now()}`;
+      const exists = s.rightTabs.some((t) => t.id === id);
+      if (exists) return { activeRightTab: id };
+      return { rightTabs: [...s.rightTabs, { id, kind: tab.kind, label: tab.label, subagentId: tab.subagentId }], activeRightTab: id };
+    }),
+  closeRightTab: (id) =>
+    set((s) => {
+      const idx = s.rightTabs.findIndex((t) => t.id === id);
+      if (idx < 0) return {};
+      const rightTabs = s.rightTabs.filter((t) => t.id !== id);
+      let activeRightTab = s.activeRightTab;
+      if (activeRightTab === id) {
+        // 激活相邻 tab（优先右侧；无则左侧；无则 null）
+        activeRightTab = rightTabs[Math.min(idx, rightTabs.length - 1)]?.id ?? null;
+      }
+      return { rightTabs, activeRightTab };
+    }),
+  setActiveRightTab: (id) => set({ activeRightTab: id }),
 
   setReport: (content) =>
-    set((s) => ({
-      messages: s.messages.map((m, i) =>
-        i === s.messages.length - 1 && m.role === "assistant"
-          ? { ...m, report: content }
-          : m
-      ),
-    })),
+    set((s) =>
+      patchMsgs(s, (m) =>
+        m.map((x, i) =>
+          i === m.length - 1 && x.role === "assistant" ? { ...x, report: content } : x
+        )
+      )
+    ),
+
+  usage: { cacheHit: 0, cacheMiss: 0, promptTokens: 0, completionTokens: 0 },
+  setUsage: (u) => set({ usage: u }),
+  setUsageFor: (sid, u) =>
+    set((s) => {
+      const usageBySession = { ...s.usageBySession, [sid]: u };
+      const out: Partial<StoreState> = { usageBySession };
+      if (sid === s.activeSessionId) out.usage = u;
+      return out;
+    }),
 
   finishAssistant: () =>
-    set((s) => ({
-      messages: s.messages.map((m, i) =>
-        i === s.messages.length - 1 && m.role === "assistant"
-          ? { ...m, streaming: false }
-          : m
-      ),
-      running: false,
-    })),
+    set((s) => {
+      const sid = targetId(s);
+      return {
+        ...patchMsgs(s, (m) =>
+          m.map((x, i) =>
+            i === m.length - 1 && x.role === "assistant"
+              ? { ...x, streaming: false, endedAt: x.endedAt ?? Date.now() }
+              : x
+          )
+        ),
+        ...patchRunning(s, sid, false),
+      };
+    }),
+
+  // v2.13：按显式会话收尾（sendChat finally/catch 用本连接 connSid——
+  // 修复多会话并行时 finally 读全局 eventTarget 跨会话清 running/写错会话）
+  finishAssistantFor: (sid) =>
+    set((s) => {
+      if (!sid) return {};
+      const base = s.sessionCache[sid] ?? (sid === s.activeSessionId ? s.messages : []);
+      const msgs = base.map((x, i) =>
+        i === base.length - 1 && x.role === "assistant"
+          ? { ...x, streaming: false, endedAt: x.endedAt ?? Date.now() }
+          : x
+      );
+      const sessionCache = { ...s.sessionCache, [sid]: msgs };
+      const out: Partial<StoreState> = { ...patchRunning(s, sid, false), sessionCache };
+      if (sid === s.activeSessionId) out.messages = msgs;
+      // v3.2：收尾清重试信息
+      if (s.retryBySession[sid]) {
+        const retryBySession = { ...s.retryBySession };
+        delete retryBySession[sid];
+        out.retryBySession = retryBySession;
+      }
+      return out;
+    }),
 
   addError: (msg) => {
     get().finishAssistant();
-    set((s) => ({
-      messages: [
-        ...s.messages,
-        { id: nextId(), role: "assistant", text: `⚠️ ${msg}`, tools: [] },
-      ],
-    }));
+    set((s) =>
+      patchMsgs(s, (m) => [
+        ...m,
+        { id: nextId(), role: "assistant", text: `⚠️ ${msg}`, tools: [], ts: Date.now() },
+      ])
+    );
   },
+
+  // v2.13：按显式会话追加错误（sendChat catch 用本连接 connSid——错误行不写错会话）
+  addErrorFor: (sid, msg) => {
+    if (!sid) return;
+    get().finishAssistantFor(sid);
+    set((s) => {
+      const base = s.sessionCache[sid] ?? (sid === s.activeSessionId ? s.messages : []);
+      const msgs = [
+        ...base,
+        { id: nextId(), role: "assistant" as const, text: `⚠️ ${msg}`, tools: [], ts: Date.now() },
+      ];
+      const sessionCache = { ...s.sessionCache, [sid]: msgs };
+      const out: Partial<StoreState> = { sessionCache };
+      if (sid === s.activeSessionId) out.messages = msgs;
+      return out;
+    });
+  },
+
+  agentWaiting: (ev) =>
+    set((s) => {
+      const t = s.subagentThreads[ev.id];
+      if (!t) return {};
+      const msg: SubagentMsg = { id: nextId(), text: `⏸ 子智能体等待父级消息：${ev.message}`, tools: [], step: t.messages.length + 1 };
+      return { subagentThreads: { ...s.subagentThreads, [ev.id]: { ...t, messages: [...t.messages, msg] } } };
+    }),
+
+  agentResumed: (ev) =>
+    set((s) => {
+      const t = s.subagentThreads[ev.id];
+      if (!t) return {};
+      const msg: SubagentMsg = { id: nextId(), text: "▶ 父级已回复，任务继续", tools: [], step: t.messages.length + 1 };
+      return { subagentThreads: { ...s.subagentThreads, [ev.id]: { ...t, messages: [...t.messages, msg] } } };
+    }),
+
+  codeViewFile: null,
+  setCodeViewFile: (path) => set({ codeViewFile: path }),
 
   reset: () =>
     set({
       messages: [],
+      runningIds: [],
       running: false,
       approvals: [],
+      askQuestion: null,
       diffContent: "",
       fileChanges: [],
       currentStep: 1,
       stepStartTimes: {},
       currentPhase: null,
       plan: null,
+      plansBySession: {},
       subagentThreads: {},
-      subagentViewer: null,
+      rightTabs: [],
+      activeRightTab: null,
+      todos: [],
+      todosBySession: {},
+      usage: { cacheHit: 0, cacheMiss: 0, promptTokens: 0, completionTokens: 0 },
+      usageBySession: {},
+      abortControllers: {},
     }),
   }),
   {
@@ -796,12 +1446,28 @@ export const useStore = create<StoreState>()(
       activeSessionId: s.activeSessionId,
       fontSize: s.fontSize,
       streamCursor: s.streamCursor,
+      theme: s.theme,
+      // v2.9：工作树状态持久化（刷新不丢——未操作前按钮不消失）
+      worktree: s.worktree,
+      worktreeNote: s.worktreeNote,
+      // 折叠是临时 UI 状态，不持久化（刷新后恢复展开，避免"侧栏消失了"的误判）
+      sidebarWidth: s.sidebarWidth,
+      detailsOpen: s.detailsOpen,
+      detailsWidth: s.detailsWidth,
     }),
     merge: (persisted, current) => {
       const p = (persisted ?? {}) as Partial<StoreState>;
       // 丢弃持久化的旧 messages（v1 数据由 maybeMigrateV1 单独导入为会话）
       const { messages: _oldMsgs, ...rest } = p;
-      return { ...current, ...rest };
+      // 折叠状态永不从持久化恢复（旧版本可能存了 true；刷新后一律展开）
+      const { sidebarCollapsed: _oldCollapsed, ...rest2 } = rest;
+      // v2.6：白名单合并——只保留当前 state 存在的键（防旧版本遗留字段
+      // 如 orchestrate/mode 混入导致潜在运行时异常；旧脏数据刷新即清理）
+      const clean: Record<string, unknown> = {};
+      for (const k of Object.keys(current) as Array<keyof StoreState>) {
+        if (k in rest2) clean[k as string] = (rest2 as Record<string, unknown>)[k as string];
+      }
+      return { ...current, ...clean };
     },
   }
 ));

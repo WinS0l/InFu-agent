@@ -31,3 +31,9 @@ coverage/
 
 # Rust æ„å»ºäº§ç‰©ï¼ˆsandbox-rsï¼‰
 target/
+
+# Electron ´ò°ü²úÎï£¨release*/ ²»Èë¿â£©
+packages/desktop/release*/
+
+# tsc ÔöÁ¿»º´æ
+*.tsbuildinfo

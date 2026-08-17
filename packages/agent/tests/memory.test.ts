@@ -184,7 +184,7 @@ console.log("\n── 记忆读写 ──");
 console.log("\n── 工具接线 ──");
 {
   check("TOOLS 含 memory_read（low）", TOOLS.memory_read?.risk === "low");
-  check("TOOLS 含 memory_write（medium）", TOOLS.memory_write?.risk === "medium");
+  check("TOOLS 含 memory_write（low，v2.10 批 5 对齐主流自动）", TOOLS.memory_write?.risk === "low");
   const ro = getReadOnlyTools();
   check("Planner/Reviewer 白名单含 memory_read", !!ro.memory_read);
   check("Planner/Reviewer 白名单不含 memory_write", !ro.memory_write);
@@ -209,12 +209,12 @@ console.log("\n── 工具接线 ──");
     const rG = await TOOLS.memory_read.execute({ scope: "global", topic: "preferences" }, mkCtx());
     check("memory_read global", rG.includes("测试模型用 agnes"));
 
-    // memory_write 工具：审批通过 → 写入；审批拒绝 → 不写入
+    // memory_write 工具（v2.10 批 5 降 low 自动放行）：写入成功；拒绝 mock 下也自动写入（low 不弹审批）
     const rW = await TOOLS.memory_write.execute({ topic: "lessons", content: "不要用 write_file 覆盖锁定文件" }, mkCtx());
     check("memory_write 写入成功", rW.includes("已写入项目记忆 lessons.md"));
     check("lessons 内容落盘", readMemory("project", "lessons", toolProj).text.includes("不要用 write_file"));
-    const rDeny = await TOOLS.memory_write.execute({ topic: "lessons", content: "x" }, mkCtx({ requestApproval: async () => false }));
-    check("memory_write 审批拒绝 → 不写入", rDeny.includes("用户拒绝"));
+    const rAuto = await TOOLS.memory_write.execute({ topic: "lessons", content: "自动放行" }, mkCtx({ requestApproval: async () => false }));
+    check("memory_write low 自动放行（拒绝 mock 不拦截）", rAuto.includes("已写入"), rAuto);
     const rBad = await TOOLS.memory_write.execute({ topic: "../x", content: "y" }, mkCtx());
     check("memory_write 非法 topic 拒绝（工具层）", rBad.includes("错误"));
 
@@ -259,25 +259,25 @@ console.log("\n── 自动沉淀 ──");
   check("条目含模型元数据", content.includes("agnes/agnes-2.5-flash"));
   check("条目含步数/工具/审批统计", content.includes("8 步") && content.includes("3/3 通过"));
   check("改动概览只含写类/验证工具", content.includes("write_file: 已写入 src/login.ts") && content.includes("run_test: 测试通过") && !content.includes("read_file"));
-  check("条目含交付报告原文", content.includes("## 交付报告"));
+
   check("条目含审查意见", content.includes("结论：通过"));
   check("条目含执行摘要", content.includes("任务完成：修复了登录 bug"));
 
   // 多任务追加同一天文件
-  const s2 = sedimentTask({ root: sedProj, prompt: "第二个任务", result: { ...result, text: "任务二完成" }, report: "报告二", modelLabel: "agnes/agnes-2.5-flash" });
+  const s2 = sedimentTask({ root: sedProj, prompt: "第二个任务", result: { ...result, text: "任务二完成" }, modelLabel: "agnes/agnes-2.5-flash" });
   check("同文件追加", s1.path === s2.path);
   const content2 = readFileSync(s1.path, "utf-8");
   check("追加两条条目", content2.includes("第二个任务") && content2.includes("任务二完成"));
 
   // 空日志兜底
-  const s3 = sedimentTask({ root: sedProj, prompt: "空任务", result: { ...result, toolLogs: [] }, report: "无操作" });
+  const s3 = sedimentTask({ root: sedProj, prompt: "空任务", result: { ...result, toolLogs: [] } });
   check("空 toolLogs 兜底文案", readFileSync(s3.path, "utf-8").includes("无写类/验证类工具记录"));
 
   // 超多工具日志防爆（只取前 40 行；用全新目录避免历史条目干扰统计）
   const sedProj2 = join(proj, "sed-proj2");
   mkdirSync(sedProj2, { recursive: true });
   const many = Array.from({ length: 60 }, (_, i) => ({ tool: "write_file" as const, args: {}, ok: true, summary: `已写入 file${i}.ts` }));
-  const s4 = sedimentTask({ root: sedProj2, prompt: "大任务", result: { ...result, toolLogs: many }, report: "r" });
+  const s4 = sedimentTask({ root: sedProj2, prompt: "大任务", result: { ...result, toolLogs: many } });
   const c4 = readFileSync(s4.path, "utf-8");
   const count = (c4.match(/- \[✓\] write_file/g) || []).length;
   check("改动概览防爆（≤40 行）", count <= 40 && count === 40);

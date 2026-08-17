@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "dev:desktop": "vite --port 5199 --strictPort",
     "build": "tsc -p tsconfig.json && vite build",
     "preview": "vite preview"
   },
@@ -12,6 +13,7 @@
     "@infu/shared": "*",
     "@xterm/addon-fit": "^0.11.0",
     "@xterm/xterm": "^6.0.0",
+    "highlight.js": "^11.12.0",
     "lucide-react": "^1.31.0",
     "react": "^19.2.0",
     "react-dom": "^19.2.0",

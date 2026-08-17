@@ -69,6 +69,7 @@ sandbox: restricted                # 可选：off / soft / restricted（缺省�
 | `root` | 子工作目录（相对项目根；越界拒绝） |
 | `maxSteps` | 子循环步数上限（1-50，缺省 12） |
 | `modelId` | 子模型 id（缺省继承父级模型 + 父降级链） |
+| `background` | **后台模式（v2.11）**：true 时立即返回子智能体 id（不阻塞父级循环），子 Agent 在注册表异步运行 |
 
 **审批（v2.5 返工，对齐 ZCode）**：
 - **只读委派免审批**（explore / 白名单全只读）——读文件搜索不打断
@@ -76,11 +77,22 @@ sandbox: restricted                # 可选：off / soft / restricted（缺省�
 - 内部工具调用继承委派授权（不再逐个弹）；**requireExplicit（联网放行等安全红线）任何情况逐条询问**
 - agent 文件 `permission: ask` 可要求内部工具仍逐条走父级审批
 
+## 五·五、后台模式与控制工具（v2.11，对齐 Claude Code SendMessage 恢复 + Agent View）
+
+- **`delegate_task background=true`**：立即返回 `sub-xxx` id，父级继续自己的任务；子 Agent 独立 AbortController（父级中止传播 + interrupt_agent 单独中止）；per-session 活跃上限 6 对后台同样生效
+- 控制工具（全部 low，Agent 管理自有子任务）：
+  - `list_agents` — 列出当前会话后台子智能体：id/名称/状态（运行中/等待消息/完成/异常）/模型/步数/委派任务
+  - `report(agent_id)` — 回收结果：运行中返回进度；**等待消息时提示恢复方式**；已完成返回最终摘要
+  - `send_message(agent_id, message)` — 恢复等待中的子智能体（其任务继续）
+  - `interrupt_agent(agent_id | all=true)` — 中止一个或全部
+- **子智能体内部 `agent_message`**（Claude Code SendMessage 语义）：子 Agent 需要父级决策时调用 → 暂停等待（`agent-waiting` 事件）→ 父级 `send_message` 恢复（`agent-resumed` 事件）→ 继续。**仅后台模式可用**（同步委派调用返回错误——防父级同步等待死锁）
+- **生命周期**：父任务结束 → 按委派深度自动中止本深度启动的后台子智能体（子任务随父结束；server/cli 任务 finally 挂点）；已完成/异常的不再中止（report 仍可回收）
+
 ## 六、并发（真并发 = 不同任务并行）
 
 - **同轮多个 delegate_task 并行执行**（loop 工具执行段 Promise.all，对齐 ZCode「同一消息多个工具调用并发运行」）；父级可一次派发多个子任务同时跑
 - `tasks[]` 数组 = 显式并行批量（上限 6）；`ctx.callId` 按调用隔离（并行不串扰）
-- 停止 = 共享 abortSignal 全停；并行写文件冲突由 worktree 隔离兜底（建议并行用于读/分析或不同 root）
+- 停止 = 共享 abortSignal 全停（后台子 Agent 独立 controller 跟随父级）；并行写文件冲突由 worktree 隔离兜底（建议并行用于读/分析或不同 root）
 
 ## 七、展示（v2.5 返工，对齐 opencode / Claude Code）
 

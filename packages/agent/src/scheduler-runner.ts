@@ -1,0 +1,56 @@
+/**
+ * 定时任务执行器（v3.0 批 11）——无人值守模式
+ * 复用 CLI 的任务装配逻辑（模型解析/会话落库/记忆注入），审批 = 全自动
+ * （-y 语义：requireExplicit 安全红线一律拒绝）。
+ * 独立模块避免循环依赖（server.ts ↔ schedule.ts）。
+ */
+import { loadConfig, resolveModel, toRuntimeModel } from "./providers/registry.js";
+import { makeApprovalHandler } from "./agent/loop.js";
+import { runOrchestratedTask } from "./agent/orchestrator.js";
+import { getStore } from "./db/store.js";
+import { closeShellSession } from "./tools/persistent-shell.js";
+import type { ScheduleEntry } from "./schedule.js";
+
+/** 无人值守审批：等价 CLI -y（low/medium 批准；requireExplicit 拒绝） */
+async function unattendedDecide(
+  _description: string,
+  _risk: "low" | "medium" | "high",
+  requireExplicit?: boolean
+): Promise<boolean> {
+  if (requireExplicit) return false; // 安全红线（联网/自注册等）无人值守绝不放行
+  return true;
+}
+
+/** 执行定时任务（startScheduler 注入的回调） */
+export async function runScheduledTask(entry: ScheduleEntry): Promise<{ ok: boolean; message: string }> {
+  const config = loadConfig();
+  if (!config) return { ok: false, message: "未配置模型（请先 npm run config）" };
+  const modelCfg = resolveModel(config);
+
+  const store = getStore();
+  const sessionId = store.createSession({ title: `⏰ ${entry.prompt.slice(0, 30)}`, root: entry.root });
+  const emit = (event: import("@infu/shared").AgentEvent) => { store.appendEvent(sessionId, event); };
+
+  try {
+    const result = await runOrchestratedTask({
+      modelConfig: toRuntimeModel(config, modelCfg),
+      prompt: entry.prompt,
+      root: entry.root,
+      emit,
+      sessionId,
+      requestApproval: makeApprovalHandler(emit, unattendedDecide),
+      orchestrate: false, // 定时任务直接执行（主流式）
+      planApproval: false,
+    });
+    store.updateStatus(sessionId, "done");
+    console.log(`[infu-agent] ⏰ 定时任务 ${entry.id} 完成（${result.text.slice(0, 60)}…）`);
+    return { ok: true, message: result.text.slice(0, 200) };
+  } catch (e) {
+    store.updateStatus(sessionId, "error");
+    console.log(`[infu-agent] ⏰ 定时任务 ${entry.id} 失败: ${(e as Error).message}`);
+    return { ok: false, message: (e as Error).message };
+  } finally {
+    // v3.0 审计修复（S3）：任务结束关闭持久 shell 会话
+    try { closeShellSession(sessionId); } catch { /* 忽略 */ }
+  }
+}

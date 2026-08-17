@@ -175,7 +175,7 @@ console.log("\n▶ loadMcpTools（注入连接）");
   check("重名工具加服务器前缀", r.tools.some((t) => t.name === "b_shared_tool"), r.tools.map((t) => t.name).join(","));
   check("失败服务器跳过并记录", r.failures.length === 1 && r.failures[0].id === "broken");
   check("失败 emit 提示事件（不阻塞）", events.some((e) => e.type === "text" && e.text.includes("BROKEN")), JSON.stringify(events));
-  check("成功 emit 注入提示", events.some((e) => e.type === "text" && e.text.includes("已连接")));
+  // v3：成功连接不再 emit text（避免对话流环境噪音；工具列表即环境感知）
   // close 调用
   let closed = 0;
   const r2 = await loadMcpTools(

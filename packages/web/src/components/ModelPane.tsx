@@ -1,9 +1,10 @@
 import { useEffect, useState } from "react";
 import {
-  Plus, Pencil, Trash2, Star, Loader2, Server, Cpu, RefreshCw, Check, Workflow,
+  Plus, Pencil, Trash2, Star, Loader2, Server, Cpu, RefreshCw, Check,
 } from "lucide-react";
 import { useStore } from "../store";
-import { fetchModels, fetchProviders, addProvider, updateProvider, deleteProvider, fetchProviderModels, fetchRoles, saveRoles, type ProviderInfo, type RoleConfig } from "../api";
+import { fetchModels, fetchProviders, addProvider, updateProvider, deleteProvider, fetchProviderModels, apiFetch, type ProviderInfo } from "../api";
+import { Modal, CapsuleButton } from "./ui";
 
 interface ModelInfo {
   id: string;
@@ -53,7 +54,7 @@ interface ModelForm {
 }
 
 async function api<T>(url: string, method: string, body?: unknown): Promise<T> {
-  const res = await fetch(url, {
+  const res = await apiFetch(url, {
     method,
     headers: { "content-type": "application/json" },
     body: body ? JSON.stringify(body) : undefined,
@@ -81,28 +82,14 @@ export default function ModelPane() {
   const [error, setError] = useState("");
   // 上游模型列表 + 勾选（每个供应商的获取结果）
   const [upstream, setUpstream] = useState<{ providerId: string; list: Array<{ id: string; name: string }>; picked: Set<string> } | null>(null);
-  // v2.3 角色路由面板：每角色 { model（空=跟随默认）, thinking（空=跟随全局） }
-  const [roles, setRoles] = useState<Record<string, { model: string; thinking: number | null }>>({
-    planner: { model: "", thinking: null },
-    executor: { model: "", thinking: null },
-    reviewer: { model: "", thinking: null },
-  });
-  const [rolesBusy, setRolesBusy] = useState(false);
+
+  // v3：删除二次确认（统一 Modal，替代原生 confirm()）
+  const [confirmDel, setConfirmDel] = useState<{ kind: "provider" | "model"; id: string } | null>(null);
 
   const load = async () => {
     const [p, m] = await Promise.all([fetchProviders(), fetchModels()]);
     setProviders(p);
     setModels(m.models ?? []);
-    // 角色配置（面板初始化）
-    fetchRoles()
-      .then((rs: RoleConfig[]) => {
-        const next: typeof roles = { planner: { model: "", thinking: null }, executor: { model: "", thinking: null }, reviewer: { model: "", thinking: null } };
-        for (const r of rs) {
-          if (next[r.role]) next[r.role] = { model: r.modelId ?? "", thinking: r.thinkingLevel ?? null };
-        }
-        setRoles(next);
-      })
-      .catch(() => {});
   };
 
   useEffect(() => {
@@ -151,13 +138,7 @@ export default function ModelPane() {
   };
 
   const removeProvider = async (id: string) => {
-    if (!confirm(`删除供应商 "${id}"？其下所有模型将一并删除。`)) return;
-    try {
-      await deleteProvider(id);
-      await load();
-    } catch (e) {
-      setError((e as Error).message);
-    }
+    setConfirmDel({ kind: "provider", id });
   };
 
   /** 获取上游模型列表（勾选启用） */
@@ -186,13 +167,12 @@ export default function ModelPane() {
       for (const m of upstream.list.filter((x) => upstream.picked.has(x.id))) {
         const exists = models.some((x) => x.providerId === upstream.providerId && x.model === m.id);
         if (exists) continue;
-        const preset = tpl?.kind === "custom" ? undefined : undefined; // 预设窗口按 kind 模板兜底
         await api("/api/models", "POST", {
           id: `${upstream.providerId}-${m.id.replace(/[^a-zA-Z0-9._-]/g, "-")}`,
           name: m.name || m.id,
           providerId: upstream.providerId,
           model: m.id,
-          contextWindow: preset ?? tpl?.contextWindow,
+          contextWindow: tpl?.contextWindow,
           thinkingLevels: tpl?.thinkingLevels ?? 1,
         });
       }
@@ -253,9 +233,17 @@ export default function ModelPane() {
   };
 
   const removeModel = async (id: string) => {
-    if (!confirm(`删除模型 "${id}"？`)) return;
+    setConfirmDel({ kind: "model", id });
+  };
+
+  /** 删除二次确认（统一 Modal 关闭 → 执行删除） */
+  const confirmDelete = async () => {
+    if (!confirmDel) return;
+    const { kind, id } = confirmDel;
+    setConfirmDel(null);
     try {
-      await api(`/api/models/${encodeURIComponent(id)}`, "DELETE");
+      if (kind === "provider") await deleteProvider(id);
+      else await api(`/api/models/${encodeURIComponent(id)}`, "DELETE");
       await load();
     } catch (e) {
       setError((e as Error).message);
@@ -265,38 +253,12 @@ export default function ModelPane() {
   const setDefault = async (id: string) => {
     try {
       await api(`/api/models/${encodeURIComponent(id)}/default`, "POST");
+      // v3.0 UI 审查：设为默认后当前会话模型立即切换（此前只写配置不更新选择器）
+      useStore.getState().setModelId(id);
       await load();
     } catch (e) {
       setError((e as Error).message);
     }
-  };
-
-  /** 保存角色路由配置（每角色 模型 + 独立思考级别；空 = 清除该角色） */
-  const saveRoleConfig = async () => {
-    setRolesBusy(true);
-    setError("");
-    try {
-      const body: Record<string, { model?: string; thinkingLevel?: number } | undefined> = {};
-      for (const [role, v] of Object.entries(roles)) {
-        if (!v.model && v.thinking == null) continue; // 全空 = 清除
-        body[role] = {
-          ...(v.model ? { model: v.model } : {}),
-          ...(v.thinking != null ? { thinkingLevel: v.thinking } : {}),
-        };
-      }
-      await saveRoles(body);
-      await load();
-    } catch (e) {
-      setError((e as Error).message);
-    } finally {
-      setRolesBusy(false);
-    }
-  };
-
-  const ROLE_LABELS: Record<string, { label: string; desc: string }> = {
-    planner: { label: "规划", desc: "只读分析 + 制定计划" },
-    executor: { label: "执行", desc: "全工具实施改动" },
-    reviewer: { label: "审查", desc: "只读核查质量" },
   };
 
   return (
@@ -306,14 +268,14 @@ export default function ModelPane() {
         {([["providers", "供应商", Server], ["models", "模型", Cpu]] as const).map(([key, label, Icon]) => (
           <button
             key={key}
-            className={`flex cursor-pointer items-center gap-1.5 rounded-t-md px-3 py-1.5 text-xs transition-colors ${
-              tab === key ? "border-b-2 border-accent bg-accent/10 text-accent" : "text-sub hover:text-text"
+            className={`flex cursor-pointer items-center gap-1.5 rounded-t-lg px-3 py-1.5 text-[13px] transition-colors ${
+              tab === key ? "border-b-2 border-primary font-medium text-text" : "text-sub hover:text-text"
             }`}
             onClick={() => setTab(key)}
           >
             <Icon className="h-3.5 w-3.5" />
             {label}
-            {key === "models" && models.length > 0 && <span className="rounded bg-muted px-1 text-[9px]">{models.length}</span>}
+            {key === "models" && models.length > 0 && <span className="rounded-md bg-hover px-1 text-[11px]">{models.length}</span>}
           </button>
         ))}
       </div>
@@ -455,16 +417,23 @@ export default function ModelPane() {
                         placeholder="https://api.example.com/v1"
                       />
                     </label>
-                    <label className="col-span-2 text-[10px] text-sub">
-                      API Key（留空用环境变量 INFU_{"<类型>"}_API_KEY）
-                      <input
-                        type="password"
-                        className="mt-0.5 w-full rounded border border-line bg-muted px-2 py-1 font-mono text-xs text-text"
-                        value={pForm.apiKey}
-                        onChange={(e) => setPForm({ ...pForm, apiKey: e.target.value })}
-                        placeholder="sk-..."
-                      />
-                    </label>
+                    {pForm.kind === "ollama" ? (
+                      // v3.0 批 12：本地模型（Ollama）无需 API Key——隐藏输入框并提示
+                      <div className="col-span-2 rounded border border-line bg-muted/50 px-2 py-1.5 text-[10px] text-sub">
+                        本地模型（Ollama）无需 API Key——调用 localhost 服务，直接「获取模型」即可
+                      </div>
+                    ) : (
+                      <label className="col-span-2 text-[10px] text-sub">
+                        API Key（留空用环境变量 INFU_{"<类型>"}_API_KEY）
+                        <input
+                          type="password"
+                          className="mt-0.5 w-full rounded border border-line bg-muted px-2 py-1 font-mono text-xs text-text"
+                          value={pForm.apiKey}
+                          onChange={(e) => setPForm({ ...pForm, apiKey: e.target.value })}
+                          placeholder="sk-..."
+                        />
+                      </label>
+                    )}
                   </div>
                   <div className="mt-3 flex justify-end gap-2">
                     <button className="cursor-pointer rounded border border-line px-3 py-1 text-xs text-sub hover:text-text" onClick={() => setPForm(null)}>取消</button>
@@ -490,71 +459,6 @@ export default function ModelPane() {
             </>
           ) : (
             <>
-              {/* v2.3 角色路由面板：每角色 模型 + 独立思考级别（组合配置） */}
-              <div className="mb-4 rounded-md border border-line bg-muted/30 p-3">
-                <div className="mb-2 flex items-center gap-1.5 text-xs font-semibold text-text">
-                  <Workflow className="h-3.5 w-3.5 text-accent" />
-                  角色路由
-                  <span className="text-[10px] font-normal text-sub">规划 / 执行 / 审查 可分别用不同模型与思考级别（未设置跟随当前选择的模型 / 全局思考级别）</span>
-                </div>
-                <div className="space-y-2">
-                  {(["planner", "executor", "reviewer"] as const).map((role) => {
-                    const v = roles[role];
-                    return (
-                      <div key={role} className="flex items-center gap-2">
-                        <div className="w-16 shrink-0">
-                          <div className="text-[11px] font-medium text-text">{ROLE_LABELS[role].label}</div>
-                          <div className="text-[9px] text-sub/60">{ROLE_LABELS[role].desc}</div>
-                        </div>
-                        <select
-                          className="min-w-0 flex-1 cursor-pointer rounded-md border border-line bg-muted px-1.5 py-1 text-[10px] text-text transition-colors hover:border-accent/50"
-                          value={v.model}
-                          onChange={(e) => setRoles({ ...roles, [role]: { ...v, model: e.target.value } })}
-                          title={`${ROLE_LABELS[role].label}阶段使用的模型`}
-                        >
-                          {/* 跟随当前任务选择的模型（非 config 静态默认） */}
-                          <option value="">
-                            跟随当前选择{currentModelId ? `（${models.find((m) => m.id === currentModelId)?.name ?? currentModelId}）` : ""}
-                          </option>
-                          {models.map((m) => (
-                            <option key={m.id} value={m.id}>
-                              {m.name}（{m.model}）
-                            </option>
-                          ))}
-                        </select>
-                        {/* 角色独立思考级别（空 = 跟随全局） */}
-                        <div className="flex shrink-0 items-center gap-0.5 rounded-md border border-line bg-muted px-1 py-0.5">
-                          <span className="px-1 text-[9px] text-sub/60">思考</span>
-                          {[1, 2, 3, 4].map((lv) => (
-                            <button
-                              key={lv}
-                              className={`h-5 w-5 cursor-pointer rounded text-[10px] font-medium transition-colors ${
-                                v.thinking === lv ? "bg-accent/25 text-accent" : "text-sub/60 hover:text-text"
-                              }`}
-                              onClick={() => setRoles({ ...roles, [role]: { ...v, thinking: v.thinking === lv ? null : lv } })}
-                              title={`思考级别 ${lv}（再次点击恢复跟随全局）`}
-                            >
-                              {lv}
-                            </button>
-                          ))}
-                          <span className="px-1 text-[9px] text-sub/60">全局</span>
-                        </div>
-                      </div>
-                    );
-                  })}
-                </div>
-                <div className="mt-2 flex justify-end">
-                  <button
-                    className="flex cursor-pointer items-center gap-1 rounded bg-accent px-3 py-1 text-[10px] font-medium text-ink hover:bg-accent/85 disabled:opacity-50"
-                    onClick={saveRoleConfig}
-                    disabled={rolesBusy}
-                  >
-                    {rolesBusy ? <Loader2 className="h-3 w-3 animate-spin" /> : <Check className="h-3 w-3" />}
-                    保存角色路由
-                  </button>
-                </div>
-              </div>
-
               {/* 模型列表（v2：引用供应商；编辑含窗口/思考级别/备用模型） */}
               <div className="mb-4 space-y-1.5">
                 {models.length === 0 && <div className="text-xs text-sub/60">暂无模型——先在「供应商」页添加供应商并「获取模型」勾选启用</div>}
@@ -635,7 +539,7 @@ export default function ModelPane() {
                         className="mt-0.5 w-full rounded border border-line bg-muted px-2 py-1 font-mono text-xs text-text"
                         value={mForm.model}
                         onChange={(e) => setMForm({ ...mForm, model: e.target.value })}
-                        placeholder="deepseek-v4-flash"
+                        placeholder="my-model-id"
                       />
                     </label>
                     <label className="text-[10px] text-sub">
@@ -736,6 +640,28 @@ export default function ModelPane() {
             </>
           )}
         </div>
+
+      {/* v3：删除二次确认（统一 Modal，替代原生 confirm()） */}
+      {confirmDel && (
+        <Modal
+          onClose={() => setConfirmDel(null)}
+          width={400}
+          title={confirmDel.kind === "provider" ? "删除供应商" : "删除模型"}
+          footer={
+            <>
+              <CapsuleButton variant="outline" size="md" onClick={() => setConfirmDel(null)}>取消</CapsuleButton>
+              <CapsuleButton variant="dangerPrimary" size="md" onClick={confirmDelete}>确认删除</CapsuleButton>
+            </>
+          }
+        >
+          <div className="text-sm leading-6 text-text/90">
+            {confirmDel.kind === "provider"
+              ? `删除供应商 "${confirmDel.id}"？其下所有模型将一并删除。`
+              : `删除模型 "${confirmDel.id}"？`}
+          </div>
+          <div className="mt-1.5 text-xs leading-5 text-sub">此操作不可撤销（凭据与配置一并移除）。</div>
+        </Modal>
+      )}
     </div>
   );
 }

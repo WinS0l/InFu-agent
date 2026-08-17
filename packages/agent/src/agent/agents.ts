@@ -28,14 +28,14 @@ export interface AgentMeta {
   /** 角色名（= 文件名去 .md；delegate_task agent 参数引用） */
   name: string;
   description: string;
-  /** 工具白名单（未声明 = 全部内置工具，对齐 ZCode general-purpose） */
+  /** 工具白名单（未声明 = 全部内置工具，通用子智能体） */
   tools?: string[];
   /** 子模型 id（config models 引用；可选） */
   model?: string;
   maxSteps?: number;
   thinkingLevel?: number;
   /**
-   * 内部工具权限（v2.5 返工：对齐 opencode permission 语义）：
+   * 内部工具权限（v2.5 返工：对齐 主流 permission 语义）：
    *  allow = 父批准委派后内部工具继承授权不再逐条询问（默认）；
    *  ask  = 内部工具仍逐条走父级审批
    */
@@ -54,12 +54,16 @@ export interface AgentFileDef extends AgentMeta {
   body: string;
 }
 
-/** 内置只读工具集（对齐 ZCode Explore：只读搜索/探索，绝不修改文件/执行命令） */
+/** 内置只读工具集（只读探索子智能体：只读搜索/探索，绝不修改文件/执行命令） */
 export const READONLY_TOOLS = [
   "read_file", "search_code", "list_directory", "project_scan", "git_status", "git_diff", "use_skill",
+  // v2.11：后台子智能体/后台任务状态查询（只读管理）
+  "list_agents", "report", "job_list", "job_output",
+  // v3.1：目录树 / 环境 / 时间（只读探索）
+  "project_tree", "os_info", "current_time",
 ];
 
-/** 内置 agent（对齐 ZCode：调用时机——explore=只读探索/调研（占调用大头），general-purpose=复杂多步任务） */
+/** 内置 agent（调用时机——explore=只读探索/调研（占调用大头），general-purpose=复杂多步任务） */
 export const BUILTIN_AGENTS: AgentFileDef[] = [
   {
     name: "general-purpose",
@@ -80,7 +84,7 @@ export const BUILTIN_AGENTS: AgentFileDef[] = [
     path: "（内置）",
     level: "builtin",
     body:
-      "你是 InFu 的只读探索子智能体（对齐 ZCode Explore）。\n" +
+      "你是 InFu 的只读探索子智能体（只读探索子智能体）。\n" +
       "要求：\n" +
       "1. 只有只读工具（read_file / search_code / list_directory / project_scan / git_status / git_diff / use_skill），绝不修改文件、绝不执行命令；\n" +
       "2. 读摘要而非整文件，定位代码而非审查代码——给出结论（含 file:line 引用），不要文件转储；\n" +

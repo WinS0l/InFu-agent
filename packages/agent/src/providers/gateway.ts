@@ -76,6 +76,8 @@ export interface FailoverOptions {
   signal?: AbortSignal;
   timeoutMs?: number;
   retry?: RetryPolicy;
+  /** v3.2：退避重试回调透传（前端重试可见性） */
+  onRetry?: StreamChatOptions["onRetry"];
   /** 附加请求体字段（v2 思考级别参数；按当前活动模型计算——降级切模型后参数跟随） */
   extraBody?: (candidate: ModelCandidate) => Record<string, unknown> | undefined;
   debug?: boolean;
@@ -83,7 +85,7 @@ export interface FailoverOptions {
 
 /** 带降级链的流式调用：当前模型重试耗尽 → 依次切换备用模型 */
 export async function* streamChatWithFailover(opts: FailoverOptions): AsyncGenerator<ChatDelta> {
-  const { chain, messages, tools, signal, timeoutMs, retry, extraBody, debug } = opts;
+  const { chain, messages, tools, signal, timeoutMs, retry, extraBody, debug, onRetry } = opts;
 
   let started = false;
   while (true) {
@@ -98,6 +100,7 @@ export async function* streamChatWithFailover(opts: FailoverOptions): AsyncGener
         signal,
         timeoutMs,
         retry,
+        onRetry,
         extraBody: extraBody?.(active),
         debug,
       })) {

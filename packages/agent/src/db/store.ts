@@ -29,6 +29,30 @@ export interface SessionSummary {
   lastReport?: string;
 }
 
+/** v2.7 使用统计（从会话事件流聚合；token 为字符数/4 估算）
+ *  v3.0 UI 审查：model-call 事件（每次模型调用真实四桶）聚合按天×模型细分与模型真实用量 */
+export interface UsageStats {
+  rangeDays: number;
+  tokens: number;
+  sessions: number;
+  messages: number;
+  activeDays: number;
+  streak: number;
+  topModel: { model: string; share: number } | null;
+  modelUsage: Array<{ model: string; tokens: number; share: number }>;
+  dailyTrend: Array<{
+    date: string;
+    tokens: number;
+    prompt: number;
+    completion: number;
+    cacheHit: number;
+    cacheMiss: number;
+    estimated: boolean;
+    /** v3.0 UI 审查：该日各模型真实 token（model-call 聚合；旧会话无数据时为空数组） */
+    byModel: Array<{ model: string; tokens: number }>;
+  }>;
+}
+
 export function buildContinuationPrompt(summary: SessionSummary, newPrompt: string): string {
   const parts: string[] = [newPrompt, "", "【历史会话回顾】（你在继续此前的任务，请结合进展继续）", ""];
   if (summary.prompts.length) {
@@ -167,7 +191,18 @@ export class SessionStore {
 
   /** 更新会话状态（done/error/stopped/running） */
   updateStatus(id: string, status: SessionStatus) {
+    // v2.13：用户停止（stopped）为终态，不被后续 done/error 覆盖（abort 走"软返回"路径，
+    // orchestrator 正常返回后 server 会写 done——停止语义必须保留）
+    if (status === "done" || status === "error") {
+      const cur = this.getSession(id);
+      if (cur?.status === "stopped") return;
+    }
     this.db.prepare(`UPDATE sessions SET status = ?, updated_at = ? WHERE id = ?`).run(status, Date.now(), id);
+  }
+
+  /** v3.1：服务启动时清理残留 running（上次进程退出时任务已死；防续跑被误拦） */
+  resetStaleRunning() {
+    this.db.prepare(`UPDATE sessions SET status = 'stopped', updated_at = ? WHERE status = 'running'`).run(Date.now());
   }
 
   // ── v2.6.1 会话管理（重命名/顶置/归档）──
@@ -196,11 +231,18 @@ export class SessionStore {
    * Rewind：回滚到检查点——删除 seq >= 目标的所有事件，会话回到"未完成"态。
    * 检查点事件为 user-message / step-start（由调用方传入对应 seq）。
    */
-  rewind(id: string, seq: number): boolean {
+  rewind(id: string, seq: number, opts?: { marker?: boolean }): boolean {
     const s = this.getSession(id);
     if (!s) return false;
     this.db.prepare(`DELETE FROM events WHERE session_id = ? AND seq >= ?`).run(id, seq);
     this.updateStatus(id, "stopped");
+    // v2.14 批 9：回滚标记落库（rebuild 时注入 system 提示——AI 意识到已回滚并知道位置）；
+    // v2.14 批 10：编辑场景（marker:false）不落标记——编辑 = 正常历史修改，AI 无需被告知（截断后自然看不到旧内容）
+    if (opts?.marker !== false) {
+      try {
+        this.appendEvent(id, { type: "rewind", to: seq, at: Date.now() });
+      } catch { /* 标记失败不影响回滚本身 */ }
+    }
     return true;
   }
 
@@ -228,6 +270,162 @@ export class SessionStore {
       }
     }
     return summary;
+  }
+
+  /**
+   * v2.7 使用统计：从会话事件流聚合（token = text/reasoning 字符数/4 估算）。
+   * 模型用量按 phase-start 事件的 model 字段分布（阶段数占比）近似分配 token。
+   */
+  getStats(days: number): UsageStats {
+    const since = Date.now() - days * 86400000;
+    const get = (sql: string, ...args: any[]) => this.db.prepare(sql).get(...args) as Record<string, unknown> | undefined;
+    const all = (sql: string, ...args: any[]) => this.db.prepare(sql).all(...args) as Array<Record<string, unknown>>;
+
+    const charSql = "length(COALESCE(json_extract(event_json,'$.text'),'')) + length(COALESCE(json_extract(event_json,'$.reasoning'),''))";
+
+    // v3.0 批 12：总用量优先真实 usage（done 事件四桶），无真实数据回退字符估算
+    const usageRow = get(
+      `SELECT COALESCE(SUM(json_extract(event_json,'$.usage.promptTokens')), 0) AS pt,
+              COALESCE(SUM(json_extract(event_json,'$.usage.completionTokens')), 0) AS ct,
+              COALESCE(SUM(json_extract(event_json,'$.usage.cacheHit')), 0) AS ch,
+              COALESCE(SUM(json_extract(event_json,'$.usage.cacheMiss')), 0) AS cm
+       FROM events WHERE ts >= ? AND json_extract(event_json,'$.type') = 'done'`, since
+    );
+    const _pt = Number(usageRow?.pt ?? 0);
+    const _ct = Number(usageRow?.ct ?? 0);
+    const _ch = Number(usageRow?.ch ?? 0);
+    const _cm = Number(usageRow?.cm ?? 0);
+    const realTotal = _pt + _ct + _ch + _cm;
+    const tokens =
+      realTotal > 0
+        ? Math.max(_pt, _ch + _cm) + _ct
+        : Math.round(Number(get(`SELECT COALESCE(SUM(${charSql}), 0) AS chars FROM events WHERE ts >= ?`, since)?.chars ?? 0) / 4);
+
+    const msgRow = get(`SELECT COUNT(*) AS c FROM events WHERE ts >= ? AND json_extract(event_json,'$.type') = 'user-message'`, since);
+    const sessRow = get(`SELECT COUNT(*) AS c FROM sessions WHERE created_at >= ?`, since);
+    const activeRow = get(`SELECT COUNT(DISTINCT date(ts/1000,'unixepoch','localtime')) AS c FROM events WHERE ts >= ?`, since);
+
+    // 连续活跃天数（从今天往前，有会话的连续天数）
+    const dayRows = all(`SELECT DISTINCT date(created_at/1000,'unixepoch','localtime') AS d FROM sessions`);
+    const daySet = new Set(dayRows.map((r) => String(r.d)));
+    let streak = 0;
+    const now = new Date();
+    for (let i = 0; i < 365; i++) {
+      const d = new Date(now.getTime() - i * 86400000);
+      const ds = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+      if (daySet.has(ds)) streak++;
+      else break;
+    }
+
+    // v3.0 UI 审查：模型真实用量——model-call 事件聚合（每次模型调用真实 token），
+    // 无 model-call 数据（旧会话）回退 phase-start 阶段数占比近似
+    const mcModelRows = all(
+      `SELECT json_extract(event_json,'$.model') AS model,
+              SUM(COALESCE(json_extract(event_json,'$.promptTokens'),0) + COALESCE(json_extract(event_json,'$.completionTokens'),0)) AS t
+       FROM events WHERE ts >= ? AND json_extract(event_json,'$.type') = 'model-call' GROUP BY model ORDER BY t DESC`,
+      since
+    );
+    const mcTotal = mcModelRows.reduce((s, r) => s + Number(r.t), 0);
+    let modelUsage: Array<{ model: string; tokens: number; share: number }>;
+    if (mcTotal > 0) {
+      modelUsage = mcModelRows.map((r) => ({
+        model: String(r.model),
+        tokens: Number(r.t),
+        share: Math.round((Number(r.t) / mcTotal) * 1000) / 10,
+      }));
+    } else {
+      const modelRows = all(
+        `SELECT json_extract(event_json,'$.model') AS model, COUNT(*) AS cnt FROM events WHERE ts >= ? AND json_extract(event_json,'$.type') = 'phase-start' AND json_extract(event_json,'$.model') IS NOT NULL GROUP BY model ORDER BY cnt DESC`,
+        since
+      );
+      const totalPhases = modelRows.reduce((s, r) => s + Number(r.cnt), 0);
+      modelUsage = modelRows.map((r) => {
+        const cnt = Number(r.cnt);
+        const share = totalPhases ? cnt / totalPhases : 0;
+        return { model: String(r.model), tokens: Math.round(tokens * share), share: Math.round(share * 1000) / 10 };
+      });
+    }
+    const topModel = modelUsage[0] ? { model: modelUsage[0].model, share: modelUsage[0].share } : null;
+
+    // v3.0 UI 审查：按天×模型真实 token（model-call 聚合；条形图同日多模型并列条）
+    const mcDailyRows = all(
+      `SELECT date(ts/1000,'unixepoch','localtime') AS d, json_extract(event_json,'$.model') AS model,
+              SUM(COALESCE(json_extract(event_json,'$.promptTokens'),0) + COALESCE(json_extract(event_json,'$.completionTokens'),0)) AS t
+       FROM events WHERE ts >= ? AND json_extract(event_json,'$.type') = 'model-call' GROUP BY d, model`,
+      since
+    );
+    const byModelByDay = new Map<string, Array<{ model: string; tokens: number }>>();
+    for (const r of mcDailyRows) {
+      const d = String(r.d);
+      const arr = byModelByDay.get(d) ?? [];
+      arr.push({ model: String(r.model), tokens: Number(r.t) });
+      byModelByDay.set(d, arr);
+    }
+
+    // 按天 token 趋势（v3.0 批 12：优先真实 usage——done 事件携带模型返回的
+    // prompt/completion/cache 四桶；无 usage 数据的旧会话回退字符估算。
+    // v3.0 UI 审查：日期集合 = done ∪ model-call——纯 model-call 会话（统计期新建、
+    // 或 done 无 usage）也出现在趋势中，tokens 用 model-call 真实四桶）
+    const dailyRows = all(
+      `SELECT date(ts/1000,'unixepoch','localtime') AS d,
+              COALESCE(SUM(json_extract(event_json,'$.usage.promptTokens')), 0) AS pt,
+              COALESCE(SUM(json_extract(event_json,'$.usage.completionTokens')), 0) AS ct,
+              COALESCE(SUM(json_extract(event_json,'$.usage.cacheHit')), 0) AS ch,
+              COALESCE(SUM(json_extract(event_json,'$.usage.cacheMiss')), 0) AS cm,
+              COALESCE(SUM(${charSql}), 0) AS chars
+       FROM events WHERE ts >= ? AND json_extract(event_json,'$.type') = 'done' GROUP BY d ORDER BY d`,
+      since
+    );
+    const mcDayRows = all(
+      `SELECT date(ts/1000,'unixepoch','localtime') AS d,
+              COALESCE(SUM(json_extract(event_json,'$.promptTokens')), 0) AS pt,
+              COALESCE(SUM(json_extract(event_json,'$.completionTokens')), 0) AS ct
+       FROM events WHERE ts >= ? AND json_extract(event_json,'$.type') = 'model-call' GROUP BY d ORDER BY d`,
+      since
+    );
+    const mcDay = new Map(mcDayRows.map((r) => [String(r.d), { pt: Number(r.pt ?? 0), ct: Number(r.ct ?? 0) }]));
+    const doneDay = new Map(dailyRows.map((r) => [String(r.d), r]));
+    const allDays = [...new Set([...doneDay.keys(), ...mcDay.keys()])].sort();
+    const dailyTrend = allDays.map((d) => {
+      const r = doneDay.get(d);
+      const pt = Number(r?.pt ?? 0);
+      const ct = Number(r?.ct ?? 0);
+      const ch = Number(r?.ch ?? 0);
+      const cm = Number(r?.cm ?? 0);
+      // v3.0 批 12：真实四桶优先；总 tokens = 输入 + 输出——输入取 max(prompt, cacheHit+cacheMiss)
+      // （部分端点 prompt_tokens 已含缓存命中，直接相加会重复计算）
+      const real = pt + ct + ch + cm;
+      // v3.0 UI 审查：仅 model-call 的日期（无 done usage）→ 用调用级真实四桶
+      const mc = mcDay.get(d);
+      const tokens =
+        real > 0
+          ? Math.max(pt, ch + cm) + ct
+          : mc && mc.pt + mc.ct > 0
+            ? mc.pt + mc.ct
+            : Math.round(Number(r?.chars ?? 0) / 4);
+      return {
+        date: d,
+        tokens,
+        prompt: pt || mc?.pt || 0,
+        completion: ct || mc?.ct || 0,
+        cacheHit: ch,
+        cacheMiss: cm,
+        estimated: real === 0 && !(mc && mc.pt + mc.ct > 0),
+        byModel: byModelByDay.get(d) ?? [],
+      };
+    });
+
+    return {
+      rangeDays: days,
+      tokens,
+      sessions: Number(sessRow?.c ?? 0),
+      messages: Number(msgRow?.c ?? 0),
+      activeDays: Number(activeRow?.c ?? 0),
+      streak,
+      topModel,
+      modelUsage,
+      dailyTrend,
+    };
   }
 }
 

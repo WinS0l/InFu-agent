@@ -2,7 +2,7 @@
  * v2.6 项目指令文件（INFU.md，对齐 CLAUDE.md / AGENTS.md 生态惯例）
  *
  * - 发现：<root>/INFU.md 优先，其次 <root>/AGENTS.md（生态通用约定兜底）
- * - 注入：全量进 system（上限保护，参考 Codex project_doc_max_bytes = 32KiB）
+ * - 注入：全量进 system（上限保护，参考项目指令上限 = 32KiB）
  * - 作用域：解析「路径作用域」节（- 允许: X / - 禁止: Y，** 跨段、* 单段）→ ScopeRule[]
  *
  * 内容分工（生态共识）：INFU.md = 团队/用户必须遵守的规则（测试命令、代码标准、
@@ -13,7 +13,7 @@ import fs from "node:fs";
 import path from "node:path";
 import type { ScopeRule } from "@infu/shared";
 
-/** 指令文件合并上限（Codex 同款 project_doc_max_bytes；超过截断并提示） */
+/** 指令文件合并上限（project_doc 上限；超过截断并提示） */
 export const INSTRUCTION_MAX_BYTES = 32 * 1024;
 
 /** 候选指令文件名（INFU.md 优先，AGENTS.md 生态兜底） */

@@ -57,7 +57,8 @@ store.updateStatus(id, "done");
 const ok = store.rewind(id, s3);
 check("rewind 成功", ok);
 const after = store.getEvents(id);
-check("截断到检查点（保留 0..1）", after.length === 2 && after[after.length - 1].event.type === "step-start", JSON.stringify(after.map((e) => e.event.type)));
+// v2.14 批 10：rewind 默认落 marker 事件（AI 感知回滚位置）→ 截断后追加一条 rewind 标记
+check("截断到检查点（保留 0..1）", after.length === 3 && after[1].event.type === "step-start" && after[2].event.type === "rewind", JSON.stringify(after.map((e) => e.event.type)));
 check("rewind 后状态重置为 stopped", store.getSession(id)?.status === "stopped");
 check("rewind 未知会话返回 false", store.rewind("nope", 0) === false);
 

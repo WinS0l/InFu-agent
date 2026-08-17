@@ -233,9 +233,10 @@ export default function App() {
 
         {/* 中间列（v2.14 批 5：整体 = 大圆角卡片——header 与聊天界面一体，圆角处透出侧栏/光晕）
             v2.14 批 6：顶部不留缝（pt-0）、右侧无缝贴右侧栏（pr-0，分隔线 = 卡片边框）
-            v2.14 批 7：右侧直角（rounded-l-only）——与右侧栏融为一体，圆角只保留在左侧 */}
+            v2.14 批 7：右侧直角（rounded-l-only）——与右侧栏融为一体，圆角只保留在左侧
+            v3.3 补 4：右侧栏折叠时去掉卡片右边框（border-r-0）——折叠形态与聊天界面之间无分隔线 */}
         <div className="min-h-0 min-w-0 pb-2 pl-2" style={{ gridColumn: 2, gridRow: "1 / span 2" }}>
-          <div className="flex h-full flex-col overflow-hidden rounded-l-[20px] border border-line bg-ink shadow-lv2">
+          <div className={`flex h-full flex-col overflow-hidden rounded-l-[20px] border border-line bg-ink shadow-lv2 ${detailsOpen ? "" : "border-r-0"}`}>
             {/* 顶部区域（v2.14 批 5：进卡片，与聊天界面一体；左侧会话归属 + 推拉居中）
                 v3.0 批 9：整行 = 窗口拖拽区（no-drag 给可交互元素） */}
             {hasMessages && (

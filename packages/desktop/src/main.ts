@@ -120,9 +120,10 @@ function createMainWindow() {
     show: false,
     backgroundColor: "#151517",
     // 无边框：隐藏系统标题栏，保留原生窗口按钮（titleBarOverlay 右上角悬浮，随主题配色；
-    // height 32 压缩悬浮区——tab 条底部内容（tabs/➕）与按钮垂直错开，无需大让位）
+    // v3.3 补 6：height 32 压缩移除——恢复系统默认原生按钮大小（批 9.6 压缩是为让 ➕ 贴右缘
+    // 不被盖；v3.3 补 3 已恢复 pr-[140px] 让位，tab 条内容不再伸到按钮区，无需压缩））
     titleBarStyle: "hidden",
-    titleBarOverlay: { ...themeOverlayColors(theme), height: 32 },
+    titleBarOverlay: { ...themeOverlayColors(theme) },
     webPreferences: {
       preload: join(__dirname, "preload.cjs"),
       contextIsolation: true,

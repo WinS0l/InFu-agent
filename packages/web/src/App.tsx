@@ -319,18 +319,16 @@ export default function App() {
         ) : (
           // 折叠 rail（56px）：展开按钮放在原生窗口按钮（titleBarOverlay 悬浮
           // 右上角，约 38px 高）正下方——顶部让位，按钮紧贴其下（v3.0 批 9.5 拍板）
+          // v3.3 补：去掉分隔细线——折叠形态只有拉出按钮，别的什么都没有（用户拍板）
           <aside className="row-span-2 flex flex-col items-center gap-1 bg-ink py-3" style={{ gridColumn: 3 }}>
-            {/* v3.2：让位区 + py-3(12px) = 3.25rem+1px —— 分隔线与聊天 header
-                底部（顶部 3.25rem+1px）的线水平对齐；仍避开原生窗口按钮悬浮区（约 38px 高） */}
+            {/* 顶部让位区（避开原生窗口按钮悬浮区约 38px 高；无边框无线条 = 视觉空白） */}
             <div className="h-[calc(3.25rem-11px)] shrink-0" />
-            {/* 折叠 rail 分隔线（与聊天顶部 header 分隔线同款：1px border-line） */}
-            <div className="w-full shrink-0 border-b border-line" />
             <button
-              className="flex h-9 w-9 cursor-pointer items-center justify-center rounded-full text-sub transition-colors hover:bg-hover hover:text-text"
+              className="flex h-11 w-11 cursor-pointer items-center justify-center rounded-full text-sub transition-colors hover:bg-hover hover:text-text"
               onClick={() => setDetailsOpen(true)}
               title="展开右侧栏"
             >
-              <PanelRightOpen className="h-4 w-4" />
+              <PanelRightOpen className="h-5 w-5" />
             </button>
           </aside>
         ))}

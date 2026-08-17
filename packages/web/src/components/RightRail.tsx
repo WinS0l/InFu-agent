@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { useClickOutside } from "./useClickOutside";
-import { Bot, FileSearch, Globe, Monitor, X, Loader2, PanelRightClose, SquarePlus } from "lucide-react";
+import { Bot, FileSearch, Globe, Monitor, X, Loader2, PanelRightClose, Plus } from "lucide-react";
 import { useStore, type RightTab } from "../store";
 import ReviewPane from "./ReviewPane";
 import SubagentThreadView from "./SubagentThreadView";
@@ -147,19 +147,21 @@ export default function RightRail({ onCollapse }: { onCollapse: () => void }) {
     <div className="flex h-full min-h-0 min-w-0 flex-col">
       {/* 顶部 tab 条（浏览器式：活动高亮 + 状态徽标 + 关闭 ×；v2.9 无下边框与内容区浑然一体。
           v3.0 批 9.5 拍板：折叠按钮在窗口最顶部（与原生三按钮同一高度，self-start 顶对齐）；
-          ➕ 紧贴右侧边框（批 9.6：原生按钮悬浮区压缩到 32px 高、背景同色，无需大让位）；
+          v3.3 补（用户拍板）：恢复右上角 pr-[140px] 让位——标签栏最大长度止于 Electron
+          原生三按钮（titleBarOverlay 悬浮右上角）左缘，不重叠；多 tab 时在让位边界内
+          滚动堆叠；➕ 改为超大加号、描述「新建 tab」
           整行 = 窗口拖拽区（tab 项/按钮 no-drag）
           v3.2：高度 60px → 3.25rem —— 与聊天 header / 侧栏 Logo 行统一（原生融合） */}
-      <div className="relative flex h-[3.25rem] shrink-0 items-end gap-1 px-2 pb-1.5">
-        {/* 折叠按钮（最左 + 窗口最顶部：self-start 顶对齐 = 与原生三按钮同一高度；no-drag 可点） */}
+      <div className="relative flex h-[3.25rem] shrink-0 items-end gap-1 px-2 pb-1.5 pr-[140px]">
+        {/* 折叠按钮（最左 + 窗口最顶部：self-end 顶对齐 = 与原生三按钮同一高度；no-drag 可点） */}
         <button
-          className="mb-0.5 flex h-7 w-7 shrink-0 cursor-pointer items-center justify-center self-end rounded-lg text-sub transition-colors hover:bg-hover hover:text-text"
+          className="mb-0.5 flex h-9 w-9 shrink-0 cursor-pointer items-center justify-center self-end rounded-lg text-sub transition-colors hover:bg-hover hover:text-text"
           onClick={onCollapse}
           title="折叠右侧栏"
         >
-          <PanelRightClose className="h-4 w-4" />
+          <PanelRightClose className="h-5 w-5" />
         </button>
-        {/* tab 滚动区（z-0：任何滚动内容都被裁剪在本容器内） */}
+        {/* tab 滚动区（z-0：任何滚动内容都被裁剪在本容器内；到达右侧让位边界即滚动堆叠） */}
         <div className="no-scrollbar relative z-0 flex min-w-0 flex-1 items-end gap-0.5 overflow-x-auto pr-1">
           {rightTabs.map((t) => (
             <div
@@ -194,12 +196,12 @@ export default function RightRail({ onCollapse }: { onCollapse: () => void }) {
             </div>
           ))}
         </div>
-        {/* 新建 tab（➕）：紧贴右侧边框（bottom 对齐；点击 = 上拉菜单 fixed 视口定位；
-            no-drag——挂在 drag 拖拽区下，不加会被吞点击） */}
+        {/* 新建 tab（➕ 超大加号）：紧贴让位边界（原生三按钮左侧，绝不重叠）；bottom 对齐；
+            点击 = 上拉菜单 fixed 视口定位；no-drag——挂在 drag 拖拽区下，不加会被吞点击 */}
         <span className="relative mb-0.5 shrink-0">
           <button
             ref={plusRef}
-            className="flex h-7 w-7 cursor-pointer items-center justify-center rounded-lg text-sub transition-colors hover:bg-hover hover:text-text"
+            className="flex h-9 w-9 cursor-pointer items-center justify-center rounded-lg text-text transition-colors hover:bg-hover hover:text-info"
             onClick={() => {
               if (newTabOpen) {
                 setNewTabOpen(false);
@@ -211,7 +213,7 @@ export default function RightRail({ onCollapse }: { onCollapse: () => void }) {
             }}
             title="新建 tab"
           >
-            <SquarePlus className="h-4 w-4" />
+            <Plus className="h-5 w-5" />
           </button>
         </span>
       </div>

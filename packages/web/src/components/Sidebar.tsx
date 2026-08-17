@@ -367,31 +367,31 @@ export default function Sidebar({ onOpenSettings, className = "" }: SidebarProps
   /** v3：单列表（flat）模式——全部会话按排序方式单列展示（行内标注所属项目） */
   const flatVisible = visible(sortSessions(sessions));
 
-  /* ── 折叠 rail（56px）：Logo=展开 / 新建 / 设置 ── */
+  /* ── 折叠 rail（56px）：Logo=展开 / 新建 / 设置（v3.3 补：按钮加大）── */
   if (sidebarCollapsed) {
     return (
       <aside className={`flex min-h-0 flex-col items-center gap-1 bg-sidebar/70 backdrop-blur-2xl py-3 ${className}`}>
         <button
-          className="flex h-9 w-9 cursor-pointer items-center justify-center rounded-full text-info transition-colors hover:bg-hover"
+          className="flex h-10 w-10 cursor-pointer items-center justify-center rounded-full text-info transition-colors hover:bg-hover"
           onClick={() => setSidebarCollapsed(false)}
           title="展开侧栏"
         >
           {LOGO}
         </button>
         <button
-          className="flex h-9 w-9 cursor-pointer items-center justify-center rounded-full text-text transition-colors hover:bg-hover disabled:cursor-not-allowed disabled:opacity-40"
+          className="flex h-10 w-10 cursor-pointer items-center justify-center rounded-full text-text transition-colors hover:bg-hover disabled:cursor-not-allowed disabled:opacity-40"
           onClick={() => newSession()}
           title="新建会话（Ctrl+N）"
         >
-          <Plus className="h-4 w-4" />
+          <Plus className="h-5 w-5" />
         </button>
         <div className="min-h-0 flex-1" />
         <button
-          className="flex h-9 w-9 cursor-pointer items-center justify-center rounded-full text-sub transition-colors hover:bg-hover hover:text-text"
+          className="flex h-10 w-10 cursor-pointer items-center justify-center rounded-full text-sub transition-colors hover:bg-hover hover:text-text"
           onClick={() => onOpenSettings("general")}
           title="设置"
         >
-          <Cog className="h-4 w-4" />
+          <Cog className="h-5 w-5" />
         </button>
       </aside>
     );
@@ -399,13 +399,12 @@ export default function Sidebar({ onOpenSettings, className = "" }: SidebarProps
 
   return (
     <aside className={`flex min-h-0 min-w-0 flex-col bg-sidebar/70 backdrop-blur-2xl ${className}`}>
-      {/* Logo 行（与聊天 header 同高 + 1px 卡片边框）：点击 = 新建会话；右侧折叠按钮；
+      {/* Logo 行（与聊天 header 同高）：点击 = 新建会话；右侧折叠按钮；
           v3.0 批 9 = 窗口拖拽区（no-drag 给按钮）
-          v3.0 审计后：60px → calc(2.5rem+1px) + border-b —— 底部分隔线与聊天 header
-          底部水平对齐（聊天卡片顶部有 1px border，故 +1px；随字号缩放自适应）
-          v3.2：header 增高至 3.25rem（与右侧栏 tab 条统一，原生融合）→ 同步 calc(3.25rem+1px) */}
+          v3.2：header 3.25rem（与右侧栏 tab 条统一，原生融合）
+          v3.3 补：去掉底部 border-b 分隔细线（用户拍板：左侧栏最顶上不要细线） */}
       <div
-        className="flex h-[calc(3.25rem+1px)] shrink-0 items-center justify-between border-b border-line px-4"
+        className="flex h-[3.25rem] shrink-0 items-center justify-between px-4"
         style={{ WebkitAppRegion: "drag" } as React.CSSProperties}
       >
         <button
@@ -418,12 +417,12 @@ export default function Sidebar({ onOpenSettings, className = "" }: SidebarProps
           <span className="truncate text-[15px] font-semibold tracking-wide">InFu</span>
         </button>
         <button
-          className="flex h-7 w-7 cursor-pointer items-center justify-center rounded-lg text-sub transition-colors hover:bg-hover hover:text-text"
+          className="flex h-9 w-9 cursor-pointer items-center justify-center rounded-lg text-sub transition-colors hover:bg-hover hover:text-text"
           onClick={() => setSidebarCollapsed(true)}
           title="折叠侧栏"
           style={{ WebkitAppRegion: "no-drag" } as React.CSSProperties}
         >
-          <PanelLeftClose className="h-4 w-4" />
+          <PanelLeftClose className="h-5 w-5" />
         </button>
       </div>
 

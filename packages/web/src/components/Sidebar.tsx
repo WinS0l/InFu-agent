@@ -764,8 +764,8 @@ export default function Sidebar({ onOpenSettings, className = "" }: SidebarProps
         )}
       </div>
 
-      {/* 底部（v3：不占整个底部——工作树开关 + 设置并排） */}
-      <div className="flex shrink-0 items-center gap-1.5 border-t border-line px-2 py-1.5">
+      {/* 底部（v3：不占整个底部——工作树开关 + 设置并排；v3.3 补 5：去掉 border-t 细线） */}
+      <div className="flex shrink-0 items-center gap-1.5 px-2 py-1.5">
         <button
           className={`flex h-[34px] shrink-0 cursor-pointer items-center gap-1.5 rounded-xl border px-2.5 text-[13px] font-medium transition-colors ${
             useWorktree ? "border-info/40 bg-info-soft text-info" : "border-line bg-transparent text-sub hover:bg-hover hover:text-text"

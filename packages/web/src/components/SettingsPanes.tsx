@@ -1333,6 +1333,17 @@ export function StatsPane() {
 
   // v3.0 UI 审查批 2：横向条形图归一化基准 = 各日总量最大值（byModel 真实数据优先）
   const maxDayTotal = Math.max(1, ...(stats?.dailyTrend.map((d) => Math.max(d.tokens, d.byModel.reduce((s, m) => s + m.tokens, 0))) ?? [1]));
+  // v3.3 补 11：Y 轴上限取「比最大值大的友好刻度」（1/2/5×10ⁿ，Recharts niceTicks 同款）——
+  // 最高柱不顶满、顶部留白（原实现 value/max 100% 顶满——单日独大时柱子顶到卡片顶端，用户反馈）
+  const niceCeil = (v: number): number => {
+    if (v <= 0) return 1;
+    const exp = Math.pow(10, Math.floor(Math.log10(v)));
+    for (const m of [1, 2, 5, 10]) {
+      if (v <= m * exp) return m * exp;
+    }
+    return 10 * exp;
+  };
+  const yMax = niceCeil(maxDayTotal);
   // 图例模型列表（去重，保持出现顺序，最多 6 个——ZCode 同款）
   const allModels = [...new Set(stats?.dailyTrend.flatMap((d) => d.byModel.map((m) => m.model)) ?? [])].slice(0, 6);
   const hasEstimated = stats?.dailyTrend.some((d) => d.estimated) ?? false;
@@ -1445,10 +1456,14 @@ export function StatsPane() {
               return (
                 <>
                   <div className="relative h-60">
-                    {/* 水平网格虚线（0/25/50/75/100%） */}
+                    {/* 水平网格虚线（0/25/50/75/100%——相对 Y 轴上限 yMax） */}
                     {[0, 0.25, 0.5, 0.75, 1].map((f) => (
                       <div key={f} className="absolute inset-x-0 border-t border-dashed border-line/50" style={{ bottom: `${f * 100}%` }} />
                     ))}
+                    {/* v3.3 补 11：Y 轴上限刻度小标（对齐 Recharts niceTicks 语义——柱不顶满留白） */}
+                    <div className="absolute right-0 top-0 z-10 rounded bg-ink/80 px-1 text-[10px] leading-4 text-caption">
+                      ≈{fmtTokens(yMax)} tokens
+                    </div>
                     {/* 柱区：槽位 = 范围天数均分（30 天细柱 / 7 天粗柱），有数据的天出柱 */}
                     <div className={`absolute inset-0 flex items-end px-1 ${gapCls}`}>
                       {rangeDates.map((date) => {
@@ -1463,7 +1478,7 @@ export function StatsPane() {
                           <div key={date} className="flex h-full min-w-0 flex-1 flex-col justify-end" title={tip}>
                             <div
                               className="flex w-full flex-col overflow-hidden rounded-t-[3px]"
-                              style={{ height: `${Math.max(0.5, (dayTotal / maxDayTotal) * 100)}%` }}
+                              style={{ height: `${Math.max(0.5, (dayTotal / yMax) * 100)}%` }}
                             >
                               {models.map((m, i) => (
                                 <div

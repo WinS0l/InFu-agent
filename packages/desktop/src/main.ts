@@ -34,6 +34,18 @@ import { loadConfig } from "@infu/agent/dist/providers/registry.js";
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const IS_DEV = process.env.INFU_DESKTOP_DEV === "1";
 
+// v3.3 补 7：主进程未捕获异常兜底——后台启动/管道关闭时 console.log 写 stdout 断管
+// （EPIPE）会触发 uncaughtException → Windows 弹「A JavaScript error occurred in the
+// main process」对话框（用户在桌面看到的多个报错窗口根因）。挂兜底：记录到 stderr，
+// 不再弹原生错误对话框；其他无害异常同样走此通道（个人桌面应用，不因日志崩溃）。
+process.on("uncaughtException", (err) => {
+  try {
+    console.error(`[infu-desktop] uncaughtException: ${(err as Error)?.message ?? err}\n${(err as Error)?.stack ?? ""}`);
+  } catch {
+    /* stderr 同样不可写（极端管道关闭）——静默 */
+  }
+});
+
 // 本机（Windows 25H2 加固）GPU 子进程无法启动（反复 exit_code=-2147483645 断点异常）→ 软件渲染
 // SwiftShader ANGLE 后端（GPU 进程用软件 GL 正常启动 → 合成/截图/ready-to-show 恢复）。
 // Chromium 128+ 需 enable-unsafe-swiftshader 才允许；crash-limit 兜底（个人应用可接受）
@@ -120,10 +132,12 @@ function createMainWindow() {
     show: false,
     backgroundColor: "#151517",
     // 无边框：隐藏系统标题栏，保留原生窗口按钮（titleBarOverlay 右上角悬浮，随主题配色；
-    // v3.3 补 6：height 32 压缩移除——恢复系统默认原生按钮大小（批 9.6 压缩是为让 ➕ 贴右缘
-    // 不被盖；v3.3 补 3 已恢复 pr-[140px] 让位，tab 条内容不再伸到按钮区，无需压缩））
+    // v3.3 补 6/7：height 显式 40px——Electron 不设 height 时用系统默认（Windows 10/11
+    // 100% DPI 下 32px，与本机批 9.6 的 32 相同=用户观感「没恢复」）；Windows 11 原生
+    // 标题栏视觉高度 40px，显式设 40 对齐原生大小（125% 缩放物理 50px < tab 条 3.25rem
+    // 45.5px 逻辑，不越界；折叠 rail 让位区 34.5px+py-3 = 按钮 top≈49px > 40 不被盖））
     titleBarStyle: "hidden",
-    titleBarOverlay: { ...themeOverlayColors(theme) },
+    titleBarOverlay: { ...themeOverlayColors(theme), height: 40 },
     webPreferences: {
       preload: join(__dirname, "preload.cjs"),
       contextIsolation: true,

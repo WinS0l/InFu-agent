@@ -161,8 +161,19 @@ export default function RightRail({ onCollapse }: { onCollapse: () => void }) {
         >
           <PanelRightClose className="h-5 w-5" />
         </button>
-        {/* tab 滚动区（z-0：任何滚动内容都被裁剪在本容器内；到达右侧让位边界即滚动堆叠） */}
-        <div className="no-scrollbar relative z-0 flex min-w-0 flex-1 items-end gap-0.5 overflow-x-auto pr-1">
+        {/* tab 滚动区（z-0：任何滚动内容都被裁剪在本容器内；到达右侧让位边界即滚动堆叠。
+            v3.3 补 7：滚轮水平滑动——Windows 普通滚轮默认只滚垂直，tab 条横向溢出时
+            滚轮事件转水平滚动（scrollLeft += deltaY），滑动机制真实可感） */}
+        <div
+          className="no-scrollbar relative z-0 flex min-w-0 flex-1 items-end gap-0.5 overflow-x-auto pr-1"
+          onWheel={(e) => {
+            const el = e.currentTarget;
+            if (el.scrollWidth > el.clientWidth) {
+              el.scrollLeft += e.deltaY;
+              e.preventDefault();
+            }
+          }}
+        >
           {rightTabs.map((t) => (
             <div
               key={t.id}

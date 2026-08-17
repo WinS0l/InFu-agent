@@ -142,6 +142,10 @@ interface StoreState {
   /** v3.1：全局运行中会话集合（多会话并行：每会话独立运行态；running 是当前视图会话的派生值） */
   runningIds: string[];
   running: boolean;
+  /** v3.3 补 9：screen_capture 截图事件标记（tool-result 到达时 +1；ComputerUsePane
+   *  依赖它做「有截图才刷新」——无轮询，Agent 实际截屏才拉一次截图列表） */
+  screenShotTick: number;
+  bumpScreenShots: () => void;
   /** v3.1：每会话消息缓存（多会话并行：流式事件写对应缓存；切换会话秒切，不丢流式状态） */
   sessionCache: Record<string, ChatMsg[]>;
   /** v3.1：SSE 事件路由目标会话（api.ts 每连接设置；null = 当前视图会话） */
@@ -502,6 +506,7 @@ export const useStore = create<StoreState>()(
   models: [],
   modelId: "",
   root: "", // v2.6.2：初始为空——由设置 defaultRoot 或侧栏项目选择填充（不再指向测试占位目录）
+  screenShotTick: 0, // v3.3 补 9：截图事件标记（screen_capture tool-result 到达 +1）
   messages: [],
   runningIds: [],
   running: false,
@@ -702,6 +707,7 @@ export const useStore = create<StoreState>()(
     let msgs: ChatMsg[] = [];
     const fileChanges: string[] = [];
     let diffContent = "";
+    let shotTick = 0; // v3.3 补 9：重放路径的 screen_capture 事件计数
     let cur: ChatMsg | null = null; // 当前 assistant 轮次（每个 step-start 一条）
     let phase: PhaseId | undefined;
     const phaseModels: Partial<Record<PhaseId, string>> = {}; // v2.2 阶段模型记录
@@ -774,6 +780,8 @@ export const useStore = create<StoreState>()(
           // 恢复右侧面板（与 finishTool 同规则）
           if (event.tool === "git_diff" || /^diff --git/m.test(event.summary)) diffContent = event.summary;
           if (event.tool === "write_file" || event.tool === "edit_file") fileChanges.push(event.summary);
+          // v3.3 补 9：重放路径同样触发截图事件标记（历史回放后截图区仍能刷新）
+          if (event.tool === "screen_capture") shotTick++;
           break;
         }
         case "subagent-start": {
@@ -858,6 +866,8 @@ export const useStore = create<StoreState>()(
     if (isView) {
       out.fileChanges = fileChanges;
       out.diffContent = diffContent;
+      // v3.3 补 9：重放含 screen_capture → 累加截图事件标记（ComputerUsePane 刷新）
+      if (shotTick > 0) out.screenShotTick = get().screenShotTick + shotTick;
       out.currentStep = currentStep;
       out.stepStartTimes = {};
       out.currentPhase = null;
@@ -1163,6 +1173,8 @@ export const useStore = create<StoreState>()(
     const msgs = viewMsgs(s, sid);
     const msg = msgs[msgs.length - 1];
     if (!msg || msg.role !== "assistant") return;
+    // v3.3 补 9：screen_capture 完成 → 截图事件标记（ComputerUsePane 事件驱动刷新，无轮询）
+    if (ev.tool === "screen_capture") get().bumpScreenShots();
     // 收集 diff 输出 → 右侧面板（仅视图会话）
     if (sid === s.activeSessionId || !sid) {
       if (ev.tool === "git_diff" || /^diff --git/m.test(ev.summary)) {
@@ -1191,6 +1203,8 @@ export const useStore = create<StoreState>()(
   },
 
   setRunning: (r) => set((s) => patchRunning(s, s.activeSessionId, r)),
+  // v3.3 补 9：截图事件标记 +1（screen_capture tool-result 到达时调用；ComputerUsePane 事件驱动刷新）
+  bumpScreenShots: () => set((s) => ({ screenShotTick: s.screenShotTick + 1 })),
   // v2.13：abortController 按会话存（并行会话互相踩——stop 失效/停错对象修复）
   setAbortController: (c) =>
     set((s) => {

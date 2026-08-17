@@ -14,8 +14,12 @@ export default function ComputerUsePane() {
   const [shots, setShots] = useState<string[]>([]);
   const [viewing, setViewing] = useState<string | null>(null);
   const messages = useStore((s) => s.messages);
+  // v3.3 补 9：截图事件标记（screen_capture tool-result 到达 +1）+ 当前会话（切换会话也刷新）
+  const shotTick = useStore((s) => s.screenShotTick);
+  const activeSessionId = useStore((s) => s.activeSessionId);
 
-  // 实时扫描截图目录（每 2s；Agent 截图后自动出现）
+  // 「有截图才刷新」——无轮询：面板打开/会话切换/Agent 实际截屏（screen_capture 完成事件）时
+  // 各拉一次截图列表；没有截图就不做任何轮询（省资源）
   useEffect(() => {
     if (!desktop) return;
     let alive = true;
@@ -32,9 +36,8 @@ export default function ComputerUsePane() {
       } catch { /* 目录不存在/未就绪 */ }
     };
     scan();
-    const t = setInterval(scan, 2000);
-    return () => { alive = false; clearInterval(t); };
-  }, [desktop]);
+    return () => { alive = false; };
+  }, [desktop, shotTick, activeSessionId]);
 
   // 大图查看：Esc 关闭
   useEffect(() => {

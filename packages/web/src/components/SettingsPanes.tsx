@@ -12,7 +12,7 @@
 import { useEffect, useRef, useState } from "react";
 import {
   Plus, Trash2, Loader2, RefreshCw, ChevronDown, ChevronRight, Check, Blocks, Pencil,
-  Coins, MessageSquare, MessagesSquare, CalendarCheck, Flame, Sparkles,
+  Coins, MessageSquare, MessagesSquare, CalendarCheck, Flame, Sparkles, FolderOpen,
 } from "lucide-react";
 import {
   fetchMcpServers, addMcpServer, updateMcpServer, deleteMcpServer, probeMcpTools,
@@ -1371,11 +1371,16 @@ export function StatsPane() {
               <div className="text-sm font-semibold text-text">活跃热力图</div>
               <div className="mt-0.5 text-[11px] text-sub">方格颜色越深代表当日 Token 消耗越高</div>
             </div>
-            {/* 色阶图例（ZCode 同款：标题右侧横排 少→多） */}
+            {/* 色阶图例（ZCode 同款：标题右侧横排 少→多；v3.3 补 10：hover 显示各档 token 区间） */}
             <div className="flex shrink-0 items-center gap-1 pt-0.5 text-[10px] text-sub">
               <span className="mr-0.5">少</span>
-              {[0.15, 0.35, 0.55, 0.75, 0.95].map((a) => (
-                <span key={a} className="size-3.5 rounded-[4px] border border-line" style={{ background: `rgba(34,197,94,${a})` }} />
+              {[0.15, 0.35, 0.55, 0.75, 0.95].map((a, i) => (
+                <span
+                  key={a}
+                  className="size-3.5 cursor-default rounded-[4px] border border-line transition-transform hover:scale-125"
+                  style={{ background: `rgba(34,197,94,${a})` }}
+                  title={`当日 Token：${["1-5 万", "5-20 万", "20-50 万", "50 万+", "50 万+"][i]}`}
+                />
               ))}
               <span className="ml-0.5">多</span>
             </div>
@@ -1391,18 +1396,28 @@ export function StatsPane() {
               const HM_DAYS = 30;
               const now = new Date();
               const start = new Date(now.getFullYear(), now.getMonth(), now.getDate() - (HM_DAYS - 1));
-              const maxTok = Math.max(1, ...stats.dailyTrend.map((d) => d.tokens));
               const daysArr = Array.from({ length: HM_DAYS }, (_, i) => {
                 const d = new Date(start.getFullYear(), start.getMonth(), start.getDate() + i);
                 return { date: d, tokens: byDate.get(fmtDate(d)) ?? 0, row: (d.getDay() + 6) % 7 };
               });
-              // ZCode 同款 5 级色阶：按当日 token / 最大值离散分级
+              // v3.3 补 10：色阶改绝对档位（对齐主流用量直觉）——原实现是相对分级
+              // （当日/30 天窗口最大值），数据稀疏时单日 13.6 万就顶满最深色（用户反馈「才
+              // 13.6 万就满」）；主流大模型会话（1M 上下文）单日数十万 tokens 很常见，
+              // 改绝对区间：<5万=轻 / 5-20万=中 / 20-50万=较多 / >50万=重，不受数据密度影响
+              const LEVEL_STEPS: Array<[number, number]> = [
+                [1, 50_000],
+                [50_000, 200_000],
+                [200_000, 500_000],
+                [500_000, Infinity],
+              ];
               const levelBg = (tokens: number) => {
                 if (tokens <= 0) return null;
-                const lvl = Math.min(4, Math.ceil((tokens / maxTok) * 5) - 1);
-                return `rgba(34,197,94,${[0.15, 0.35, 0.55, 0.75, 0.95][lvl]})`;
+                const lvl = LEVEL_STEPS.findIndex(([lo, hi]) => tokens >= lo && tokens < hi);
+                return `rgba(34,197,94,${[0.15, 0.35, 0.55, 0.75, 0.95][lvl < 0 ? 0 : lvl]})`;
               };
-              return <HeatmapGrid days={daysArr} levelBg={levelBg} fmtDate={fmtDate} />;
+              // 图例 hover 档位说明（title 展示各档区间）
+              const LEVEL_HINTS = ["无", "1-5 万", "5-20 万", "20-50 万", "50 万+"];
+              return <HeatmapGrid days={daysArr} levelBg={levelBg} fmtDate={fmtDate} levelHints={LEVEL_HINTS} />;
             })()}
           </div>
         </div>
@@ -1527,10 +1542,12 @@ export function StatsPane() {
 
 /** 热力图矩阵（用户定稿：30 列 × 7 行铺满卡片——列 = 天（从左到右 = 旧 → 新，今天最右），
  *  行 = 星期几；左端星期标签；当天格子 = 数据格（绿色深浅 / 空框），同列其余 6 格 = 浅底占位） */
-function HeatmapGrid({ days, levelBg, fmtDate }: {
+function HeatmapGrid({ days, levelBg, fmtDate, levelHints }: {
   days: Array<{ date: Date; tokens: number; row: number }>;
   levelBg: (tokens: number) => string | null;
   fmtDate: (d: Date) => string;
+  /** v3.3 补 10：5 级档位文字（图例/格子 hover 提示；[无, 轻, 中, 较多, 重]） */
+  levelHints?: string[];
 }) {
   const weekdays = ["一", "二", "三", "四", "五", "六", "日"];
   return (
@@ -1570,6 +1587,143 @@ function HeatmapGrid({ days, levelBg, fmtDate }: {
 }
 
 // ─────────────────────────── 索引库 ───────────────────────────
+
+// ─────────────────────────── 数据存储（v3.5：根目录可选、内部结构固定） ───────────────────────────
+
+interface DataDirInfo {
+  dir: string;
+  default: string;
+  redirected: boolean;
+}
+
+/** 数据目录查看与迁移（对齐 ZCode「根目录可整体更换」）：
+ *  迁移 = 复制到目标（旧目录保留备份）→ 旧主目录留 ~/.infu-redirect.json 指针 → 进程内即刻生效；
+ *  内部结构（config.json/infu.db/projects/schedules/memory/skills/agents/plugins/logs）固定不可改。 */
+export function DataDirPane() {
+  const [info, setInfo] = useState<DataDirInfo | null>(null);
+  const [error, setError] = useState("");
+  const [notice, setNotice] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [manual, setManual] = useState("");
+  const [confirming, setConfirming] = useState(false);
+  const [pending, setPending] = useState("");
+
+  const load = () => {
+    apiFetch("/api/data-dir")
+      .then((r) => r.json())
+      .then((d) => setInfo(d as DataDirInfo))
+      .catch((e) => setError((e as Error).message));
+  };
+  useEffect(() => { load(); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, []);
+
+  const runMigrate = async (target: string) => {
+    setBusy(true); setError(""); setNotice(""); setConfirming(false);
+    try {
+      const r = await apiFetch("/api/data-dir", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ path: target }),
+      });
+      const res = (await r.json()) as { ok: boolean; message: string };
+      if (!r.ok || !res.ok) {
+        setError(res.message || "迁移失败");
+      } else {
+        setNotice(res.message);
+        setManual("");
+        await load();
+      }
+    } catch (e) { setError((e as Error).message); } finally { setBusy(false); }
+  };
+
+  const pickDesktop = async () => {
+    const d = window.infuDesktop;
+    if (!d?.selectPaths) return;
+    const dirs = await d.selectPaths({ directories: true });
+    if (dirs && dirs.length > 0) {
+      setPending(dirs[0]);
+      setConfirming(true);
+      setError("");
+    }
+  };
+
+  return (
+    <div>
+      <PaneError error={error} />
+      {notice && <div className="mb-2 rounded-md border border-accent/40 bg-accent/10 px-3 py-1.5 text-xs text-accent">{notice}</div>}
+      <div className="mb-3 rounded-lg border border-accent/30 bg-accent/5 px-3 py-2 text-[11px] leading-relaxed text-sub">
+        数据目录存放全部本地数据（配置 / 会话库 / 记忆 / 技能 / 插件 / 日志等）。迁移 = <span className="text-text">整体复制</span>
+        到新位置（旧目录保留为备份），此后所有进程从新位置读取；内部结构固定不可拆分。
+      </div>
+
+      <div className="rounded-lg border border-line bg-muted/30 p-3">
+        <div className="flex items-center justify-between gap-2">
+          <span className="text-xs font-semibold text-text">数据目录</span>
+          <span className={info?.redirected ? "rounded border border-warn/40 bg-warn/10 px-1.5 py-px text-[10px] text-warn" : "rounded border border-accent/40 bg-accent/10 px-1.5 py-px text-[10px] text-accent"}>
+            {info?.redirected ? "已迁移" : "默认位置"}
+          </span>
+        </div>
+        <div className="mt-2 break-all font-mono text-[11px] text-text">{info?.dir ?? "加载中…"}</div>
+        <div className="mt-1 text-[10px] text-sub/60">默认：{info?.default ?? "—"}</div>
+
+        <button
+          className="mt-3 flex h-8 cursor-pointer items-center gap-1 rounded-md border border-accent/50 bg-accent/10 px-3 text-xs text-accent transition-colors hover:bg-accent/20 disabled:opacity-50"
+          onClick={pickDesktop}
+          disabled={busy || !window.infuDesktop?.selectPaths}
+        >
+          {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <FolderOpen className="h-3.5 w-3.5" />}
+          选择新位置…
+        </button>
+      </div>
+
+      {!window.infuDesktop?.selectPaths && (
+        <div className="mt-3 rounded-lg border border-line bg-muted/30 p-3">
+          <div className="text-xs font-semibold text-text">手动输入路径（Web 版）</div>
+          <div className="mt-2 flex gap-2">
+            <input
+              className={inputCls}
+              placeholder="例如 D:\InFuData（须为空文件夹或不存在）"
+              value={manual}
+              onChange={(e) => setManual(e.target.value)}
+            />
+            <button
+              className="h-8 shrink-0 cursor-pointer rounded-md border border-accent/50 bg-accent/10 px-3 text-xs text-accent transition-colors hover:bg-accent/20 disabled:opacity-50"
+              disabled={busy || !manual.trim()}
+              onClick={() => { setPending(manual.trim()); setConfirming(true); setError(""); }}
+            >
+              迁移到此处
+            </button>
+          </div>
+        </div>
+      )}
+
+      {confirming && (
+        <div className="mt-3 rounded-lg border border-warn/40 bg-warn/10 p-3">
+          <div className="text-xs font-semibold text-text">确认迁移数据目录？</div>
+          <div className="mt-1 break-all font-mono text-[11px] text-text">{pending}</div>
+          <div className="mt-1.5 text-[11px] leading-relaxed text-sub">
+            将把当前数据目录整体复制到上述位置，旧目录完整保留（不删除任何数据）；复制完成后所有进程立即切换到新位置读取。
+          </div>
+          <div className="mt-2 flex gap-2">
+            <button
+              className="h-8 cursor-pointer rounded-md border border-danger/50 bg-danger-soft px-3 text-xs text-danger transition-colors hover:bg-danger-soft/70 disabled:opacity-50"
+              disabled={busy}
+              onClick={() => void runMigrate(pending)}
+            >
+              确认迁移
+            </button>
+            <button
+              className="h-8 cursor-pointer rounded-md border border-line px-3 text-xs text-sub transition-colors hover:text-text disabled:opacity-50"
+              disabled={busy}
+              onClick={() => { setConfirming(false); setPending(""); }}
+            >
+              取消
+            </button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
 
 export function IndexPane() {
   const [status, setStatus] = useState<IndexStatus | null>(null);

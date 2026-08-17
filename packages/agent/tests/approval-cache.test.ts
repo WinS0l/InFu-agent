@@ -6,6 +6,10 @@ import {
   approvalMemoryKey, approvalRemembered, approvalRemember,
   clearApprovalMemory, resetApprovalMemory, setSessionBypass, isSessionBypassed, clearSessionBypass,
 } from "../src/approval/cache.js";
+import { configPath, saveConfig } from "../src/providers/registry.js";
+import { existsSync, copyFileSync, rmSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
 import type { ToolContext, RiskLevel } from "@infu/shared";
 
 const SID = "test-session";
@@ -17,6 +21,15 @@ const ok = (name: string, cond: boolean) => {
 
 console.log("=== v3.1 审批记忆（approval/cache.ts）===");
 resetApprovalMemory();
+
+// v3.5 审计修复：guard 读当前 config 档位——此前测试隐式依赖用户真实配置
+// （用户设置 confirm 档时「low 在 smart 档自动放行」断言就挂）；改为文件级
+// 固定 smart 档（备份/恢复），guard 行为确定可测
+const CONFIG_FILE = configPath();
+const CONFIG_HAD = existsSync(CONFIG_FILE);
+const CONFIG_BACKUP = join(homedir(), ".infu", "config.json.approval-cache-test-backup");
+if (CONFIG_HAD) copyFileSync(CONFIG_FILE, CONFIG_BACKUP);
+saveConfig({ models: [], approvalPolicy: { mode: "smart" } });
 
 // ── 键生成 ──
 ok("命令类：run_command 按命令串为键（不拼风险前缀）", approvalMemoryKey("run_command", "medium", "执行命令：npm install") === "run_command|cmd|执行命令：npm install");
@@ -124,13 +137,26 @@ ok("清理后不命中", !approvalRemembered(SID, k));
   ok("bypass 后红线直接放行（无弹窗）", r1 === true && popups === 0);
   const r2 = await guard(ctx, "write_file", "medium", "写入文件：a.ts");
   ok("bypass 后普通审批也直接放行", r2 === true && popups === 0);
-  // 显式禁用工具仍拒绝（对齐 opencode 显式 deny 不覆盖）
-  const r3 = await guard(ctx, "write_file", "medium", "写入文件：b.ts");
-  ok("bypass 下普通工具仍放行", r3 === true);
+  // 显式禁用工具仍拒绝（对齐 opencode 显式 deny 不覆盖）——v3.5 审计修复：
+  // 原断言恒真（无任何禁用配置，名实不符）；改为注入真实禁用策略验证 guard 拦截
+  {
+    saveConfig({ models: [], approvalPolicy: { mode: "confirm", toolOverrides: [{ tool: "write_file", disabled: true }] } });
+    const r3 = await guard(ctx, "write_file", "medium", "写入文件：b.ts");
+    ok("bypass 开启时显式禁用工具仍拒绝（弹窗也不弹）", r3 === false && popups === 0);
+    saveConfig({ models: [], approvalPolicy: { mode: "smart" } });
+  }
   clearSessionBypass(SID);
   const r4 = await guard(ctx, "run_command", "high", "🌐 联网放行执行命令：curl x.com", true);
   ok("关闭后红线恢复弹窗", r4 === true && popups === 1);
   clearSessionBypass(SID);
+}
+
+// 恢复用户真实配置（v3.5 审计修复：文件级固定 smart 档的配套还原）
+if (CONFIG_HAD) {
+  copyFileSync(CONFIG_BACKUP, CONFIG_FILE);
+  rmSync(CONFIG_BACKUP, { force: true });
+} else {
+  rmSync(CONFIG_FILE, { force: true });
 }
 
 console.log(`\n=== 结果：${pass} 通过 / ${fail} 失败 ===`);

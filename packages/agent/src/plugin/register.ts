@@ -9,7 +9,7 @@ import { readFileSync, existsSync } from "node:fs";
 import { resolve } from "node:path";
 import type { InfuConfig, PluginConfig } from "@infu/shared";
 import { parseInfuConfig } from "@infu/shared";
-import { CONFIG_PATH, saveConfig } from "../providers/registry.js";
+import { configPath, saveConfig } from "../providers/registry.js";
 
 export interface RegisterPluginInput {
   id: string;
@@ -41,6 +41,7 @@ export function registerPlugin(input: RegisterPluginInput): RegisterPluginResult
 
 /** 读取配置（损坏/缺失返回空配置，不抛错；与 mcp/register.ts 同构） */
 export function readConfig(): InfuConfig {
+  const CONFIG_PATH = configPath();
   if (!existsSync(CONFIG_PATH)) return { models: [] };
   try {
     const r = parseInfuConfig(JSON.parse(readFileSync(CONFIG_PATH, "utf-8")));

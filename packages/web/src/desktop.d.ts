@@ -40,6 +40,9 @@ export interface InfuDesktopBridge {
   browserStop(): void;
   browserDevtools(): void;
   browserOpenExternal(url: string): void;
+  /** v3.5 修复：UI 视口（📄 预设/适应窗口）→ 主进程 CDP Emulation 同步（Agent 残留的
+   *  设备度量覆盖会被清除——此前「适应窗口」只改元素 CSS，内容仍按旧视口渲染） */
+  browserSetViewport(opts: { width?: number; height?: number; fit?: boolean }): Promise<void>;
   onOpenRequest(cb: (url: string | null) => void): () => void;
   onBrowserSelect(cb: (id: string) => void): () => void;
   onBrowserState(cb: (s: BrowserViewState) => void): () => void;

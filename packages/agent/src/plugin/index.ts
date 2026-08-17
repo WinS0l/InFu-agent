@@ -65,14 +65,16 @@ async function loadPluginModule(cfg: PluginConfig): Promise<PluginDef> {
 export async function loadPlugins(
   plugins: PluginConfig[] | undefined,
   emit: (e: AgentEvent) => void,
-  opts?: { mergeBuiltin?: boolean }
+  opts?: { mergeBuiltin?: boolean; builtinNames?: Iterable<string> }
 ): Promise<PluginLoadResult> {
   const tools: ToolDef[] = [];
   const hooks: PluginLoadResult["hooks"] = { preToolUse: [], postToolUse: [] };
   const perPlugin: PluginLoadResult["perPlugin"] = [];
   const failures: Array<{ id: string; message: string }> = [];
   const skillDirs: string[] = [];
-  const usedNames = new Set<string>();
+  // v3.4 审计修复（M3）：usedNames 预置内置工具名——插件定义 `read_file`/`run_command` 等
+  // 内置同名工具时合并层静默覆盖内置实现（投毒）。源头改名（加插件 id 前缀）防冲突。
+  const usedNames = new Set<string>(opts?.builtinNames ?? []);
 
   const effective = opts?.mergeBuiltin === false ? (plugins ?? []) : mergeBuiltinPlugins(plugins ?? []);
   for (const cfg of effective) {
@@ -112,6 +114,10 @@ export async function loadPlugins(
 /** 合并帮助：内置工具 + 插件/MCP 工具 */
 export function withPlugins(base: Record<string, ToolDef>, extra: ToolDef[]): Record<string, ToolDef> {
   const merged: Record<string, ToolDef> = { ...base };
-  for (const t of extra) merged[t.name] = t;
+  for (const t of extra) {
+    // v3.4 审计修复（M3）兜底：绝不静默覆盖内置工具（同名 → 改名前缀，功能保留不丢）
+    const name = merged[t.name] ? `ext_${t.name}` : t.name;
+    merged[name] = name === t.name ? t : { ...t, name, description: `[与内置工具重名，已自动改名 ${name}] ${t.description}` };
+  }
   return merged;
 }

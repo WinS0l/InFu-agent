@@ -11,12 +11,14 @@
 
 import { DatabaseSync } from "node:sqlite";
 import { mkdirSync } from "node:fs";
-import { homedir } from "node:os";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import type { AgentEvent, SessionMeta, SessionStatus, StoredEvent } from "@infu/shared";
+import { resolveDataDir } from "../data-dir.js";
 
-const DEFAULT_DB_PATH = join(homedir(), ".infu", "infu.db");
+function defaultDbPath(): string {
+  return join(resolveDataDir(), "infu.db");
+}
 
 /**
  * 历史回顾（继续会话时注入新 prompt）：用户消息序列 + 最后一次 plan/review/report 产出。
@@ -76,9 +78,15 @@ export function buildContinuationPrompt(summary: SessionSummary, newPrompt: stri
 export class SessionStore {
   private db: DatabaseSync;
 
-  constructor(dbPath: string = DEFAULT_DB_PATH) {
-    mkdirSync(join(homedir(), ".infu"), { recursive: true });
+  constructor(dbPath: string = defaultDbPath()) {
+    mkdirSync(join(resolveDataDir()), { recursive: true });
     this.db = new DatabaseSync(dbPath);
+    // v3.5 审计修复：WAL + busy_timeout——多进程（server/CLI/定时任务）并发写
+    // 此前 SQLITE_BUSY 直接抛错（读锁期间的写/写锁期间的读写）；WAL 让读写并行，
+    // busy_timeout 让瞬时锁等待而非报错（projects.json 已改原子写，这里同思路）
+    try {
+      this.db.exec(`PRAGMA journal_mode = WAL; PRAGMA busy_timeout = 5000;`);
+    } catch { /* 只读库（测试注入）忽略 */ }
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS sessions (
         id TEXT PRIMARY KEY,
@@ -434,6 +442,16 @@ let _store: SessionStore | null = null;
 export function getStore(): SessionStore {
   if (!_store) _store = new SessionStore();
   return _store;
+}
+
+/** v3.5：数据目录迁移后重连数据库（关闭旧连接，下次 getStore 按新指针重新打开） */
+export function resetStore(): void {
+  try {
+    _store?.close();
+  } catch {
+    /* 关闭失败忽略 */
+  }
+  _store = null;
 }
 
 function rowToMeta(row: Record<string, unknown>): SessionMeta {

@@ -93,11 +93,13 @@ console.log("▶ 会话生命周期（node-pty）");
   check("写入后捕获输出（echo 回显）", out.includes("pty-ok"), JSON.stringify(out.slice(0, 120)));
   unsubscribe();
 
-  // resize（不抛错）
-  resizeSession(s, 120, 30);
-  check("resize 不抛错", true);
-  resizeSession(s, 0, 0); // 非法尺寸忽略
-  check("非法 resize 忽略", true);
+  // resize（不抛错；v3.5 审计修复：原 `check(..., true)` 恒真假阳性 → try/catch 真实断言）
+  let resizeOk = true;
+  try { resizeSession(s, 120, 30); } catch { resizeOk = false; }
+  check("resize 不抛错", resizeOk);
+  let badResizeOk = true;
+  try { resizeSession(s, 0, 0); } catch { badResizeOk = false; } // 非法尺寸忽略
+  check("非法 resize 忽略", badResizeOk);
 
   // kill
   const ok = killTerminalSession(s.id);

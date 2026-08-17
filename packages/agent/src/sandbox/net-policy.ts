@@ -44,6 +44,10 @@ const EGRESS_TOOLS = [
   "iperf3",
   "lwp-request",
   "lwp-download",
+  // v3.5 审计修复（H7 收口）：PowerShell 别名 iwr/irm（Invoke-WebRequest/RestMethod
+  // 的最短写法，此前 `iwr http://x` 完全绕过断网策略）
+  "iwr",
+  "irm",
 ];
 
 /** 语言/脚本网络调用的高置信组合（避免单个工具名误报） */
@@ -52,6 +56,10 @@ const EGRESS_PATTERNS: RegExp[] = [
   /(powershell|pwsh).{0,120}(Invoke-WebRequest|Invoke-RestMethod|DownloadFile|DownloadString|Net\.WebClient|WebRequest|Start-BitsTransfer|System\.Net\.Sockets|curl|wget)/i,
   /(python|python3|py)(\s+-c|\s+-m\s+http|\s+[a-zA-Z_]+\.py).{0,120}(urllib|requests|http\.client|socket|ftplib|paramiko)/i,
   /(node|npx|deno|bun).{0,120}(\bhttps?\b|\bnet\b|\bhttp\b|\bws\b)\.(get|request|createConnection|connect)/i,
+  // v3.5 审计修复（H7）：裸 fetch( / Invoke-* 全称无前缀组合（node fetch 全局 /
+  // PS 全名与别名无 powershell 前缀的直呼写法）——断网策略保守侧（echo 类文本命中可接受）
+  /fetch\s*\(/i,
+  /\b(Invoke-WebRequest|Invoke-RestMethod|Start-BitsTransfer)\b/i,
   // Windows 内置下载/外传通道（v3.1 补全）
   /certutil\s+-(urlcache|decode\s+-f|download)/i,
   /bitsadmin\s+\/transfer/i,

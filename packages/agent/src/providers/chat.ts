@@ -148,10 +148,14 @@ async function* requestOnce(opts: {
   // v3.0 审计修复（B3）：原 timeoutMs 为「总时长」——长输出任务（长文/思考链）中途无
   // 数据也正常，总时长会误杀已开始的流；改「空闲超时」——每次收到数据帧重置计时，
   // 只有长时间无任何数据（服务端挂起/连接死掉）才中止
+  // v3.5 补：首字节超时——服务端挂起（connect 成功但无任何数据帧）不再死等空闲超时
+  // 300s；60s 内无首个数据帧即中止 → 触发外层重试链（前端状态行可见「正在重试」倒计时）
   let timer: NodeJS.Timeout | undefined;
+  let gotData = false;
+  const firstByteMs = Math.min(timeoutMs, 60000);
   const resetIdle = () => {
     clearTimeout(timer);
-    timer = setTimeout(() => controller.abort(), timeoutMs);
+    timer = setTimeout(() => controller.abort(), gotData ? timeoutMs : firstByteMs);
   };
   resetIdle();
 
@@ -182,7 +186,12 @@ async function* requestOnce(opts: {
         throw new ModelApiError("任务已停止（用户中止）", { retryable: false });
       }
       if (controller.signal.aborted) {
-        throw new ModelApiError(`模型 API 请求超时（${timeoutMs}ms）`, { retryable: true });
+        throw new ModelApiError(
+          gotData
+            ? `模型 API 响应中断（${timeoutMs}ms 无数据）`
+            : `模型 API 等待响应超时（${firstByteMs}ms 内无任何数据，连接可能挂起）`,
+          { retryable: true }
+        );
       }
       throw new ModelApiError(`模型 API 网络请求失败：${(e as Error).message}`, { retryable: true });
     }
@@ -211,7 +220,8 @@ async function* requestOnce(opts: {
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
-        // v3.0 审计修复（B3）：收到数据帧 → 重置空闲计时
+        // v3.0 审计修复（B3）：收到数据帧 → 重置空闲计时；v3.5：首个数据帧后进入空闲计时
+        gotData = true;
         resetIdle();
         buf += decoder.decode(value, { stream: true });
 

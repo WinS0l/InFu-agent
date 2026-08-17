@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
-import { Monitor, MonitorUp, MousePointerClick, Keyboard, X, Move, AppWindow } from "lucide-react";
+import { Monitor, MonitorUp, MousePointerClick, Keyboard, X, Move, AppWindow, ImageOff } from "lucide-react";
 import { useStore } from "../store";
-import { apiFetch } from "../api";
+import { apiFetch, apiUrl } from "../api";
 
 /**
  * computer-use 面板（v3.0 批 11：vision 底座 UI 落地）
@@ -135,7 +135,9 @@ export default function ComputerUsePane() {
                 onClick={() => setViewing(name)}
                 title={name}
               >
-                <img src={`/api/screenshots/file?root=${encodeURIComponent(useStore.getState().root)}&name=${encodeURIComponent(name)}`} className="h-20 w-full object-cover" alt={name} />
+                {/* v3.4 审计修复：apiUrl 拼 token query（生产模式裸 /api 被本地令牌 401——
+                    此前桌面打包版截图预览全部失效）；加载失败显示占位，不挂空图 */}
+                <ScreenshotThumb name={name} root={useStore.getState().root} />
                 <div className="truncate px-1.5 py-0.5 text-[10px] text-caption">{name.replace(/^screen-/, "").replace(/\.png$/, "")}</div>
               </button>
             ))}
@@ -157,12 +159,34 @@ export default function ComputerUsePane() {
             <X className="h-5 w-5" />
           </button>
           <img
-            src={`/api/screenshots/file?root=${encodeURIComponent(useStore.getState().root)}&name=${encodeURIComponent(viewing)}`}
+            src={apiUrl(`/api/screenshots/file?root=${encodeURIComponent(useStore.getState().root)}&name=${encodeURIComponent(viewing)}`)}
             className="max-h-full max-w-full rounded-xl border border-line shadow-lv3"
             alt={viewing}
+            onError={(e) => { (e.currentTarget as HTMLImageElement).style.display = "none"; }}
           />
         </div>
       )}
     </div>
+  );
+}
+
+/** 截图缩略图（加载失败显示占位图标——此前裸 /api img 失败时显示破图/空框） */
+function ScreenshotThumb({ name, root }: { name: string; root: string }) {
+  const [err, setErr] = useState(false);
+  if (err) {
+    return (
+      <div className="flex h-20 w-full items-center justify-center bg-hover/40">
+        <ImageOff className="h-5 w-5 text-caption" />
+      </div>
+    );
+  }
+  return (
+    <img
+      src={apiUrl(`/api/screenshots/file?root=${encodeURIComponent(root)}&name=${encodeURIComponent(name)}`)}
+      className="h-20 w-full object-cover"
+      alt={name}
+      loading="lazy"
+      onError={() => setErr(true)}
+    />
   );
 }

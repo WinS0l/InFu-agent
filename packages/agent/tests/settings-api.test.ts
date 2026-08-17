@@ -11,7 +11,7 @@
  *  - 落盘验证：读回 config.json 断言（备份/恢复用户配置）
  */
 import { createApp } from "../src/server.js";
-import { CONFIG_PATH, loadConfig, saveConfig } from "../src/providers/registry.js";
+import { configPath, loadConfig, saveConfig } from "../src/providers/registry.js";
 import { readFileSync, existsSync, copyFileSync, rmSync, mkdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -26,7 +26,7 @@ function check(name: string, cond: boolean, detail = "") {
 console.log("\n=== 设置 API 自测（v2.4）===\n");
 
 // 备份/恢复用户配置（与 mcp.test.ts 同模式）；测试期间从干净配置开始
-const CONFIG = CONFIG_PATH;
+const CONFIG = configPath();
 const had = existsSync(CONFIG);
 const backup = join(homedir(), ".infu", "config.json.settings-test-backup");
 if (had) copyFileSync(CONFIG, backup);

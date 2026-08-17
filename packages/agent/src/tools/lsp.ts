@@ -19,17 +19,32 @@ export interface LspDiagnostic {
 }
 
 const _require = createRequire(import.meta.url);
-const TS_SERVER = _require.resolve("typescript/bin/tsserver");
+// v3.4 审计修复（M5）：typescript 仅 devDependency——模块顶层 require.resolve 会让
+// 生产安装（--omit=dev）import 本模块即抛 MODULE_NOT_FOUND 导致整个 agent 无法启动。
+// 改为惰性解析 + 失败标记「LSP 不可用」（空串），不阻塞其他工具。
+let TS_SERVER: string | null = null; // null=未探测 | ""=不可用 | 路径=可用
+function resolveTsserver(): string | null {
+  if (TS_SERVER === null) {
+    try {
+      TS_SERVER = _require.resolve("typescript/bin/tsserver");
+    } catch {
+      TS_SERVER = ""; // 生产安装无 typescript → LSP 诊断不可用（工具返回提示）
+    }
+  }
+  return TS_SERVER || null;
+}
 
 /** 一次性 tsserver 会话：诊断单文件（返回 error/warning 列表） */
 export function lspDiagnoseFile(fileAbs: string, timeoutMs = 20000): Promise<LspDiagnostic[]> {
   return new Promise((resolvePromise) => {
+    const tsServer = resolveTsserver();
+    if (!tsServer) return resolvePromise([]); // 无 typescript（生产裁剪安装）→ 静默不可用
     if (!existsSync(fileAbs)) return resolvePromise([]);
     if (!/\.(ts|tsx|js|jsx)$/.test(fileAbs)) return resolvePromise([]); // 仅 TS/JS
 
     let proc;
     try {
-      proc = spawn(process.execPath, [TS_SERVER, "--stdio"], {
+      proc = spawn(process.execPath, [tsServer, "--stdio"], {
         stdio: ["pipe", "pipe", "pipe"],
         windowsHide: true,
       });

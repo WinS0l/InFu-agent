@@ -9,6 +9,8 @@ import { makeApprovalHandler } from "./agent/loop.js";
 import { runOrchestratedTask } from "./agent/orchestrator.js";
 import { getStore } from "./db/store.js";
 import { closeShellSession } from "./tools/persistent-shell.js";
+import { clearObservedFiles } from "./tools/index.js";
+import { clearApprovalMemory, clearSessionBypass } from "./approval/cache.js";
 import type { ScheduleEntry } from "./schedule.js";
 
 /** 无人值守审批：等价 CLI -y（low/medium 批准；requireExplicit 拒绝） */
@@ -52,5 +54,10 @@ export async function runScheduledTask(entry: ScheduleEntry): Promise<{ ok: bool
   } finally {
     // v3.0 审计修复（S3）：任务结束关闭持久 shell 会话
     try { closeShellSession(sessionId); } catch { /* 忽略 */ }
+    // v3.4 审计修复：补全会话级清理（与服务端任务结束对齐——文件观察/已批准记忆/全权放行
+    // 不泄漏到下一次定时执行；服务常驻期间定时任务可能跑很多轮）
+    try { clearObservedFiles(sessionId); } catch { /* 忽略 */ }
+    try { clearApprovalMemory(sessionId); } catch { /* 忽略 */ }
+    try { clearSessionBypass(sessionId); } catch { /* 忽略 */ }
   }
 }

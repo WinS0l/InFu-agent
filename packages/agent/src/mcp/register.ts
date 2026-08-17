@@ -13,7 +13,7 @@
 import { readFileSync, existsSync } from "node:fs";
 import type { InfuConfig, McpServerConfig, RiskLevel } from "@infu/shared";
 import { parseInfuConfig } from "@infu/shared";
-import { CONFIG_PATH, saveConfig } from "../providers/registry.js";
+import { configPath, saveConfig } from "../providers/registry.js";
 
 export interface RegisterInput {
   name: string;
@@ -77,6 +77,7 @@ export function registerMcpServer(input: RegisterInput): RegisterResult {
 
 /** 读取配置（损坏/缺失时返回空配置，不抛错；与 server/cli 的 readConfigRaw 同构） */
 export function readConfig(): InfuConfig {
+  const CONFIG_PATH = configPath();
   if (!existsSync(CONFIG_PATH)) return { models: [] };
   try {
     const r = parseInfuConfig(JSON.parse(readFileSync(CONFIG_PATH, "utf-8")));

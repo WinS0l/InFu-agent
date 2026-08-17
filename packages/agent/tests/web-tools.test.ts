@@ -4,6 +4,10 @@
  */
 import { TOOLS } from "../src/tools/index.js";
 import { htmlToText } from "../src/tools/web.js";
+import { configPath, saveConfig } from "../src/providers/registry.js";
+import { existsSync, copyFileSync, rmSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
 import { createServer, type Server } from "node:http";
 import type { ToolContext, AgentEvent } from "@infu/shared";
 
@@ -13,6 +17,14 @@ function check(name: string, cond: boolean, detail = "") {
   if (cond) { passed++; console.log(`  ✅ ${name}`); }
   else { failed++; console.log(`  ❌ ${name} ${detail}`); }
 }
+
+// v3.5 审计修复：固定 smart 档（备份/恢复）——「只读联网 low 自动放行」断言依赖档位，
+// 用户真实配置为 confirm 时 webfetch 靠已批准记忆侥幸通过、web_search 无记忆则被拒（假阴性）
+const CONFIG_FILE = configPath();
+const CONFIG_HAD = existsSync(CONFIG_FILE);
+const CONFIG_BACKUP = join(homedir(), ".infu", "config.json.web-tools-test-backup");
+if (CONFIG_HAD) copyFileSync(CONFIG_FILE, CONFIG_BACKUP);
+saveConfig({ models: [], approvalPolicy: { mode: "smart" } });
 
 // ── 本地 HTTP 服务器（webfetch 目标）──
 // v2.13：SSRF 防护默认拦截本地地址——测试场景显式豁免（仅本套件；生产默认不设）
@@ -80,5 +92,12 @@ const ws = await run("web_search", { query: "infu" });
 check("web_search 返回合理结果", typeof ws === "string" && (ws.includes("搜索结果") || ws.includes("失败") || ws.includes("未找到")), ws);
 
 server.close();
+// 恢复用户真实配置
+if (CONFIG_HAD) {
+  copyFileSync(CONFIG_BACKUP, CONFIG_FILE);
+  rmSync(CONFIG_BACKUP, { force: true });
+} else {
+  rmSync(CONFIG_FILE, { force: true });
+}
 console.log(`\n=== 结果：${passed} 通过 / ${failed} 失败 ===`);
 process.exit(failed ? 1 : 0);

@@ -16,13 +16,13 @@ import { useEffect, useRef, useState } from "react";
 import {
   X, Check, Palette, Cpu, SlidersHorizontal, Loader2, ChevronDown, Terminal,
   Blocks, Database, BarChart3, BrainCircuit, Bot, Globe, Plug, Trash2, Plus,
-  Moon, Sun, MonitorCog, FolderSearch, BookOpen, Workflow,
-  Clock,
+  Moon, Sun, MonitorCog, FolderSearch, BookOpen, Workflow, Folder,
+  Clock, ShieldAlert, Scale, ShieldCheck, AlertTriangle,
 } from "lucide-react";
 import type { RiskLevel } from "@infu/shared";
 import { useStore, type SettingsTab } from "../store";
 import { fetchConfig, updateConfig, apiFetch, type ApprovalMode, type SettingsConfig, type ToolRiskOverrideInput } from "../api";
-import { McpPane, PluginsPane, SkillsPane, AgentsPane, HooksPane, BrowserPane, MemoryPane, StatsPane, IndexPane, SchedulePane } from "./SettingsPanes";
+import { McpPane, PluginsPane, SkillsPane, AgentsPane, HooksPane, BrowserPane, MemoryPane, StatsPane, IndexPane, SchedulePane, DataDirPane } from "./SettingsPanes";
 import ModelPane from "./ModelPane";
 import { Toggle, CapsuleButton } from "./ui";
 
@@ -32,11 +32,14 @@ interface Props {
   initialTab?: SettingsTab;
 }
 
-/** 权限档位说明 */
-const MODE_META: Record<ApprovalMode, { label: string; desc: string }> = {
-  auto: { label: "全自动", desc: "非人工必需场景全部自动放行（等价 CLI -y）。联网放行/自注册等安全线仍需人工确认" },
-  smart: { label: "智能（默认）", desc: "低风险自动放行，中/高风险人工确认" },
-  confirm: { label: "全部确认", desc: "所有风险等级（含低风险）都弹窗人工确认，最安全" },
+/** 权限档位说明（图标与 composer 下拉一致：full = 红色警示三角——一切审批自动放行） */
+const MODE_META: Record<ApprovalMode, { label: string; desc: string; icon: typeof Scale; iconCls: string }> = {
+  auto: { label: "全自动", desc: "非人工必需场景全部自动放行（等价 CLI -y）。联网放行/自注册等安全线仍需人工确认", icon: ShieldAlert, iconCls: "text-warn" },
+  smart: { label: "智能（默认）", desc: "低风险自动放行，中/高风险人工确认", icon: Scale, iconCls: "text-sub" },
+  confirm: { label: "全部确认", desc: "所有风险等级（含低风险）都弹窗人工确认，最安全", icon: ShieldCheck, iconCls: "text-sub" },
+  // v3.5：最大权限档（对齐 Codex 完全信任 / harness danger-full-access）——所有审批自动放行，
+  // 含联网/自注册等安全红线；仅剩硬闸（显式禁用工具/受保护路径/断网策略/路径作用域）仍拦截
+  full: { label: "全权放行", desc: "完全信任 Agent：一切审批（含安全红线）自动放行，零弹窗。仅显式禁用工具/受保护路径仍拦截。审计照常记录", icon: AlertTriangle, iconCls: "text-danger" },
 };
 
 /** 沙箱档位说明 */
@@ -87,6 +90,7 @@ const NAV_GROUPS: Array<{ label: string; items: Array<{ id: SettingsTab; label: 
   {
     label: "数据与统计",
     items: [
+      { id: "datadir", label: "数据存储", icon: Folder },
       { id: "index", label: "索引库", icon: Database },
       { id: "stats", label: "使用统计", icon: BarChart3 },
     ],
@@ -250,6 +254,8 @@ export default function SettingsModal({ onClose, initialTab = "general" }: Props
         defaultModelId: cfg.defaultModelId,
       });
       setAppearance({ fontSize, streamCursor, theme });
+      // v3.5 补：设置保存后同步全局审批档位——composer 下拉与设置「命令」Tab 双向联动
+      useStore.getState().setApprovalMode(cfg.approvalPolicy.mode ?? "smart");
       // v3 修复：仅当 root 为空时应用默认根目录
       if (general.defaultRoot && !root) setRoot(general.defaultRoot);
       setSaved(true);
@@ -395,6 +401,63 @@ export default function SettingsModal({ onClose, initialTab = "general" }: Props
                   </div>
                   <div className="text-xs text-sub">仅桌面版生效；Web 版无此能力</div>
                 </div>
+                {/* v3.5 常规设置（对齐 ZCode 常规设置项） */}
+                <div className="space-y-2.5">
+                  <Label text="任务与通知" hint="Agent 任务相关行为（写入 config.general 节）" />
+                  {[
+                    { key: "taskNotifications" as const, label: "任务完成通知", desc: "任务完成/失败时发送系统通知（仅桌面版；Web 版无系统通知能力）" },
+                    { key: "notificationSound" as const, label: "通知声音", desc: "通知同时播放系统提示音" },
+                    { key: "autoContinueQuestions" as const, label: "提问自动继续", desc: "Agent 提问 5 分钟未回答自动继续执行；关闭 = 一直等待你的回答（可随时中止任务）" },
+                    { key: "showThinking" as const, label: "显示思考过程", desc: "对话流中显示模型思考折叠行（点击即时生效）" },
+                    { key: "showTodos" as const, label: "显示待办列表", desc: "对话输入框上方显示任务清单面板（点击即时生效）" },
+                    { key: "autoArchive" as const, label: "自动归档旧会话", desc: "超过保留期的会话自动移入归档（不删除；侧栏「归档」可恢复）" },
+                  ].map(({ key, label, desc }) => (
+                    <div key={key} className="flex items-center justify-between gap-3 rounded-xl border border-line bg-elevated px-3 py-2.5">
+                      <div className="min-w-0">
+                        <div className="text-[13px] font-medium text-text">{label}</div>
+                        <div className="mt-0.5 text-xs leading-4 text-sub">{desc}</div>
+                      </div>
+                      <Toggle
+                        checked={general[key] === true}
+                        onChange={(v) => {
+                          patch({ general: { ...general, [key]: v } });
+                          if (key === "showThinking" || key === "showTodos") {
+                            useStore.getState().setUiFlags({ showThinking: key === "showThinking" ? v : undefined, showTodos: key === "showTodos" ? v : undefined });
+                          }
+                        }}
+                        title={general[key] === true ? "已开启" : "未开启（默认）"}
+                      />
+                    </div>
+                  ))}
+                  {general.autoArchive === true && (
+                    <div className="flex items-center justify-between gap-3 rounded-xl border border-line bg-elevated px-3 py-2.5">
+                      <div className="min-w-0">
+                        <div className="text-[13px] font-medium text-text">归档保留期</div>
+                        <div className="mt-0.5 text-xs leading-4 text-sub">N 天前未活动的会话自动归档（默认 7 天）</div>
+                      </div>
+                      <input
+                        type="number"
+                        min={1}
+                        max={365}
+                        className={`${inputCls} w-24`}
+                        value={general.archiveRetentionDays ?? 7}
+                        onChange={(e) => patch({ general: { ...general, archiveRetentionDays: Math.max(1, Math.min(365, Number(e.target.value) || 7)) } })}
+                      />
+                    </div>
+                  )}
+                  {[
+                    { key: "closeToTray" as const, label: "关闭到托盘", desc: "点击窗口关闭按钮时最小化到系统托盘而非退出（仅桌面版；托盘菜单可退出）" },
+                    { key: "preventSleep" as const, label: "运行中防休眠", desc: "Agent 任务运行时阻止系统进入睡眠（仅桌面版）" },
+                  ].map(({ key, label, desc }) => (
+                    <div key={key} className="flex items-center justify-between gap-3 rounded-xl border border-line bg-elevated px-3 py-2.5">
+                      <div className="min-w-0">
+                        <div className="text-[13px] font-medium text-text">{label}</div>
+                        <div className="mt-0.5 text-xs leading-4 text-sub">{desc}</div>
+                      </div>
+                      <Toggle checked={general[key] === true} onChange={(v) => patch({ general: { ...general, [key]: v } })} title={general[key] === true ? "已开启" : "未开启（默认）"} />
+                    </div>
+                  ))}
+                </div>
                 <div className="space-y-2">
                   <Label text="默认模型" />
                   {/* v3.0 批 12：原生 select → 自定义下拉（与设置内其他下拉一致的面板样式） */}
@@ -491,6 +554,7 @@ export default function SettingsModal({ onClose, initialTab = "general" }: Props
             {tab === "browser" && <BrowserPane />}
             {tab === "memory" && <MemoryPane />}
             {tab === "stats" && <StatsPane />}
+            {tab === "datadir" && <DataDirPane />}
             {tab === "index" && <IndexPane />}
             {tab === "schedule" && <SchedulePane />}
 
@@ -554,22 +618,26 @@ export default function SettingsModal({ onClose, initialTab = "general" }: Props
 
                 <div className="space-y-2">
                   <Label text="全局审批档位" />
-                  <div className="grid grid-cols-3 gap-2">
-                    {(Object.keys(MODE_META) as ApprovalMode[]).map((m) => (
-                      <button
-                        key={m}
-                        className={`cursor-pointer rounded-xl border p-3 text-left transition-colors ${
-                          policyMode === m ? "border-line bg-hover" : "border-line bg-elevated hover:bg-hover/60"
-                        }`}
-                        onClick={() => patchPolicy({ mode: m })}
-                      >
-                        <div className="flex items-center gap-1.5 text-[13px] font-medium text-text">
-                          <span className={`h-2 w-2 rounded-full ${policyMode === m ? "bg-primary" : "bg-sub/50"}`} />
-                          {MODE_META[m].label}
-                        </div>
-                        <div className="mt-1 text-xs leading-5 text-sub">{MODE_META[m].desc}</div>
-                      </button>
-                    ))}
+                  <div className="grid grid-cols-2 gap-2">
+                    {(Object.keys(MODE_META) as ApprovalMode[]).map((m) => {
+                      const ModeIcon = MODE_META[m].icon;
+                      return (
+                        <button
+                          key={m}
+                          className={`cursor-pointer rounded-xl border p-3 text-left transition-colors ${
+                            policyMode === m ? "border-line bg-hover" : "border-line bg-elevated hover:bg-hover/60"
+                          }`}
+                          onClick={() => patchPolicy({ mode: m })}
+                        >
+                          <div className="flex items-center gap-1.5 text-[13px] font-medium text-text">
+                            <span className={`h-2 w-2 rounded-full ${policyMode === m ? (m === "full" ? "bg-danger" : "bg-primary") : "bg-sub/50"}`} />
+                            <ModeIcon className={`h-4 w-4 shrink-0 ${MODE_META[m].iconCls}`} />
+                            {MODE_META[m].label}
+                          </div>
+                          <div className="mt-1 text-xs leading-5 text-sub">{MODE_META[m].desc}</div>
+                        </button>
+                      );
+                    })}
                   </div>
                 </div>
 

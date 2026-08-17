@@ -21,27 +21,35 @@ export default function ApprovalModal() {
   const resolveAllApprovals = useStore((s) => s.resolveAllApprovals);
   const activeSessionId = useStore((s) => s.activeSessionId);
   const setBypassFor = useStore((s) => s.setBypassFor);
-  const bypassActive = useStore((s) => (activeSessionId ? s.bypassBySession[activeSessionId] === true : false));
-
-  const approval = approvals[0]; // 队列头部，处理完自动显示下一个
+  const addError = useStore((s) => s.addError);
+  // v3.5 审计修复：弹窗只展示/处理**当前会话**的审批（多会话并行时后台会话的
+  // 审批不再混入队列被误处理；其服务端挂起项会在该任务结束时自动清理）
+  const mine = approvals.filter((a) => !activeSessionId || a.sessionId === activeSessionId);
+  const approval = mine[0]; // 队列头部，处理完自动显示下一个
+  // v3.5 修复：bypass 按审批所属会话（多会话并行/后台会话审批时不再错会话）
+  const approvalSid = approval?.sessionId ?? activeSessionId ?? "";
+  const bypassActive = useStore((s) => (approvalSid ? s.bypassBySession[approvalSid] === true : false));
   if (!approval) return null;
 
   const meta = RISK_META[approval.risk] ?? RISK_META.medium;
   const { Icon, label, cls } = meta;
-  const queued = approvals.length - 1;
+  const queued = mine.length - 1;
 
   /** 开启/关闭本会话全权放行（开启时当前积压审批一并全部批准） */
   const toggleBypass = async () => {
-    const sid = activeSessionId;
-    if (!sid) return;
-    const next = !bypassActive;
-    try {
-      await setApprovalBypass(sid, next);
-      setBypassFor(sid, next);
-    } catch {
+    if (!approvalSid) {
+      addError("无法确定审批所属会话，跳过全权放行");
       return;
     }
-    if (next && approvals.length > 0) resolveAllApprovals(true);
+    const next = !bypassActive;
+    try {
+      await setApprovalBypass(approvalSid, next);
+      setBypassFor(approvalSid, next);
+    } catch (e) {
+      addError(`全权放行开关失败：${(e as Error).message ?? String(e)}`);
+      return;
+    }
+    if (next && mine.length > 0) resolveAllApprovals(true);
   };
 
   return (
@@ -64,7 +72,7 @@ export default function ApprovalModal() {
           </CapsuleButton>
           {queued > 0 && (
             <CapsuleButton variant="ghost" size="md" onClick={() => resolveAllApprovals(false)}>
-              全部拒绝（{approvals.length}）
+              全部拒绝（{mine.length}）
             </CapsuleButton>
           )}
           <CapsuleButton variant="danger" size="md" onClick={() => resolveApproval(false)}>
@@ -72,7 +80,7 @@ export default function ApprovalModal() {
           </CapsuleButton>
           {queued > 0 && (
             <CapsuleButton variant="primary" size="md" onClick={() => resolveAllApprovals(true)}>
-              全部允许（{approvals.length}）
+              全部允许（{mine.length}）
             </CapsuleButton>
           )}
           <CapsuleButton variant="primary" size="md" onClick={() => resolveApproval(true)}>
@@ -92,7 +100,7 @@ export default function ApprovalModal() {
         InFu 将执行此操作。请确认操作对象与目标路径无误后再允许。
         {queued > 0 && (
           <>
-            {" 当前共 " + approvals.length + " 项待处理（Agent 并行发起的多个请求）——可用「全部允许/全部拒绝」一次处理。"}
+            {" 当前共 " + mine.length + " 项待处理（Agent 并行发起的多个请求）——可用「全部允许/全部拒绝」一次处理。"}
           </>
         )}
       </div>

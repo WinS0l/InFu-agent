@@ -17,14 +17,14 @@ import { createServer, type IncomingMessage, type ServerResponse } from "node:ht
 import { Readable } from "node:stream";
 import { appendFileSync, mkdirSync, writeFileSync, readFileSync, existsSync, statSync, readdirSync } from "node:fs";
 import * as fs from "node:fs";
-import { homedir } from "node:os";
 import { join, dirname } from "node:path";
 import { inflateRawSync } from "node:zlib";
 import path from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import type { ModelConfig, AgentEvent, RiskLevel, InfuConfig, PhaseId, ProviderConfig, SessionMeta, AttachmentMeta } from "@infu/shared";
-import { loadConfig, saveConfig, resolveFallbackModels, resolveRoleModel, resolveRoleThinking, toRuntimeModel, resolveBaseURL, CONFIG_PATH } from "./providers/registry.js";
+import { loadConfig, saveConfig, resolveFallbackModels, resolveRoleModel, resolveRoleThinking, toRuntimeModel, resolveBaseURL, configPath } from "./providers/registry.js";
+import { resolveDataDir, defaultDataDir, migrateDataDir } from "./data-dir.js";
 import { autoNameSession } from "./session-naming.js";
 import { parseInfuConfig, approvalPolicySchema, sandboxConfigSchema, generalConfigSchema, appearanceConfigSchema, browserConfigSchema, memoryConfigSchema } from "@infu/shared";
 import { TOOLS, clearObservedFiles } from "./tools/index.js";
@@ -47,11 +47,11 @@ import { abortBackgroundAgentsByDepth } from "./agent/subagent.js";
 import { abortJobsByDepth } from "./tools/jobs.js";
 import { closeShellSession } from "./tools/persistent-shell.js";
 import { TASK_TEMPLATES } from "./templates.js";
-import { getStore } from "./db/store.js";
+import { getStore, resetStore } from "./db/store.js";
 import { rebuildMessages } from "./db/rebuild.js";
 import type { ChatMessageLike } from "./providers/chat.js";
 import { resolveApprovalPolicy, shouldAutoApprove } from "./approval/policy.js";
-import { dockerAvailable } from "./sandbox/index.js";
+import { dockerAvailable, maybeRotateLog } from "./sandbox/index.js";
 import { winRestrictedAvailable } from "./sandbox/win-restricted.js";
 import {
   createTerminalSession, getTerminalSession, subscribeOutput, writeInput, resizeSession,
@@ -79,6 +79,7 @@ async function isGitRepo(root: string): Promise<boolean> {
 
 /** 读取配置（损坏/缺失返回空配置；写入统一走 registry.saveConfig） */
 function readConfigRaw(): InfuConfig {
+  const CONFIG_PATH = configPath();
   if (!existsSync(CONFIG_PATH)) return { models: [] };
   try {
     const r = parseInfuConfig(JSON.parse(readFileSync(CONFIG_PATH, "utf-8")));
@@ -88,11 +89,15 @@ function readConfigRaw(): InfuConfig {
   }
 }
 
-// ── 后台运行日志（服务窗口实时打印 + 落盘 ~/.infu/logs/agent.log）──
-const LOG_DIR = join(homedir(), ".infu", "logs");
-const LOG_FILE = join(LOG_DIR, "agent.log");
+// ── 后台运行日志（服务窗口实时打印 + 落盘 <dataDir>/logs/agent.log）──
+function logDir(): string {
+  return join(resolveDataDir(), "logs");
+}
+function logFile(): string {
+  return join(logDir(), "agent.log");
+}
 function ensureLogDir() {
-  try { mkdirSync(LOG_DIR, { recursive: true }); } catch { /* 忽略 */ }
+  try { mkdirSync(logDir(), { recursive: true }); } catch { /* 忽略 */ }
 }
 
 function logEvent(e: AgentEvent) {
@@ -110,7 +115,9 @@ function logEvent(e: AgentEvent) {
   console.log(line);
   try {
     ensureLogDir();
-    appendFileSync(LOG_FILE, line + "\n", "utf-8");
+    // v3.5 数据生命周期：日志轮转（>5MB 滚动保留 3 份）——此前 agent.log 无限增长
+    maybeRotateLog(logFile());
+    appendFileSync(logFile(), line + "\n", "utf-8");
   } catch { /* 日志失败不影响主流程 */ }
 }
 
@@ -123,6 +130,11 @@ export interface ServerOptions {
   staticDir?: string;
   /** 监听成功回调（桌面端拿实际端口加载主窗口；端口冲突自动递增后回调真实端口） */
   onListening?: (port: number) => void;
+  /**
+   * v3.5 事件钩子（桌面端任务完成通知/防休眠用）：Agent 会话每个事件（含 done/error）
+   * 都回调一次（已落库之后）；sessionId 为当前会话。桌面端据此发系统通知 / 释放防休眠。
+   */
+  onEvent?: (sessionId: string, event: import("@infu/shared").AgentEvent) => void;
 }
 
 /**
@@ -236,17 +248,21 @@ export function createApp(opts: ServerOptions = {}) {
   });
   if (localToken) {
     app.use("/api/*", async (c, next) => {
-      if (c.req.header("x-infu-token") !== localToken) {
+      // v3.4 审计修复：接受 ?token= query（img 等浏览器原生资源加载无法带 header——
+      // 截图预览此前在生产模式 401 全挂；token 为本机随机、随进程重建，query 暴露面可控）
+      if (c.req.header("x-infu-token") !== localToken && c.req.query("token") !== localToken) {
         return c.json({ ok: false, message: "未授权：缺少本地令牌" }, 401);
       }
       await next();
     });
   }
-  const pendingApprovals = new Map<string, (approved: boolean) => void>();
+  // v3.5 审计修复（H4）：挂起队列条目带 sessionId——任务结束只清**本会话**的挂起项
+  // （原实现清全部：会话 B 结束会强杀会话 A 用户正在看的审批/提问/计划卡片）
+  const pendingApprovals = new Map<string, { sessionId: string; resolve: (approved: boolean) => void }>();
   // 计划确认挂起队列（M4 计划卡片：POST /api/plan/:id 决策）
-  const pendingPlans = new Map<string, (d: { plan?: string; feedback?: string; cancelled?: boolean }) => void>();
+  const pendingPlans = new Map<string, { sessionId: string; resolve: (d: { plan?: string; feedback?: string; cancelled?: boolean }) => void }>();
 /** v2.6 收尾：Agent 执行中提问（ask_user 工具）挂起队列——emit ask-user 事件 → 等 POST /api/ask/:id 回答 */
-const pendingQuestions = new Map<string, (answer: string | null) => void>();
+const pendingQuestions = new Map<string, { sessionId: string; resolve: (answer: string | null) => void }>();
 
   // ── v2 供应商凭据（模型管理重构：一份 key 挂多个模型）──
 
@@ -368,7 +384,7 @@ const pendingQuestions = new Map<string, (answer: string | null) => void>();
         thinkingLevels: m.thinkingLevels,
       };
     });
-    return c.json({ models, configPath: CONFIG_PATH });
+    return c.json({ models, configPath: configPath() });
   });
 
   // 新增模型
@@ -506,6 +522,7 @@ const pendingQuestions = new Map<string, (answer: string | null) => void>();
       sandbox: { ...(cfg?.sandbox ?? {}), dockerAvailable: dockerOk, winRestrictedOk: winOk },
       general: cfg?.general ?? {},
       appearance: cfg?.appearance ?? {},
+      memory: cfg?.memory ?? {},
       defaultModelId: cfg?.defaultModelId ?? null,
     });
   });
@@ -561,6 +578,30 @@ const pendingQuestions = new Map<string, (answer: string | null) => void>();
       try { setAuto?.(clean.general.autoLaunch); } catch { /* 忽略 */ }
     }
     return c.json({ ok: true });
+  });
+
+  // ── v3.5 数据目录（对齐 ZCode：根目录可选、内部结构固定；迁移 = 复制 + redirect 指针）──
+
+  // 读取当前数据目录（Web 设置「数据与统计」展示用）
+  app.get("/api/data-dir", (c) => {
+    return c.json({
+      ok: true,
+      dir: resolveDataDir(),
+      default: defaultDataDir(),
+      redirected: resolveDataDir() !== defaultDataDir(),
+    });
+  });
+
+  // 迁移数据目录：body {path} → 校验（绝对路径/非当前/非主目录/非盘根/非嵌套/空目标）→ 整体复制
+  // → 写 ~/.infu-redirect.json 指针 → 进程内缓存失效即刻生效；旧目录保留为备份不删除
+  app.post("/api/data-dir", async (c) => {
+    const body = await c.req.json().catch(() => ({}));
+    const target = typeof body?.path === "string" ? body.path.trim() : "";
+    if (!target) return c.json({ ok: false, message: "请提供目标路径（path）" }, 400);
+    const result = migrateDataDir(target);
+    // v3.5：迁移成功 → 重连数据库（旧连接指向旧目录，不重连会继续写旧库）
+    if (result.ok) resetStore();
+    return c.json(result, result.ok ? 200 : 400);
   });
 
   // ── v2.10 批 7 附件文本提取（docx 零依赖：zip 条目 + XML 去标签）──
@@ -900,13 +941,26 @@ const pendingQuestions = new Map<string, (answer: string | null) => void>();
     const data = typeof body.data === "string" ? body.data : "";
     const command = typeof body.command === "string" ? body.command.trim() : "";
     if (!data) return c.json({ ok: true });
+    // v3.5 审计修复：command 字段缺失时从 data 逐行推导完整命令行（防直连 API
+    // 绕过高危审批与审计）——前端只在回车时发送 data（整行命令 + \r），逐行检测安全
+    const dataLines: string[] = command
+      ? []
+      : data
+          .split(/\r?\n/)
+          .map((l: string) => l.trim())
+          .filter(Boolean);
+    const derivedDangerous = dataLines.find((l) => detectDangerousTerminalCommand(l));
     if (command && detectDangerousTerminalCommand(command) && body.confirmed !== true) {
       // 高危命令：拦截 + 要求人工确认（安全红线，与 run_command 一致）
       return c.json({ ok: false, requireApproval: true, risk: "high", description: `执行高风险命令：${command}` });
     }
+    if (!command && derivedDangerous && body.confirmed !== true) {
+      return c.json({ ok: false, requireApproval: true, risk: "high", description: `执行高风险命令：${derivedDangerous}` });
+    }
     if (session.exited) return c.json({ ok: false, message: "终端会话已退出" }, 400);
     writeInput(session, data);
     if (command) auditTerminalCommand(session.cwd, command);
+    else for (const l of dataLines) auditTerminalCommand(session.cwd, l);
     return c.json({ ok: true });
   });
 
@@ -1096,7 +1150,7 @@ const pendingQuestions = new Map<string, (answer: string | null) => void>();
       // 浏览器 Web 安全限制拿不到文件绝对路径 → 内容上传，服务端暂存后给 Agent 绝对路径引用；
       // 图片 dataURL 直接走视觉（不落库字节）。暂存目录任务结束时统一清理。
       const attachmentItems: AttachmentMeta[] = [];
-      const attachDir = join(homedir(), ".infu", "attachments", sessionId);
+      const attachDir = join(resolveDataDir(), "attachments", sessionId);
       try {
         if (rawFiles.length) {
           fs.mkdirSync(attachDir, { recursive: true });
@@ -1228,18 +1282,29 @@ const pendingQuestions = new Map<string, (answer: string | null) => void>();
         logEvent(e); // 后台日志（窗口 + 文件）
         store.appendEvent(sessionId, e); // 全量落库（tool-result 含完整输出）
         stream.writeSSE({ event: "agent", data: JSON.stringify(e) }).catch(() => {});
+        // v3.5：事件钩子（桌面端任务完成通知/防休眠；失败静默）
+        try { opts.onEvent?.(sessionId, e); } catch { /* 钩子失败不影响主流程 */ }
       };
 
       // 审批：推送 approval-required 事件 → 挂 pending → 等待 POST /api/approvals/:id 决策
       // 连接中断（停止）时自动拒绝并释放
       // v2.4 审批档位（config.approvalPolicy.mode）：auto 直接放行不发事件；confirm 全部人工；
-      // requireExplicit（联网放行等安全线）任何档位都弹窗人工确认（guard 对内置工具已按档位拦截，此处兜底 MCP/插件直调路径）
+      // requireExplicit（联网放行等安全线）auto/smart/confirm 都弹窗人工确认（guard 对内置工具
+      // 已按档位拦截，此处兜底 MCP/插件/vision/delegate 直调路径）
+      // v3.2 会话全权放行（sessionBypass）：此处统一检查——用户点「本会话全部放行」后，
+      // MCP/vision/delegate 直调路径同样不再弹窗（此前只对走 guard() 的内置工具生效）
+      // v3.5 full 档：shouldAutoApprove 返回 true（含红线）直接放行
       const requestApproval = async (description: string, risk: RiskLevel, requireExplicit?: boolean) => {
-        if (shouldAutoApprove(resolveApprovalPolicy(loadConfig()), risk, requireExplicit) === true) return true;
+        if (
+          shouldAutoApprove(resolveApprovalPolicy(loadConfig()), risk, requireExplicit) === true ||
+          isSessionBypassed(sessionId)
+        ) {
+          return true;
+        }
         const id = randomUUID();
         emit({ type: "approval-required", id, description, risk });
         return new Promise<boolean>((resolve) => {
-          pendingApprovals.set(id, resolve);
+          pendingApprovals.set(id, { sessionId, resolve });
           controller.signal.addEventListener(
             "abort",
             () => {
@@ -1253,6 +1318,11 @@ const pendingQuestions = new Map<string, (answer: string | null) => void>();
       // v2.6 收尾：Agent 执行中提问（ask_user 工具）：emit ask-user 事件 → 挂 pending →
       // 等 POST /api/ask/:id 回答；连接中断（停止）时视为跳过（返回 null）
       // v2.10：选项结构化（label/desc/recommended）；description/multiSelect 透传事件
+      // v3.4 审计修复：15 分钟超时兜底——用户不回答 + 任务不中止时 Promise 永久悬挂
+      // （子 Agent 卡死等待、资源不释放）；超时返回 null（等价跳过）
+      // v3.5（对标 ZCode 常规设置「提问自动继续」）：general.autoContinueQuestions 开 →
+      // 5 分钟未回答自动继续（resolve null = Agent 跳过继续）；关 → 一直等待用户回答
+      // （仅任务中止可退出；用户显式选择的语义）
       const askUser = async (
         question: string,
         options?: Array<string | { label: string; desc?: string; recommended?: boolean }>
@@ -1260,10 +1330,17 @@ const pendingQuestions = new Map<string, (answer: string | null) => void>();
         const id = randomUUID();
         emit({ type: "ask-user", id, question, options: options as Array<string | { label: string; desc?: string; recommended?: boolean }> | undefined });
         return new Promise<string | null>((resolve) => {
-          pendingQuestions.set(id, resolve);
+          pendingQuestions.set(id, { sessionId, resolve });
+          let timer: NodeJS.Timeout | undefined;
+          if (loadConfig()?.general?.autoContinueQuestions === true) {
+            timer = setTimeout(() => {
+              if (pendingQuestions.delete(id)) resolve(null);
+            }, 5 * 60 * 1000);
+          }
           controller.signal.addEventListener(
             "abort",
             () => {
+              if (timer) clearTimeout(timer);
               if (pendingQuestions.delete(id)) resolve(null);
             },
             { once: true }
@@ -1277,9 +1354,12 @@ const pendingQuestions = new Map<string, (answer: string | null) => void>();
         const id = randomUUID();
         emit({ type: "plan", id, content: planText });
         return new Promise<{ plan?: string; feedback: string } | null>((resolve) => {
-          pendingPlans.set(id, (d) => {
-            if (d.cancelled) resolve(null);
-            else resolve({ plan: d.plan, feedback: d.feedback ?? "批准执行" });
+          pendingPlans.set(id, {
+            sessionId,
+            resolve: (d) => {
+              if (d.cancelled) resolve(null);
+              else resolve({ plan: d.plan, feedback: d.feedback ?? "批准执行" });
+            },
           });
           controller.signal.addEventListener(
             "abort",
@@ -1293,8 +1373,8 @@ const pendingQuestions = new Map<string, (answer: string | null) => void>();
 
       try {
         // v2.3 动态扩展：MCP 服务器 + JS 插件（连接/加载失败的跳过不阻塞任务）。任务结束后统一 close/释放。
-        const mcp = await loadMcpTools(config?.mcpServers, emit);
-        const plugin = await loadPlugins(config?.plugins, emit);
+        const mcp = await loadMcpTools(config?.mcpServers, emit, undefined, Object.keys(TOOLS));
+        const plugin = await loadPlugins(config?.plugins, emit, { builtinNames: Object.keys(TOOLS) });
         // skill 发现层：可用技能 name+description 追加到 Executor system（progressive disclosure）
         const skillsPrompt = buildSkillsPrompt(listSkills(config, execRoot));
         // v2.5 子智能体发现层：可用 agent 角色 name+description（delegate_task 委派参考）
@@ -1370,6 +1450,25 @@ const pendingQuestions = new Map<string, (answer: string | null) => void>();
           try { abortJobsByDepth(sessionId, -1); } catch { /* 忽略 */ }
           // v3.0 审计修复（S3）：任务结束关闭持久 shell 会话（此前永不清理，泄漏带凭据的常驻进程）
           try { closeShellSession(sessionId); } catch { /* 忽略 */ }
+          // v3.4 审计修复（M4）：任务结束补三项会话级清理（此前只在删除会话时清，正常结束的任务
+          // 在服务常驻期残留跨任务状态——文件观察记录、已批准记忆、全权放行开关全泄漏到下一任务）
+          try { clearObservedFiles(sessionId); } catch { /* 忽略 */ }
+          try { clearApprovalMemory(sessionId); } catch { /* 忽略 */ }
+          try { clearSessionBypass(sessionId); } catch { /* 忽略 */ }
+          // v3.4 审计修复：任务结束清理挂起队列——用户不点按钮（确认框/提问/计划卡片）
+          // 且任务正常结束时，pendingApprovals/pendingQuestions/pendingPlans 的 Promise
+          // 永久悬挂（内存泄漏 + 拦截后续同名 id 响应）
+          // v3.5 审计修复（H4）：只清理**本会话**的挂起项——其他会话的审批/提问/计划
+          // 卡片不受影响（此前清全部：并行会话互相误杀挂起队列）
+          for (const [pid, entry] of pendingApprovals) {
+            if (entry.sessionId === sessionId) { pendingApprovals.delete(pid); entry.resolve(false); }
+          }
+          for (const [pid, entry] of pendingQuestions) {
+            if (entry.sessionId === sessionId) { pendingQuestions.delete(pid); entry.resolve(null); }
+          }
+          for (const [pid, entry] of pendingPlans) {
+            if (entry.sessionId === sessionId) { pendingPlans.delete(pid); entry.resolve({ cancelled: true }); }
+          }
         }
       } catch (e) {
         store.updateStatus(sessionId, "error");
@@ -1442,19 +1541,10 @@ const pendingQuestions = new Map<string, (answer: string | null) => void>();
     }
   });
 
-  // 审批决策入口（Web UI 调用）
-  app.post("/api/approvals/:id", async (c) => {
-    const id = c.req.param("id");
-    const body = await c.req.json().catch(() => ({}));
-    const resolve = pendingApprovals.get(id);
-    if (!resolve) return c.json({ ok: false, message: "审批不存在或已过期" });
-    pendingApprovals.delete(id);
-    resolve(!!body.approved);
-    return c.json({ ok: true });
-  });
-
   // v3.2 会话级全权放行开关（审批弹窗「本会话全部放行」按钮）：
   // 开启后该会话内所有审批（含红线）自动放行，直到会话结束/删除（见 deleteSession 清理）。
+  // v3.5 修复：必须注册在 /api/approvals/:id 之前——否则 "bypass" 会被 :id 路由吞掉
+  // （返回「审批不存在或已过期」，按钮点了没反应）。
   app.post("/api/approvals/bypass", async (c) => {
     const body = await c.req.json().catch(() => ({}));
     const sid = typeof body.sessionId === "string" && body.sessionId ? body.sessionId : null;
@@ -1463,17 +1553,28 @@ const pendingQuestions = new Map<string, (answer: string | null) => void>();
     return c.json({ ok: true, bypass: isSessionBypassed(sid) });
   });
 
+  // 审批决策入口（Web UI 调用）
+  app.post("/api/approvals/:id", async (c) => {
+    const id = c.req.param("id");
+    const body = await c.req.json().catch(() => ({}));
+    const entry = pendingApprovals.get(id);
+    if (!entry) return c.json({ ok: false, message: "审批不存在或已过期" });
+    pendingApprovals.delete(id);
+    entry.resolve(!!body.approved);
+    return c.json({ ok: true });
+  });
+
   // 计划确认入口（v2.3 计划卡片：提交 = {plan?, feedback}；取消 = {cancelled: true}）
   app.post("/api/plan/:id", async (c) => {
     const id = c.req.param("id");
     const body = await c.req.json().catch(() => ({}));
-    const resolve = pendingPlans.get(id);
-    if (!resolve) return c.json({ ok: false, message: "计划不存在或已过期" });
+    const entry = pendingPlans.get(id);
+    if (!entry) return c.json({ ok: false, message: "计划不存在或已过期" });
     pendingPlans.delete(id);
     if (body.cancelled === true) {
-      resolve({ cancelled: true });
+      entry.resolve({ cancelled: true });
     } else {
-      resolve({
+      entry.resolve({
         plan: typeof body.plan === "string" && body.plan.trim() ? body.plan : undefined,
         feedback: typeof body.feedback === "string" && body.feedback.trim() ? body.feedback.trim() : "批准执行",
       });
@@ -1485,13 +1586,13 @@ const pendingQuestions = new Map<string, (answer: string | null) => void>();
   app.post("/api/ask/:id", async (c) => {
     const id = c.req.param("id");
     const body = await c.req.json().catch(() => ({}));
-    const resolve = pendingQuestions.get(id);
-    if (!resolve) return c.json({ ok: false, message: "提问不存在或已过期" });
+    const entry = pendingQuestions.get(id);
+    if (!entry) return c.json({ ok: false, message: "提问不存在或已过期" });
     pendingQuestions.delete(id);
     if (body.cancelled === true) {
-      resolve(null);
+      entry.resolve(null);
     } else {
-      resolve(typeof body.answer === "string" ? body.answer : "");
+      entry.resolve(typeof body.answer === "string" ? body.answer : "");
     }
     return c.json({ ok: true });
   });
@@ -1514,6 +1615,14 @@ const pendingQuestions = new Map<string, (answer: string | null) => void>();
   });
 
   // 批量导入事件（v1 localStorage 数据迁移；校验事件类型与格式）
+  // v3.4 审计修复：事件类型白名单——原实现任意事件都可注入（伪造 tool-result/plan/
+  // approval/task-notification 等 → 重放界面显示伪造内容；继续会话时伪造事件进入
+  // 模型上下文被投毒）。v1 迁移只产生这几类内容事件，其余一律拒绝。
+  const MIGRATABLE_EVENTS = new Set([
+    "user-message", "text", "reasoning", "assistant-message",
+    "tool-start", "tool-result", "context-compressed", "error",
+    "step-start", "report", "review", "done",
+  ]);
   app.post("/api/sessions/:id/events", async (c) => {
     const id = c.req.param("id");
     const body = await c.req.json().catch(() => ({}));
@@ -1524,6 +1633,10 @@ const pendingQuestions = new Map<string, (answer: string | null) => void>();
     for (const e of events) {
       if (!e || typeof e !== "object" || typeof (e as any).type !== "string") {
         return c.json({ ok: false, message: "事件格式错误" }, 400);
+      }
+      const type = (e as any).type as string;
+      if (!MIGRATABLE_EVENTS.has(type)) {
+        return c.json({ ok: false, message: `事件类型 "${type}" 不允许注入（仅 v1 迁移内容类事件可导入）` }, 400);
       }
       store.appendEvent(id, e as AgentEvent);
     }
@@ -1582,6 +1695,30 @@ const pendingQuestions = new Map<string, (answer: string | null) => void>();
           if (f.startsWith(`screen-${sid8}-`)) {
             try { fs.rmSync(join(shotsDir, f), { force: true }); } catch { /* 忽略单个失败 */ }
           }
+        }
+      }
+    } catch { /* 清理失败不影响删除 */ }
+    // v3.5 数据生命周期：会话删除联动清理该会话的磁盘产物——
+    // ① run_command 大输出 .infu/outputs/<sid>-*.log（v3.5 起文件名带会话前缀）
+    // ② 浏览器截图 .infu/browser/<sid>-*.png
+    // ③ 附件暂存 ~/.infu/attachments/<sid>/（任务异常终止时的兜底——任务正常结束已清理）
+    try {
+      const sid8 = id.replace(/[^a-zA-Z0-9-]/g, "").slice(0, 8);
+      if (sid8) {
+        for (const [dir, prefix] of [
+          [join(sess.root, ".infu", "outputs"), `${sid8}-`],
+          [join(sess.root, ".infu", "browser"), `${sid8}-`],
+        ] as const) {
+          if (!existsSync(dir)) continue;
+          for (const f of readdirSync(dir)) {
+            if (f.startsWith(prefix)) {
+              try { fs.rmSync(join(dir, f), { force: true }); } catch { /* 忽略单个失败 */ }
+            }
+          }
+        }
+        const attachDir = join(resolveDataDir(), "attachments", id);
+        if (existsSync(attachDir)) {
+          try { fs.rmSync(attachDir, { recursive: true, force: true }); } catch { /* 忽略 */ }
         }
       }
     } catch { /* 清理失败不影响删除 */ }
@@ -1750,7 +1887,7 @@ const pendingQuestions = new Map<string, (answer: string | null) => void>();
       conn = await Promise.race([
         connectMcp(s),
         new Promise<never>((_, reject) =>
-          setTimeout(() => reject(new Error("连接超时（15s）")), 15000)
+          setTimeout(() => reject(new Error("连接超时（15s）")), 15000).unref()
         ),
       ]);
       const tools = await conn.listTools();
@@ -1832,7 +1969,7 @@ const pendingQuestions = new Map<string, (answer: string | null) => void>();
       ? /\.(mjs|js|ts)$/i.test(explicitPath)
         ? explicitPath
         : join(explicitPath, `${id}.mjs`)
-      : join(homedir(), ".infu", "plugins", `${id}.mjs`);
+      : join(resolveDataDir(), "plugins", `${id}.mjs`);
     try {
       mkdirSync(path.dirname(file), { recursive: true });
       writeFileSync(file, code, "utf-8");
@@ -2059,7 +2196,10 @@ const pendingQuestions = new Map<string, (answer: string | null) => void>();
           const body = readFileSync(filePath);
           // vite 产物带内容 hash → 长缓存；index.html 不缓存（SPA 更新即时生效）
           const cacheable = /^\/assets\//.test(pathname);
-          const injected = ext === ".html" ? Buffer.from(injectToken(body.toString("utf-8")), "utf-8") : body;
+          // v3.5 审计修复：令牌只注入 index.html（注释声称"唯一载体"但实现注入所有
+          // .html——未来任何多页 .html 都会带上可读令牌；窄化注入面）
+          const isIndexHtml = ext === ".html" && path.basename(filePath) === "index.html";
+          const injected = isIndexHtml ? Buffer.from(injectToken(body.toString("utf-8")), "utf-8") : body;
           return c.body(injected, 200, {
             "content-type": MIME[ext] ?? "application/octet-stream",
             "cache-control": cacheable ? "public, max-age=31536000, immutable" : "no-cache",
@@ -2106,7 +2246,7 @@ function checkConfigHealth() {
   } else {
     console.log(`[infu-agent] ⚠️ 已配置 ${models.length} 个模型，但均未设置 API Key！`);
     console.log(`[infu-agent]    配置方法：模型管理 → 供应商 → 编辑 API Key`);
-    console.log(`[infu-agent]    或编辑 ${CONFIG_PATH} 填入 apiKey（或用环境变量 INFU_<供应商>_API_KEY）`);
+    console.log(`[infu-agent]    或编辑 ${configPath()} 填入 apiKey（或用环境变量 INFU_<供应商>_API_KEY）`);
   }
   if (!withBaseURL.length) {
     console.log(`[infu-agent] ⚠️ 自定义端点模型缺少 baseURL`);
@@ -2123,6 +2263,23 @@ export function startServer(opts: ServerOptions = {}) {
     getStore().resetStaleRunning();
   } catch {
     /* DB 未就绪忽略 */
+  }
+  // v3.5 常规设置：自动归档旧会话（general.autoArchive + archiveRetentionDays，默认关/7 天）
+  // 启动时执行一次——超期未活动的非归档会话移入归档（不删除，侧栏「归档」可恢复）
+  try {
+    const g = loadConfig()?.general;
+    if (g?.autoArchive === true) {
+      const days = Math.max(1, Math.min(365, g.archiveRetentionDays ?? 7));
+      const cutoff = Date.now() - days * 24 * 3600 * 1000;
+      const store = getStore();
+      for (const s of store.listSessions(1000, false)) {
+        if (!s.updatedAt || s.updatedAt < cutoff) {
+          try { store.setArchived(s.id, true); } catch { /* 单个失败跳过 */ }
+        }
+      }
+    }
+  } catch {
+    /* 归档失败不影响启动 */
   }
 
   const tryListen = (port: number, attemptsLeft: number) => {

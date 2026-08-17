@@ -31,8 +31,22 @@ export default function QueueDock() {
     if (!activeSessionId) return;
     useStore.getState().removeQueueItem(activeSessionId, id);
     setEditingId(null);
-    if (mineRunning) useStore.getState().abortRun();
-    sendChat(text, { sessionId: activeSessionId }).catch(() => {});
+    const sid = activeSessionId;
+    if (mineRunning) {
+      useStore.getState().abortRun();
+      // v3.5 审计修复（Stop&Send 竞态）：必须等旧任务真正收尾（runningIds 移除）再发——
+      // 服务端有同会话双发保护（status=running 拒绝新请求），旧流 finally 尚未执行时
+      // 立刻发送会 400 失败；轮询等待（最长 8s，异常情况超时照发由错误提示兜底）
+      const t0 = Date.now();
+      const wait = setInterval(() => {
+        if (!useStore.getState().runningIds.includes(sid) || Date.now() - t0 > 8000) {
+          clearInterval(wait);
+          sendChat(text, { sessionId: sid }).catch(() => {});
+        }
+      }, 120);
+    } else {
+      sendChat(text, { sessionId: sid }).catch(() => {});
+    }
   };
 
   /** 拖拽排序（原生 HTML5 DnD：拖到目标行上交换） */

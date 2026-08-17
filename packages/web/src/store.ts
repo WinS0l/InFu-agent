@@ -1,7 +1,7 @@
 import { create } from "zustand";
 import { persist } from "zustand/middleware";
 import { apiFetch } from "./api";
-import type { AgentEvent, AttachmentMeta, ModelConfig, PhaseId, SessionMeta, StoredEvent } from "@infu/shared";
+import type { AgentEvent, ApprovalMode, AttachmentMeta, ModelConfig, PhaseId, SessionMeta, StoredEvent } from "@infu/shared";
 
 /** 单条消息（含其触发的工具调用与交付报告） */
 export interface ChatMsg {
@@ -95,6 +95,8 @@ export interface ApprovalState {
   id: string;
   description: string;
   risk: string;
+  /** v3.5 修复：审批所属会话（bypass/批量决策按会话归属——多会话并行时不再错会话） */
+  sessionId?: string;
 }
 
 /** v2.6 收尾：Agent 执行中提问（ask_user 工具）弹窗状态；v2.10 支持多选/描述/结构化选项 */
@@ -132,7 +134,7 @@ export interface QueueItem {
 export type SettingsTab =
   | "general" | "appearance" | "model" | "browser"
   | "memory" | "plugins" | "skills" | "subagent" | "mcp" | "commands" | "hooks"
-  | "index" | "stats" | "schedule";
+  | "datadir" | "index" | "stats" | "schedule";
 
 interface StoreState {
   models: ModelConfig[];
@@ -197,6 +199,13 @@ interface StoreState {
   phaseModels: Partial<Record<PhaseId, string>>;
   /** v2 思考级别（4 档 UI，按模型实际级别数自动映射；1-4，默认 2） */
   thinkingLevel: number;
+  /** v3.5 审批档位（全局；composer 下拉与设置「命令」Tab 共用同一数据源——双向联动） */
+  approvalMode: ApprovalMode;
+  setApprovalMode: (mode: ApprovalMode) => void;
+  /** v3.5 常规设置：对话流显示开关（config.general.showThinking/showTodos；默认开） */
+  uiShowThinking: boolean;
+  uiShowTodos: boolean;
+  setUiFlags: (f: { showThinking?: boolean; showTodos?: boolean }) => void;
   /** v2.4 外观（来自 /api/config appearance 节；设置弹窗保存后即时应用） */
   fontSize: "xs" | "sm" | "base";
   streamCursor: boolean;
@@ -300,7 +309,7 @@ interface StoreState {
   plansBySession: Record<string, { id: string; content: string } | null>;
   clearPlanFor: (sid: string) => void;
   clearPlan: () => void;
-  requestApproval: (ev: Extract<AgentEvent, { type: "approval-required" }>) => void;
+  requestApproval: (ev: Extract<AgentEvent, { type: "approval-required" }>, sessionId?: string) => void;
   resolveApproval: (approved: boolean) => void;
   resolveAllApprovals: (approved: boolean) => void;
   setAskQuestion: (q: AskState | null) => void;
@@ -617,6 +626,9 @@ export const useStore = create<StoreState>()(
   templateId: null,
   phaseModels: {},
   thinkingLevel: 2,
+  uiShowThinking: true,
+  uiShowTodos: true,
+  setUiFlags: (f) => set((s) => ({ uiShowThinking: f.showThinking ?? s.uiShowThinking, uiShowTodos: f.showTodos ?? s.uiShowTodos })),
   fontSize: "sm",
   streamCursor: true,
   theme: "dark",
@@ -659,6 +671,8 @@ export const useStore = create<StoreState>()(
   setModelId: (id) => set({ modelId: id }),
   setTemplateId: (id) => set({ templateId: id }),
   setThinkingLevel: (level) => set({ thinkingLevel: Math.max(1, Math.min(4, Math.round(level)))}),
+  approvalMode: "smart",
+  setApprovalMode: (mode) => set({ approvalMode: mode }),
   setRoot: (root) => set({ root }),
   setSessions: (sessions) => set({ sessions }),
   // ── v2.6.1 UI 状态（侧栏会话中枢）──
@@ -1256,16 +1270,19 @@ export const useStore = create<StoreState>()(
   addWorktreeNote: (note) => set({ worktreeNote: note }),
   clearWorktree: () => set({ worktree: null, worktreeNote: "" }),
 
-  requestApproval: (ev) =>
+  requestApproval: (ev, sessionId) =>
     set((s) => ({
-      approvals: [...s.approvals, { id: ev.id, description: ev.description, risk: ev.risk }],
+      approvals: [...s.approvals, { id: ev.id, description: ev.description, risk: ev.risk, sessionId }],
     })),
 
   resolveApproval: (approved) => {
-    const a = get().approvals[0];
+    // v3.5 审计修复：只处理**当前会话**的审批（多会话并行时全局队列混入其他会话
+    // 的审批——弹窗处理/全部允许会误伤后台会话的挂起审批）
+    const sid = get().activeSessionId ?? "";
+    const a = get().approvals.find((x) => !sid || x.sessionId === sid);
     if (!a) return;
     // 从队列移除当前审批（弹窗自动显示下一个）
-    set((s) => ({ approvals: s.approvals.slice(1) }));
+    set((s) => ({ approvals: s.approvals.filter((x) => x.id !== a.id) }));
     apiFetch(`/api/approvals/${a.id}`, {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -1275,9 +1292,10 @@ export const useStore = create<StoreState>()(
 
   /** v3.1 审批流优化：批量决策（并行工具调用堆积多个审批时一键全允/全拒） */
   resolveAllApprovals: (approved) => {
-    const list = get().approvals;
+    const sid = get().activeSessionId ?? "";
+    const list = get().approvals.filter((x) => !sid || x.sessionId === sid);
     if (!list.length) return;
-    set({ approvals: [] });
+    set((s) => ({ approvals: s.approvals.filter((x) => !list.some((l) => l.id === x.id)) }));
     for (const a of list) {
       apiFetch(`/api/approvals/${a.id}`, {
         method: "POST",

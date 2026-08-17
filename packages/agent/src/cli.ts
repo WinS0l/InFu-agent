@@ -15,10 +15,11 @@ import { writeFileSync, existsSync, mkdirSync, readFileSync, rmSync } from "node
 import { spawnSync, execFileSync } from "node:child_process";
 import { createRequire } from "node:module";
 import { randomUUID } from "node:crypto";
-import { homedir, tmpdir } from "node:os";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AgentEvent, InfuConfig, ModelConfig, ProviderKind } from "@infu/shared";
-import { loadConfig, saveConfig, resolveModel, resolveFallbackModels, resolveRoleModel, toRuntimeModel, CONFIG_PATH } from "./providers/registry.js";
+import { resolveDataDir } from "./data-dir.js";
+import { loadConfig, saveConfig, resolveModel, resolveFallbackModels, resolveRoleModel, toRuntimeModel, configPath } from "./providers/registry.js";
 import { TOOLS } from "./tools/index.js";
 import { runAgent, makeApprovalHandler, DEFAULT_SYSTEM_PROMPT } from "./agent/loop.js";
 import { sanitizeEnv } from "./sandbox/index.js";
@@ -108,11 +109,10 @@ function makeDecider(autoApprove: boolean) {
     risk: "low" | "medium" | "high",
     requireExplicit?: boolean
   ) => {
-    if (requireExplicit) {
-      if (autoApprove) return false; // 联网必须人工确认，自动批准模式不适用
-    } else if (autoApprove || shouldAutoApprove(policy, risk) === true) {
-      return true;
-    }
+    // v3.5 补：full 档（完全信任）——所有审批含安全红线自动放行（与服务端语义一致）
+    if (shouldAutoApprove(policy, risk, requireExplicit) === true) return true;
+    if (requireExplicit) return false; // 其余档位下联网等红线 -y 也不自动放行，一律拒绝
+    if (autoApprove) return true;
     process.stderr.write(C.yellow(`  是否允许（y/n，默认 n）？`));
     const ans = await getLines().next().then((r) => r.value ?? "");
     return /^y/i.test(ans.trim());
@@ -310,7 +310,9 @@ async function configWizard() {
       console.log(C.red("  无效输入"));
     }
   }
+  const CONFIG_PATH = configPath();
   console.log(C.dim(`\n配置保存在：${CONFIG_PATH}`));
+  console.log(C.dim("（模型凭据只存本文件，不入库；切换数据目录后该文件随目录迁移）\n"));
 }
 async function main() {
   const args = process.argv.slice(2);
@@ -342,7 +344,8 @@ async function main() {
   }
 
   if (args.includes("--setup")) {
-    mkdirSync(join(homedir(), ".infu"), { recursive: true });
+    const CONFIG_PATH = configPath();
+    mkdirSync(join(resolveDataDir()), { recursive: true });
     if (!existsSync(CONFIG_PATH)) {
       writeFileSync(CONFIG_PATH, TEMPLATE, "utf-8");
       console.log(`已生成模型配置模板：${CONFIG_PATH}`);
@@ -566,13 +569,13 @@ async function main() {
   };
 
   // v2.3 MCP 动态注入：任务结束后统一 close（防残留子进程）
-  const mcp = await loadMcpTools(config?.mcpServers, emit);
+  const mcp = await loadMcpTools(config?.mcpServers, emit, undefined, Object.keys(TOOLS));
   if (mcp) {
     if (mcp.tools.length) console.error(C.green(`MCP 工具已注入：${mcp.tools.length} 个（仅执行阶段可用，默认 medium 审批）`));
     for (const f of mcp.failures) console.error(C.yellow(`⚠ MCP 服务器连接失败（已跳过）：${f.message.slice(0, 120)}`));
   }
   // v2.3 批 2 插件（JS 模块：工具/钩子/技能）+ skill 发现层描述注入
-  const plugin = await loadPlugins(config?.plugins, emit);
+  const plugin = await loadPlugins(config?.plugins, emit, { builtinNames: Object.keys(TOOLS) });
   if (plugin) {
     if (plugin.tools.length) console.error(C.green(`插件工具已注入：${plugin.tools.length} 个（仅执行阶段可用）`));
     if (plugin.hooks.preToolUse.length || plugin.hooks.postToolUse.length) {
@@ -643,7 +646,9 @@ async function main() {
   };
 
   // v2.6 收尾：执行中提问（ask_user 工具）——交互输入（回车=跳过/空回答）；v2.10 支持结构化选项
+  // v3.5：-y（无人值守）直接跳过提问（等价「自动继续」），避免无人在终端时挂起
   const cliAskUser = async (question: string, options?: Array<string | { label: string; desc?: string; recommended?: boolean }>) => {
+    if (autoApprove) return "";
     const labels = (options ?? []).map((o) => (typeof o === "string" ? o : o.label));
     console.error(C.cyan(`\n❓ Agent 提问：${question}`));
     if (labels.length) console.error(C.dim(`  选项：${labels.map((o, i) => `${i + 1}. ${o}`).join("  ")}（输入编号/文本，回车跳过）`));

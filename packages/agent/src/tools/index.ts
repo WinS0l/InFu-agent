@@ -15,6 +15,7 @@ import { registerMcpServer, type RegisterInput } from "../mcp/register.js";
 import { registerPlugin, type RegisterPluginInput } from "../plugin/register.js";
 import { listSkills, readSkillContent } from "../plugin/skills.js";
 import { listAgents, readAgentFile } from "../agent/agents.js";
+import { DANGEROUS } from "../sandbox/dangerous.js";
 import { delegateTasks, describeDelegation, isReadOnlyDelegation, startBackgroundSubagent,
   listBackgroundAgents, getBackgroundAgent, interruptBackgroundAgent, sendMessageToAgent, getAgentReport,
   availableSubagentSlots, MAX_ACTIVE_SUBAGENTS_PER_SESSION,
@@ -23,9 +24,9 @@ import { startBackgroundJob, listJobs, getJob, getJobOutput, killJob, auditJobSt
 import { readMemory, writeMemory, validateTopic, checkPathScope } from "../memory/index.js";
 import { loadConfig } from "../providers/registry.js";
 import { currentApprovalPolicy, isCommandAllowed, hasShellCombinators } from "../approval/policy.js";
-import { findProjectByRoot } from "../projects.js";
 import {
   clip, MAX_OUTPUT, MAX_FILE_READ, runShell, execLocal, sandboxTag, walkFiles, guard, isPathInside,
+  isReadOnlySessionRoot, sessionRootReadOnlyBlock,
 } from "./util.js";
 import { webTools } from "./web.js";
 import { gitTools } from "./git-tools.js";
@@ -40,27 +41,51 @@ import { fsTools } from "./fs-tools.js";
 import { envTools } from "./env-tools.js";
 
 /**
- * v3.2 read-before-edit 机制（对齐 harness fs-observation-policy / opencode Edit「必须先读」）：
- * 按会话跟踪已读取/已写入的文件，edit_file 与 write_file（覆盖已存在文件）必须先
- * read_file 该文件，否则返回恢复指引——防止模型基于过期缓存/猜测盲目编辑。
- * read/edit/write 成功都会刷新观察（对齐 harness fs/observed 语义：本会话刚写过也算已知）。
+ * v3.5 升级 read-before-edit（对齐 ZCode CLI 的 readFileState 机制——三层）：
+ * ① 未读拒绝：write/edit 前文件必须被 read_file 过（新建文件免读）；
+ * ② partial 拒绝：read_file 输出被截断（模型看到不完整内容）视为未读完整，拒绝编辑；
+ * ③ stale 检测：每次读取记录文件指纹（mtimeMs + sizeBytes），写时比对——
+ *    读后文件被外部修改（用户手改/其他进程/linter）→ 拒绝并提示重读（防基于过期缓存覆盖）。
+ * 写成功后用新指纹刷新状态（自己写的算已知，可继续改，无需重读）。
+ * 与 v3.2 布尔门禁的区别：v3.2 读一次永久放行（外部改了照样覆盖）；本版带指纹校验。
  */
-const observedFiles = new Map<string, Set<string>>();
+interface ReadStateEntry {
+  /** 读取时文件全文（full read 的 content 级 stale 比对用） */
+  content: string;
+  /** 读取起始行（0 基；有 offset/limit = 范围读，仍允许编辑但按指纹校验） */
+  offset: number;
+  /** 读取行数上限（未指定 = 全量读） */
+  limit?: number;
+  /** 输出被截断（模型看到不完整内容）→ 禁止编辑（对齐 ZCode truncatedByTokenCap） */
+  isPartialView: boolean;
+  mtimeMs: number;
+  sizeBytes: number;
+}
+const observedFiles = new Map<string, Map<string, ReadStateEntry>>();
 function normAbs(abs: string): string {
   const r = path.resolve(abs);
   return process.platform === "win32" ? r.toLowerCase() : r;
 }
-function markObserved(sessionId: string, abs: string): void {
-  let set = observedFiles.get(sessionId);
-  if (!set) {
-    set = new Set();
-    observedFiles.set(sessionId, set);
+function markReadState(sessionId: string, abs: string, entry: ReadStateEntry): void {
+  let map = observedFiles.get(sessionId);
+  if (!map) {
+    map = new Map();
+    observedFiles.set(sessionId, map);
   }
-  set.add(normAbs(abs));
+  map.set(normAbs(abs), entry);
 }
-function isObserved(sessionId: string, abs: string): boolean {
-  const set = observedFiles.get(sessionId);
-  return !!set && set.has(normAbs(abs));
+function getReadState(sessionId: string, abs: string): ReadStateEntry | undefined {
+  return observedFiles.get(sessionId)?.get(normAbs(abs));
+}
+/** 写前校验（对齐 ZCode assertWritableExistingFileIsFresh）：未读 / partial / stale → 返回错误文案；通过返回 null */
+function assertFreshForWrite(sessionId: string, abs: string, stat: { mtimeMs: number; size: number }): string | null {
+  const entry = getReadState(sessionId, abs);
+  if (!entry) return "错误：文件尚未读取——write_file/edit_file 必须先 read_file 该文件（基于最新内容修改；新建文件可免读）";
+  if (entry.isPartialView) return "错误：上次读取的内容不完整（输出被截断）——请重新 read_file 全量读取后再编辑";
+  if (entry.mtimeMs !== stat.mtimeMs || entry.sizeBytes !== stat.size) {
+    return "错误：文件已被修改（用户手动编辑/其他进程/linter）——请重新 read_file 获取最新内容后再编辑";
+  }
+  return null;
 }
 /** 测试/调试：清空观察；会话结束调用（防长驻服务内存增长） */
 export function clearObservedFiles(sessionId: string): void {
@@ -74,26 +99,10 @@ export function resetObservedFiles(): void {
 // ─────────────────────────── 工具定义 ───────────────────────────
 
 /**
- * 高风险命令正则（v2.4：末尾无 \b——dd if=/…、mkfs.ext4 后随符号（/ .）处无词边界，
- * 加 \b 会漏检）。v3.1：提取为模块级并导出——run_command 与 run_test 共用同一门槛。
+ * 高危命令检测（v3.4 审计修复 M2：多分支覆盖破坏性命令变体，见 sandbox/dangerous.ts）。
+ * 从 tools/index.ts 提取为独立模块——run_command/run_test/terminal 共用同一门槛。
  */
-export const DANGEROUS = /\b(rm\s+-rf|rmdir\s+\/s|del\s+\/f|format\s+|mkfs|dd\s+if=)/i;
-
-/**
- * v3 默认会话根目录只读保护：root = config.general.defaultRoot 且未注册为项目时，
- * 禁止写操作（自由会话容器目录；已注册项目 = 用户显式授权，豁免）。
- * isReadOnlySessionRoot 同时供记忆工具判断（自由会话只能读写全局记忆）。
- */
-function isReadOnlySessionRoot(root: string): boolean {
-  const cfg = loadConfig();
-  const sessionRoot = cfg?.general?.defaultRoot;
-  if (!sessionRoot) return false;
-  return path.resolve(root) === path.resolve(sessionRoot) && !findProjectByRoot(root);
-}
-function sessionRootReadOnlyBlock(ctx: ToolContext): string | null {
-  if (!isReadOnlySessionRoot(ctx.root)) return null;
-  return "默认会话根目录为只读容器——自由会话不能修改此目录，请先在侧栏选择/创建项目后执行写操作";
-}
+export { DANGEROUS as DANGEROUS_RE_EXPORT } from "../sandbox/dangerous.js";
 
 /**
  * delegate_task 参数 schema（v2.5）：单任务（prompt）或并行批量（tasks[]）互斥。
@@ -130,7 +139,7 @@ export const TOOLS: Record<string, ToolDef> = {
   read_file: {
     name: "read_file",
     description:
-      "读取文件内容。用于查看源代码、配置、文档。返回纯文本；二进制或超大文件会被截断。注意：edit_file/write_file 要求先读后改——本工具读取过的文件才允许编辑（对齐主流 read-before-edit）。",
+      "读取文件内容。用于查看源代码、配置、文档。返回纯文本；二进制或超大文件会被截断。注意：write_file/edit_file 必须先读后改——本工具读取过的文件才允许编辑；若读取内容被截断或文件之后被外部修改，编辑会被拒绝并要求重读（对齐主流 read-before-edit）。",
     risk: "low",
     schema: z.object({
       path: z.string().describe("相对项目根的文件路径"),
@@ -147,24 +156,33 @@ export const TOOLS: Record<string, ToolDef> = {
       const scopeErr = checkPathScope(rel, ctx.scopeRules);
       if (scopeErr && !inExtra) return `错误：路径超出作用域——${scopeErr}（项目指令「路径作用域」节；如需访问请更新规则或与用户确认）`;
       if (!fs.existsSync(abs) || !fs.statSync(abs).isFile()) return `错误：文件不存在 ${rel}`;
-      if (fs.statSync(abs).size > MAX_FILE_READ) return `错误：文件过大（>${MAX_FILE_READ} 字节），请用 search_code 定位相关内容`;
+      const st = fs.statSync(abs);
+      if (st.size > MAX_FILE_READ) return `错误：文件过大（>${MAX_FILE_READ} 字节），请用 search_code 定位相关内容`;
       const all = fs.readFileSync(abs, "utf-8").split("\n");
       const offset = (args.offset as number) || 0;
       const limit = (args.limit as number) || 200;
       const lines = all.slice(offset, offset + limit);
       const head = `文件 ${rel}（共 ${all.length} 行，显示 ${offset + 1}-${offset + lines.length} 行）`;
-      // v3.2：读取成功 → 记录观察（read-before-edit 依据）
-      markObserved(ctx.sessionId ?? "", abs);
-      return clip(
-        head + "\n```\n" + lines.map((l, i) => `${offset + i + 1}\t${l}`).join("\n") + "\n```"
-      );
+      const full = head + "\n```\n" + lines.map((l, i) => `${offset + i + 1}\t${l}`).join("\n") + "\n```";
+      const clipped = clip(full);
+      // v3.5：记录读取指纹（read-before-edit 依据——未读/截断/文件变更都影响后续编辑）
+      markReadState(ctx.sessionId ?? "", abs, {
+        content: all.join("\n"),
+        offset,
+        limit: args.limit as number | undefined,
+        // 输出被截断（模型看到不完整内容）→ partial，禁止编辑（对齐 ZCode truncatedByTokenCap）
+        isPartialView: clipped.length < full.length,
+        mtimeMs: st.mtimeMs,
+        sizeBytes: st.size,
+      });
+      return clipped;
     },
   },
 
   write_file: {
     name: "write_file",
     description:
-      "写入文件（覆盖）。创建新文件或整体重写已有文件。注意：此操作会覆盖目标文件，需用户确认；覆盖已存在文件前必须先 read_file 该文件（先读后改机制）。",
+      "写入文件（覆盖）。创建新文件或整体重写已有文件。注意：此操作会覆盖目标文件，需用户确认；覆盖已存在文件必须先 read_file 该文件——未读/上次读取不完整/文件已被外部修改都会被拒绝（对齐主流 read-before-edit + 文件变更检测）；新建文件免读。",
     // v2.10：文件编辑降 low（对齐主流：主流 默认模式写文件自动执行；
     // 安全不降级——敏感路径/只读容器/工作树隔离等写保护仍在）
     risk: "low",
@@ -187,15 +205,24 @@ export const TOOLS: Record<string, ToolDef> = {
       // v3 默认会话根目录只读（自由会话容器）
       const roBlock = sessionRootReadOnlyBlock(ctx);
       if (roBlock) return `错误：${roBlock}`;
-      // v3.2 read-before-edit：覆盖已存在文件必须先读（防止基于过期内容整体覆写）
-      if (fs.existsSync(abs) && !isObserved(ctx.sessionId ?? "", abs)) {
-        return "错误：覆盖已有文件前必须先 read_file 该文件——请先 read_file 再重试（先读后改机制：确认当前内容后再整体重写）";
+      // v3.5 read-before-edit：覆盖已存在文件必须先读（未读/partial/stale 拒绝）；新建免读
+      if (fs.existsSync(abs)) {
+        const gateErr = assertFreshForWrite(ctx.sessionId ?? "", abs, fs.statSync(abs));
+        if (gateErr) return gateErr;
       }
       const desc = `写入文件 ${rel}（${(args.content as string).length} 字符）`;
       if (!(await guard(ctx, "write_file", "low", desc))) return "用户拒绝：未写入";
       fs.mkdirSync(path.dirname(abs), { recursive: true });
       fs.writeFileSync(abs, args.content as string, "utf-8");
-      markObserved(ctx.sessionId ?? "", abs);
+      // v3.5：写成功 → 用新指纹刷新状态（自己写的算已知，可继续改无需重读）
+      const st = fs.statSync(abs);
+      markReadState(ctx.sessionId ?? "", abs, {
+        content: args.content as string,
+        offset: 0,
+        isPartialView: false,
+        mtimeMs: st.mtimeMs,
+        sizeBytes: st.size,
+      });
       const lines = (args.content as string).split("\n").length;
       return `已写入 ${rel}（${(args.content as string).length} 字符，${lines} 行）`;
     },
@@ -204,7 +231,7 @@ export const TOOLS: Record<string, ToolDef> = {
   edit_file: {
     name: "edit_file",
     description:
-      "精确替换文件中的一段文本（第一次匹配）。用于局部修改，比 write_file 更安全。要求：必须先 read_file 该文件（本工具拒绝编辑未读取过的文件——先读后改机制，防止基于过期缓存修改）。",
+      "精确替换文件中的一段文本（第一次匹配）。用于局部修改，比 write_file 更安全。必须先 read_file 该文件才能编辑——未读/上次读取不完整/文件已被外部修改都会被拒绝；若 old_text 匹配失败，请重读文件再试。",
     // v2.10：文件编辑降 low（对齐主流自动执行；安全不降级——写保护/只读容器/工作树隔离仍在）
     risk: "low",
     schema: z.object({
@@ -225,22 +252,29 @@ export const TOOLS: Record<string, ToolDef> = {
       // v3 默认会话根目录只读（自由会话容器）
       const roBlock = sessionRootReadOnlyBlock(ctx);
       if (roBlock) return `错误：${roBlock}`;
-      // v3.2 read-before-edit：必须先读（对齐 harness FS_NOT_OBSERVED / opencode Edit 先读后改）
-      if (!isObserved(ctx.sessionId ?? "", abs)) {
-        return "错误：编辑前必须先 read_file 该文件——请先 read_file 再重试（先读后改机制：确认当前内容与行号后再修改）";
-      }
       if (!fs.existsSync(abs)) return `错误：文件不存在 ${rel}`;
+      // v3.5 read-before-edit：编辑必须先读（未读/partial/stale 拒绝）
+      const st = fs.statSync(abs);
+      const gateErr = assertFreshForWrite(ctx.sessionId ?? "", abs, st);
+      if (gateErr) return gateErr;
       const content = fs.readFileSync(abs, "utf-8");
       const oldText = args.old_text as string;
       if (!content.includes(oldText)) {
-        return "错误：未找到匹配的原文（old_text 与文件内容不一致），请先 read_file 确认";
+        return "错误：未找到匹配的原文（old_text 与文件当前内容不一致）——文件可能与你的认知有出入，请先 read_file 确认当前内容与行号后重试";
       }
       const desc = `修改文件 ${rel}（替换 ${oldText.length} 字符）`;
       if (!(await guard(ctx, "edit_file", "low", desc))) return "用户拒绝：未修改";
       const updated = content.replace(oldText, args.new_text as string);
       fs.writeFileSync(abs, updated, "utf-8");
-      // v3.2：编辑成功也刷新观察（本会话后续可继续改，无需重读）
-      markObserved(ctx.sessionId ?? "", abs);
+      // v3.5：编辑成功 → 用新指纹刷新状态（本会话后续可继续改，无需重读）
+      const st2 = fs.statSync(abs);
+      markReadState(ctx.sessionId ?? "", abs, {
+        content: updated,
+        offset: 0,
+        isPartialView: false,
+        mtimeMs: st2.mtimeMs,
+        sizeBytes: st2.size,
+      });
       // 行数 diff 统计（+N -M 行）
       const oldLines = oldText.split("\n").length;
       const newLines = (args.new_text as string).split("\n").length;
@@ -360,10 +394,16 @@ export const TOOLS: Record<string, ToolDef> = {
         // （仅联网放行仍人工——外传数据红线不豁免）
         const policy = currentApprovalPolicy();
         // 末尾无 \b：dd if=/…、mkfs.ext4 后随符号（/ .）处无词边界，加 \b 会漏检
-        // v2.13：白名单放行的前提 = 单条只读命令——含 shell 组合符（&& ; | > < ` $()）
-        // 时退回正常审批（"git status && rm -rf x" 命中 git status* 但实际执行 rm）
-        if (isCommandAllowed(command, policy.commandAllowlist) && !hasShellCombinators(command)) {
-          /* 白名单命令：信任放行（高危检测也被豁免——用户显式配置的信任） */
+        // v2.13：白名单放行的前提 = 单条只读命令——含 shell 组合符（& ; | > < ` $()）
+        // 时退回正常审批（"git status & rm -rf x" 命中 git status* 但实际执行 rm）
+        // v3.4 审计修复（H3）：白名单命中仍必须过 DANGEROUS——高危命令永不豁免
+        // （原实现注释明示「高危检测也被豁免」= `git status & rm -rf` 全模式免审批）
+        if (
+          isCommandAllowed(command, policy.commandAllowlist) &&
+          !hasShellCombinators(command) &&
+          !DANGEROUS.test(command)
+        ) {
+          /* 白名单命令：信任放行（组合符/高危均已排除，单条只读命令） */
         } else if (DANGEROUS.test(command)) {
           // v3.1 审计修复：高危命令升级为 requireExplicit——CLI -y / 定时任务无人值守
           // 一律拒绝（此前无人值守自动放行 rm -rf 等，与「安全红线绝不自动放行」矛盾）
@@ -420,11 +460,17 @@ export const TOOLS: Record<string, ToolDef> = {
       // v2.10 输出落盘：输出 > 8K 时完整写入 .infu/outputs/*.log，
       // 回填 head 4K + 路径提示 + tail 1K（模型可用 read_file 看完整输出；事件/落库仍完整）
       const outText = r.out;
-      if (outText.length > 8000) {
+      // v3.4 审计修复：落盘前凭据检测——命令输出含密钥/令牌/私钥时直接写入项目
+      // .infu/outputs/*.log 等于把凭据落盘（read_file 可再读到、会话事件也全文存储）。
+      // 命中则不入盘：只回填裁剪版 + 警告（模型可据此调整命令，比如只输出变量名）。
+      const SENSITIVE_OUT = /(sk-[A-Za-z0-9]{12,}|AKIA[0-9A-Z]{16}|BEGIN (RSA|OPENSSH|EC|DSA|PGP) PRIVATE KEY|Bearer [A-Za-z0-9._~+\/-]{16,}|api[_-]?key["']?\s*[:=]\s*["'][^"']{8,}["'])/i;
+      if (outText.length > 8000 && !SENSITIVE_OUT.test(outText)) {
         try {
           const outDir = join(ctx.root, ".infu", "outputs");
           fs.mkdirSync(outDir, { recursive: true });
-          const outFile = join(outDir, `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}.log`);
+          // v3.5 数据生命周期：文件名带会话前缀（会话删除时联动清理该会话的 outputs）
+          const sid = (ctx.sessionId ?? "cli").replace(/[^a-zA-Z0-9-]/g, "").slice(0, 8);
+          const outFile = join(outDir, `${sid}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}.log`);
           fs.writeFileSync(outFile, outText, "utf-8");
           const head = outText.slice(0, 4096);
           const tail = outText.slice(-1024);
@@ -436,6 +482,13 @@ export const TOOLS: Record<string, ToolDef> = {
         } catch {
           /* 落盘失败回退原输出（trimToolResult 仍会裁剪回填副本） */
         }
+      } else if (outText.length > 8000) {
+        // 命中凭据模式：不入盘，只回填 head/tail 裁剪版 + 警告（凭据不进模型上下文/会话事件）
+        return (
+          `${outText.slice(0, 4096)}\n[... 输出疑似包含敏感凭据（API 密钥/私钥/令牌），完整输出未保存 — 请改用只输出变量名/状态摘要的命令重试 …]\n${outText.slice(-1024)}` +
+          netNote +
+          (r.ok ? `\n${sandboxTag(r.sandbox)}${netTag}执行完成` : `\n${sandboxTag(r.sandbox)}${netTag}`)
+        );
       }
 
       // 命令审计（所有模式，含沙箱档位）
@@ -530,6 +583,8 @@ export const TOOLS: Record<string, ToolDef> = {
     async execute(args, ctx) {
       const rel = (args.path as string | undefined) || ".";
       const abs = path.resolve(ctx.root, rel);
+      // v3.5 审计修复：目录越界拦截（对齐 git_add/git_log 同款；path 传 ../.. 可跑任意目录）
+      if (!isPathInside(ctx.root, abs)) return `错误：路径越界（不允许访问项目根之外）: ${rel}`;
       const r = await runShell("git status --short --branch", abs, 60000, sanitizeEnv(), ctx.abortSignal);
       if (!r.ok) {
         if (/not a git repository/i.test(r.out)) return `该目录不是 Git 仓库：${abs}`;
@@ -577,9 +632,12 @@ export const TOOLS: Record<string, ToolDef> = {
         // 批准后子智能体内部继承授权（requireExplicit 安全红线仍逐条弹）。
         const readOnly = tasks.every((t) => isReadOnlyDelegation(t, ctx.root));
         if (!readOnly) {
+          // v3.4 审计修复：写能力委派对齐安全红线档位（联网/自注册同款 requireExplicit）——
+          // 原实现 -y 无人值守自动放行，等于绕过审批直接授权子 Agent 写文件/跑命令
           const approved = await ctx.requestApproval(
             tasks.map((t) => describeDelegation(t, ctx.root)).join("\n\n"),
-            "high"
+            "high",
+            true
           );
           if (!approved) return "用户拒绝：未授权该委派任务";
         }
@@ -785,6 +843,10 @@ export const TOOLS: Record<string, ToolDef> = {
       const startedAt = Date.now();
       let lastProgress = "";
       for (;;) {
+        // v3.4 审计修复：wait_task 不响应中止——用户 stop/父级 abort 时 500ms 轮询会
+        // 继续空转直到超时（子 Agent 任务中止后句柄 status 停在 error，job 停在被杀）。
+        // 每轮检查 abortSignal，中止立即返回。
+        if (ctx.abortSignal?.aborted) return "任务已中止，停止等待。";
         // 子智能体：轮询句柄状态（status 变 done/error 即结束）
         if (taskType === "subagent") {
           const h = getBackgroundAgent(ctx.sessionId, taskId);
@@ -828,6 +890,8 @@ export const TOOLS: Record<string, ToolDef> = {
     async execute(args, ctx) {
       const rel = (args.path as string | undefined) || ".";
       const abs = path.resolve(ctx.root, rel);
+      // v3.5 审计修复：目录越界拦截（对齐 git_add/git_log 同款）
+      if (!isPathInside(ctx.root, abs)) return `错误：路径越界（不允许访问项目根之外）: ${rel}`;
       const wantStat = args.stat !== false;
       const file = args.file as string | undefined;
       // v2.13：file 参数命令注入修复——只允许安全字符（防 `$() 反引号在双引号内执行；
@@ -861,6 +925,9 @@ export const TOOLS: Record<string, ToolDef> = {
     async execute(args, ctx) {
       const rel = (args.path as string | undefined) || ".";
       const abs = path.resolve(ctx.root, rel);
+      // v3.5 审计修复：目录越界拦截（run_test 是 low 免审批 + 可执行任意测试命令，
+      // path 传 ../.. 等于在任意目录跑命令，必须硬校验）
+      if (!isPathInside(ctx.root, abs)) return `错误：路径越界（不允许访问项目根之外）: ${rel}`;
       const explicit = args.command as string | undefined;
       let cmd = explicit;
       if (!cmd) {

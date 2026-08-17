@@ -2,6 +2,9 @@
  * 审批策略（v2.4 设置界面）：全局档位 + 工具级覆盖 + 命令白名单
  *
  * 档位语义：
+ *  - full：完全信任（v3.5，对标 Codex --auto / harness danger-full-access）——所有审批
+ *          自动放行（含联网/高危命令/自注册/写委派等安全红线）；仅剩硬闸：工具被显式
+ *          禁用、受保护路径/路径越界、SSRF、断网策略、INFU.md 路径作用域。审计照常落库
  *  - auto：非 requireExplicit 场景全自动放行（等价 CLI -y；联网放行/自注册等安全线永不豁免）
  *  - smart：低风险自动、中/高人工（v2.4 前的历史行为，默认）
  *  - confirm：全部人工确认（low 也弹窗）
@@ -54,8 +57,11 @@ export const DEFAULT_COMMAND_ALLOWLIST: string[] = [
  * v2.13：shell 组合符检测（白名单放行的前提 = 单条只读命令）——
  * `git status && rm -rf x` 命中 git status* 白名单但实际执行 rm：组合符让"放行这条命令"
  * 变成"放行命令及其链式结果"，超出信任面 → 含组合符退回正常审批。
+ * v3.4 审计修复（H3）：补单字符 `&`——Windows cmd.exe 下 `&` 即命令分隔符
+ * （`git status & rm -rf x`），POSIX 下为后台符同样可夹带任意命令；
+ * 原正则只拦 `&&`，白名单命令可携带任意命令全模式免审批执行。
  */
-const SHELL_COMBINATORS = /&&|\|\||;|\||>|<|`|\$\(|\n/;
+const SHELL_COMBINATORS = /&|\|\||;|\||>|<|`|\$\(|\n/;
 export function hasShellCombinators(command: string): boolean {
   return SHELL_COMBINATORS.test(command);
 }
@@ -77,13 +83,16 @@ export function currentApprovalPolicy(): ResolvedApprovalPolicy {
 
 /**
  * 档位决策：true=自动放行；null=需人工确认（不存在自动拒绝——拒绝只来自工具禁用）。
- * requireExplicit（联网放行/自注册等安全线）任何档位下都需人工——绝不自动放行。
+ * full（v3.5）：全部放行（含 requireExplicit 安全红线）——用户显式选择完全信任档，
+ * 仅剩硬闸（禁用工具/路径/SSRF/断网）在守卫与工具层拦截；
+ * 其余档位下 requireExplicit（联网放行/自注册等安全线）需人工——绝不自动放行。
  */
 export function shouldAutoApprove(
   policy: ResolvedApprovalPolicy,
   risk: RiskLevel,
   requireExplicit?: boolean
 ): boolean | null {
+  if (policy.mode === "full") return true;
   if (requireExplicit) return null;
   switch (policy.mode) {
     case "auto":

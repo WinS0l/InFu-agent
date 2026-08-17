@@ -1,4 +1,4 @@
-import { useEffect, useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { Check, ChevronRight, Copy, X } from "lucide-react";
 
 /* ═══ v3 UI 打磨：共享原语（对齐 deepseek-主流 的 Button/Modal/Toggle/StateDot/DisclosureRow/CodeBlock）═══ */
@@ -53,11 +53,12 @@ export function Modal({
   /** 固定高度（如 "min(720px, 90vh)"；缺省自适应内容） */
   height?: string;
   maskClosable?: boolean;
-  /** Esc 关闭（审批类关键操作可关闭，防止误触） */
+  /** Esc 关闭（审批等关键操作弹窗传 escClose=false——只有显式允许/拒绝才能关闭） */
   escClose?: boolean;
   /** 头部关闭按钮 */
   showClose?: boolean;
 }) {
+  const panelRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
     if (!escClose) return;
     const onKey = (e: KeyboardEvent) => {
@@ -66,6 +67,18 @@ export function Modal({
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [onClose, escClose]);
+  // v3.4 审计修复：焦点管理 + 背景滚动锁——① 打开时焦点移入弹窗（键盘 Tab 不会
+  // 逃逸到背景表单/按钮）；② 背景 wheel 滚动锁定（弹窗内滚动时聊天列表不再穿透滚动）；
+  // 多弹窗层叠用「记录挂载前值、卸载恢复」自然嵌套
+  useEffect(() => {
+    const prevOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    const t = setTimeout(() => panelRef.current?.focus(), 0);
+    return () => {
+      clearTimeout(t);
+      document.body.style.overflow = prevOverflow;
+    };
+  }, []);
   return (
     <div
       className="fixed inset-0 z-50 flex items-center justify-center"
@@ -75,7 +88,9 @@ export function Modal({
       }}
     >
       <div
-        className="flex max-h-[calc(100vh-48px)] flex-col overflow-hidden rounded-3xl border border-line bg-elevated shadow-lv3"
+        ref={panelRef}
+        tabIndex={-1}
+        className="flex max-h-[calc(100vh-48px)] flex-col overflow-hidden rounded-3xl border border-line bg-elevated shadow-lv3 outline-none"
         style={{ width: `min(${width}px, 92vw)`, ...(height ? { height } : {}) }}
       >
         {title !== undefined && (

@@ -19,9 +19,9 @@
  */
 
 import { existsSync, readFileSync, readdirSync, statSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
-import { homedir } from "node:os";
 import { join } from "node:path";
 import { parseSkillFrontmatter } from "../plugin/skills.js";
+import { resolveDataDir } from "../data-dir.js";
 
 /** agent 文件元信息（发现层展示 + 委派加载） */
 export interface AgentMeta {
@@ -127,10 +127,13 @@ function toInt(v: unknown): number | undefined {
 
 /** 读取单个 agent 定义（内置 > 用户级 > 项目级）；不存在/不合法返回 null */
 export function readAgentFile(name: string, root: string): AgentFileDef | null {
+  // v3.5 审计修复（H2）：读侧同样校验名字（与 writeAgentFile 一致）——
+  // 原实现无校验：name 含 `../` 可越出 agents 目录读取任意 .md 文件（如 ~/.infu/agents/../config.json）
+  if (!/^[a-z0-9][a-z0-9-]{0,63}$/i.test(name)) return null;
   const builtin = BUILTIN_AGENTS.find((a) => a.name === name);
   if (builtin) return builtin;
   const candidates = [
-    { dir: join(homedir(), ".infu", "agents"), level: "user" as const },
+    { dir: join(resolveDataDir(), "agents"), level: "user" as const },
     { dir: join(root, ".infu", "agents"), level: "project" as const },
   ];
   for (const { dir, level } of candidates) {
@@ -161,7 +164,7 @@ function collectDir(dir: string, level: AgentMeta["level"], out: Map<string, Age
 export function listAgents(root: string): AgentFileDef[] {
   const out = new Map<string, AgentFileDef>();
   for (const a of BUILTIN_AGENTS) out.set(a.name, a);
-  collectDir(join(homedir(), ".infu", "agents"), "user", out);
+  collectDir(join(resolveDataDir(), "agents"), "user", out);
   collectDir(join(root, ".infu", "agents"), "project", out);
   return [...out.values()].sort((a, b) => a.name.localeCompare(b.name));
 }
@@ -169,7 +172,7 @@ export function listAgents(root: string): AgentFileDef[] {
 /** 删除用户级/项目级 agent 文件（内置不可删）；返回是否删除成功 */
 export function deleteAgentFile(name: string, root: string, level: "user" | "project"): boolean {
   if (BUILTIN_AGENTS.some((a) => a.name === name)) return false;
-  const dir = level === "user" ? join(homedir(), ".infu", "agents") : join(root, ".infu", "agents");
+  const dir = level === "user" ? join(resolveDataDir(), "agents") : join(root, ".infu", "agents");
   const p = join(dir, `${name}.md`);
   if (!existsSync(p)) return false;
   rmSync(p, { force: true });
@@ -184,7 +187,7 @@ export function writeAgentFile(name: string, level: "user" | "project", content:
   if (!parseAgentFile(content)) {
     throw new Error("agent 内容不合法（需要 frontmatter：description 必填 + 正文）");
   }
-  const dir = level === "user" ? join(homedir(), ".infu", "agents") : join(root, ".infu", "agents");
+  const dir = level === "user" ? join(resolveDataDir(), "agents") : join(root, ".infu", "agents");
   mkdirSync(dir, { recursive: true });
   const p = join(dir, `${name}.md`);
   writeFileSync(p, content, "utf-8");

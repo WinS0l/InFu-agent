@@ -9,7 +9,8 @@ import { mkdirSync, writeFileSync, cpSync, existsSync, rmSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import type { InfuConfig } from "@infu/shared";
-import { loadConfig, CONFIG_PATH } from "../providers/registry.js";
+import { loadConfig, configPath } from "../providers/registry.js";
+import { resolveDataDir } from "../data-dir.js";
 import { loadPlugins } from "./index.js";
 import { listSkills, readSkillMeta } from "./skills.js";
 import { listMarketplacePlugins, findMarketplacePlugin } from "./marketplace.js";
@@ -43,7 +44,8 @@ function ask(question: string, def?: string): Promise<string> {
 }
 
 function saveConfig(cfg: InfuConfig) {
-  mkdirSync(join(homedir(), ".infu"), { recursive: true });
+  mkdirSync(join(resolveDataDir()), { recursive: true });
+  const CONFIG_PATH = configPath();
   writeFileSync(CONFIG_PATH, JSON.stringify({ ...cfg, version: cfg.version ?? 1 }, null, 2), "utf-8");
 }
 
@@ -321,7 +323,7 @@ async function skillImport(pathArg?: string): Promise<void> {
     console.error(C.red(`"${dir}" 下未找到合法 SKILL.md（需 frontmatter name=目录名 + description）`));
     return;
   }
-  const dest = join(homedir(), ".infu", "skills", meta.name);
+  const dest = join(resolveDataDir(), "skills", meta.name);
   if (existsSync(dest)) {
     const ok = await ask(`~/.infu/skills/${meta.name} 已存在，覆盖？(y/N)`, "n");
     if (!/^y/i.test(ok)) { console.log("已取消"); return; }

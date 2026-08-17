@@ -387,6 +387,10 @@ export async function runAgent(opts: AgentRunOptions): Promise<RunResult> {
     // v3.3 异步任务编排：后台任务完成通知入队（drainTaskNotifications 消费 →
     // 每步开始注入 user XML 消息，模型实时感知等待的任务已完成）
     enqueueTaskNotification: (note) => pendingNotes.push(note),
+    // v3.0 vision 底座 / v3.4 审计修复（H1）：visionQueue 必须挂在原 ctx 上——
+    // 工具执行时收到的是 `{ ...ctx, callId }` 浅拷贝，若此处不预置，push 发生在
+    // 拷贝上而 loop 读回原 ctx 恒为空（read_image/screen_capture 图片永远进不了模型）
+    visionQueue: [],
   };
 
   /**
@@ -477,6 +481,9 @@ export async function runAgent(opts: AgentRunOptions): Promise<RunResult> {
       const out: string[] = [];
       // v2.10 缓存友好：摘要请求 = 当前 system（稳定前缀）+ 原样历史消息 + 末尾摘要指令
       // ——使摘要调用成为会话最后一个请求的真前缀，复用 provider 的 warm KV cache
+      // v3.4 审计修复：摘要调用补齐 usage 统计 + model-call 事件（此前统计页漏记压缩调用，
+      // 长会话的 token 用量被系统性低估；模型 = 当前活跃模型，与主线一致）
+      const sumUsage = { cacheHit: 0, cacheMiss: 0, promptTokens: 0, completionTokens: 0 };
       for await (const delta of streamChatWithFailover({
         chain,
         messages: [
@@ -487,11 +494,35 @@ export async function runAgent(opts: AgentRunOptions): Promise<RunResult> {
         signal: abortSignal,
       })) {
         if (delta.text) out.push(delta.text);
+        if (delta.usage) {
+          sumUsage.cacheHit += delta.usage.cacheHit;
+          sumUsage.cacheMiss += delta.usage.cacheMiss;
+          sumUsage.promptTokens += delta.usage.promptTokens;
+          sumUsage.completionTokens += delta.usage.completionTokens;
+        }
+      }
+      if (sumUsage.promptTokens > 0 || sumUsage.completionTokens > 0) {
+        usage.cacheHit += sumUsage.cacheHit;
+        usage.cacheMiss += sumUsage.cacheMiss;
+        usage.promptTokens += sumUsage.promptTokens;
+        usage.completionTokens += sumUsage.completionTokens;
+        emit({
+          type: "model-call",
+          model: chain.active.model,
+          promptTokens: sumUsage.promptTokens,
+          completionTokens: sumUsage.completionTokens,
+          cacheHit: sumUsage.cacheHit,
+          cacheMiss: sumUsage.cacheMiss,
+          summary: true,
+        });
       }
       return out.join("").trim() || "（空摘要）";
     };
     const r = await compressMessages(messages, window, summarize);
-    if (r.summary) {
+    // v3.5 审计修复（H5）：压缩降级死代码——原 `if (r.summary)` 门槛导致「摘要过大拒绝/
+    // 摘要生成失败 → 直接丢弃最老部分」的降级路径永不生效（messages 保持未压缩，
+    // 上下文持续超限）。改为「压缩确实变小才应用」（无论摘要是否可用）。
+    if (r.after < r.before) {
       messages = r.messages;
       emit({ type: "context-compressed", before: r.before, after: r.after, summary: r.summary });
     }
@@ -659,8 +690,11 @@ export async function runAgent(opts: AgentRunOptions): Promise<RunResult> {
 
     // 2) 解析工具调用参数（JSON；v2.6 收尾：畸形 JSON 自动修复，修复失败回填错误不执行）
     type ParsedCall = { toolCallId: string; toolName: string; input: Record<string, unknown>; inputError?: string };
-    const calls: ParsedCall[] = rawToolCalls
-      .filter((c) => c.id && c.name)
+    // v3.4 审计修复：无效调用（缺 id/name）在此统一过滤——原实现只过滤了执行列表，
+    // 但 825 行回填 assistant 消息时用的是**完整 rawToolCalls**，导致 assistant.tool_calls
+    // 含无对应 tool 结果的调用 → 部分 provider 校验失败返回 400 整轮报废
+    const validToolCalls = rawToolCalls.filter((c) => c.id && c.name);
+    const calls: ParsedCall[] = validToolCalls
       .map((c) => {
         const parsed = repairToolArgs(c.arguments ?? "");
         if (parsed === null) {
@@ -818,9 +852,11 @@ export async function runAgent(opts: AgentRunOptions): Promise<RunResult> {
     messages.push({
       role: "assistant",
       content: text,
-      ...(rawToolCalls.length
+      // v3.4 审计修复：回填只含有效调用（与执行列表一致——无效条目已在上方过滤，
+      // 避免 assistant.tool_calls 与 tool 结果不配对被 provider 400 拒绝）
+      ...(validToolCalls.length
         ? {
-            tool_calls: rawToolCalls.map((c) => ({
+            tool_calls: validToolCalls.map((c) => ({
               id: c.id,
               type: "function" as const,
               function: { name: c.name, arguments: c.arguments || "{}" },
@@ -863,11 +899,18 @@ export async function runAgent(opts: AgentRunOptions): Promise<RunResult> {
       emit({ type: "error", message: msg });
       return { text: msg, steps: maxSteps, toolCount, approvals, toolLogs, usage };
     }
-    throw e;
+    // v3.4 审计修复：max-steps 收尾总结失败不再整体 throw——任务实际已完成（工具副作用、
+    // 进度全部落库），仅总结调用失败却把任务标记为 error、前端无最终输出。
+    // 降级：输出「达到步数上限」完成提示（含错误信息），任务按完成收尾。
+    emit({ type: "error", message: `收尾总结生成失败：${err.message}` });
+    const fallback = `已达到本轮最大执行步数（${maxSteps}）但总结生成失败（${err.message}）。工作进度已保存，可继续发送「继续」让我接着干。`;
+    if (!suppressFinal) emit({ type: "done", text: fallback, toolCount, steps: maxSteps, usage });
+    return { text: fallback, steps: maxSteps, toolCount, approvals, toolLogs, usage };
   }
 }
 
-/** 审批请求辅助：生成唯一 id 并推送事件 */
+/** 审批请求辅助：生成唯一 id 并推送事件（CLI/定时任务/子智能体路径）
+ *  v3.5：full 档（完全信任）直接放行——CLI/定时任务同样生效（用户显式配置的档位） */
 export function makeApprovalHandler(
   emit: (e: AgentEvent) => void,
   decide: (
@@ -881,6 +924,7 @@ export function makeApprovalHandler(
   requireExplicit?: boolean
 ) => Promise<boolean> {
   return async (description, risk, requireExplicit) => {
+    if (currentApprovalPolicy().mode === "full") return true;
     const id = randomUUID();
     emit({ type: "approval-required", id, description, risk });
     const approved = await decide(description, risk, requireExplicit);

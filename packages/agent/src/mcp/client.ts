@@ -70,7 +70,14 @@ export async function connectMcp(cfg: McpServerConfig): Promise<McpConnection> {
       }));
     },
     async callTool(name, args) {
-      const r = await client.callTool({ name, arguments: args });
+      // v3.5 审计修复：callTool 超时兜底（3 分钟）——远端 MCP 服务器无响应时
+      // 任务不再永久悬挂（连接握手已有 20s 超时，工具调用原无上限）
+      const r = await Promise.race([
+        client.callTool({ name, arguments: args }),
+        new Promise<never>((_, reject) =>
+          setTimeout(() => reject(new Error(`MCP 工具 ${name} 调用超时（180s）`)), 180_000).unref()
+        ),
+      ]);
       // 文本化：拼接 text 内容；image 等非文本给占位提示
       // （callTool 返回带 unknown 索引签名，content 需显式断言为块数组）
       const blocks = (r.content ?? []) as Array<{ type: string; [k: string]: unknown }>;

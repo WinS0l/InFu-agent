@@ -21,15 +21,15 @@
  *    拖拽区 = 各栏顶部行（app-region: drag），窗口按钮 = 右上角自绘悬浮 WindowControls）
  *  - 关闭窗口 = 退出应用；托盘仅「显示主窗口/退出」入口
  */
-import { app, BrowserWindow, Tray, Menu, ipcMain, screen, nativeImage, nativeTheme, shell, dialog, type Rectangle } from "electron";
+import { app, BrowserWindow, Tray, Menu, ipcMain, screen, nativeImage, nativeTheme, shell, dialog, powerSaveBlocker, Notification, type Rectangle } from "electron";
 import type { WebContents } from "electron";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { homedir } from "node:os";
 import { execFileSync } from "node:child_process";
 import { startServer } from "@infu/agent/dist/server.js";
 import { loadConfig } from "@infu/agent/dist/providers/registry.js";
+import { resolveDataDir } from "@infu/agent/dist/data-dir.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const IS_DEV = process.env.INFU_DESKTOP_DEV === "1";
@@ -58,6 +58,9 @@ app.commandLine.appendSwitch("enable-unsafe-swiftshader");
 let mainWindow: BrowserWindow | null = null;
 let tray: Tray | null = null;
 let serverPort = 4317;
+// v3.5 常规设置：关闭到托盘（close 拦截需要退出标志防误拦） + 防休眠（powerSaveBlocker id）
+let quitting = false;
+let powerSaveId: number | null = null;
 
 // ── 单实例（重复启动聚焦已有窗口）──
 if (!app.requestSingleInstanceLock()) {
@@ -72,9 +75,9 @@ if (!app.requestSingleInstanceLock()) {
   });
 }
 
-// ── 窗口状态持久化（~/.infu/desktop-window.json，复用配置目录）──
+// ── 窗口状态持久化（<dataDir>/desktop-window.json，复用配置目录）──
 function windowStatePath() {
-  return join(homedir(), ".infu", "desktop-window.json");
+  return join(resolveDataDir(), "desktop-window.json");
 }
 function loadWindowState(): Partial<Rectangle> & { maximized?: boolean } {
   try {
@@ -94,7 +97,7 @@ function loadWindowState(): Partial<Rectangle> & { maximized?: boolean } {
 function saveWindowState(win: BrowserWindow) {
   try {
     const b = win.getBounds();
-    mkdirSync(join(homedir(), ".infu"), { recursive: true });
+    mkdirSync(resolveDataDir(), { recursive: true });
     writeFileSync(windowStatePath(), JSON.stringify({ ...b, maximized: win.isMaximized() }));
   } catch { /* 忽略 */ }
 }
@@ -184,7 +187,16 @@ function createMainWindow() {
   };
   win.on("resize", scheduleSave);
   win.on("move", scheduleSave);
-  win.on("close", () => saveWindowState(win));
+  // v3.5 常规设置「关闭到托盘」：拦截 close → 隐藏到托盘（托盘菜单「显示主窗口」/「退出」）；
+  // app.quit() 路径（托盘退出/系统注销）经 before-quit 标志放行
+  win.on("close", (e) => {
+    if (!quitting && loadConfig()?.general?.closeToTray === true) {
+      e.preventDefault();
+      win.hide();
+      return;
+    }
+    saveWindowState(win);
+  });
 
   // 显示：就绪后展示（避免白屏闪烁）；加固环境首帧合成可能极慢/不触发 → 2s 超时兜底
   win.once("ready-to-show", () => {
@@ -284,6 +296,27 @@ function registerBrowserWebContents(wc: WebContents) {
     }
   });
 
+  // v3.5 审计修复（H1）：guest 导航守卫（webview sandbox=no + 页面内容不可信——
+  // 恶意网页可诱导模型/用户导航到本机 InFu 服务读 __INFU_TOKEN__ 自我提权）。
+  // 三闸共用 sanitizeBrowserUrl（file:///非 Web scheme 一律拒绝 + 本机服务端口拦截）：
+  // ① will-navigate（页面链接/JS 导航）② will-redirect（重定向链）③ window.open
+  const guardNav = (url: string): boolean => {
+    if (sanitizeBrowserUrl(url)) return true;
+    console.log(`[infu-desktop] 拦截 guest 导航: ${String(url).slice(0, 120)}`);
+    return false;
+  };
+  wc.on("will-navigate", (e, url) => {
+    if (!guardNav(url)) e.preventDefault();
+  });
+  wc.on("will-redirect", (e, url) => {
+    if (!guardNav(url)) e.preventDefault();
+  });
+  wc.setWindowOpenHandler(({ url }) => {
+    // 新窗口一律拒绝（webview 架构内无法承载新窗口；外链由用户自行处理）
+    console.log(`[infu-desktop] 拒绝 guest window.open: ${String(url).slice(0, 120)}`);
+    return { action: "deny" };
+  });
+
   // UI 状态广播（tab 条/工具栏）
   const onState = () => sendBrowserState();
   wc.on("did-navigate", onState);
@@ -307,6 +340,14 @@ function registerBrowserWebContents(wc: WebContents) {
 (globalThis as Record<string, unknown>).__infuCdpSend = async (tabId: string | number, method: string, params?: unknown) => {
   const wc = browserTabs.get(Number(tabId));
   if (!wc || wc.isDestroyed()) throw new Error(`浏览器 tab ${tabId} 不存在`);
+  // v3.5 审计修复（H1）：Page.navigate 走与地址栏相同的 URL 策略（主进程侧拦截，
+  // Agent 直接 CDP 导航不再绕过 sanitizeBrowserUrl）——loopback 端口判定用真实 serverPort
+  if (method === "Page.navigate") {
+    const url = (params as { url?: unknown } | undefined)?.url;
+    if (typeof url === "string" && !sanitizeBrowserUrl(url)) {
+      throw new Error(`导航被拦截（非法/本机服务地址）：${url.slice(0, 120)}`);
+    }
+  }
   return wc.debugger.sendCommand(method, params);
 };
 /** Agent 侧 CDP 事件订阅（Page.loadEventFired / Runtime.consoleAPICalled 等） */
@@ -326,12 +367,56 @@ function registerBrowserWebContents(wc: WebContents) {
   };
 };
 
+/**
+ * v3.4 审计修复（M1）：loopback 检测——webview 可导航到本机 InFu 服务
+ * （http://127.0.0.1:4317/），agent 若被网页内容诱导导航过去，可用 browser_eval
+ * 读取注入的 window.__INFU_TOKEN__ 并调用 /api/approvals/bypass 自我提权放行全部
+ * 审批（confirm 档保证被打破）。localhost / 127.x / ::1 / IPv4 简写 / 非标准数字段
+ * （hex/octal）一律拒绝导航（fail-closed）。
+ */
+function isLoopbackTarget(u: URL): boolean {
+  const h = u.hostname.replace(/^\[|\]$/g, "").toLowerCase();
+  if (h === "localhost" || h.endsWith(".localhost") || h === "::1") return true;
+  // IPv4-mapped（::ffff:127.0.0.1）→ 提取尾部 v4 复查
+  const mapped = /^::(?:ffff:)?(\d+(?:\.\d+){0,3})$/i.exec(h);
+  const v4 = mapped ? mapped[1] : h;
+  if (/^[\d.]+$/.test(v4)) {
+    const parts = v4.split(".").map(Number);
+    if (parts.some((p) => !Number.isFinite(p))) return true;
+    const first = parts[0];
+    // 简写归一化（127.1=127.0.0.1、0=0.0.0.0 等）——首段 127/0 即本机语义
+    if (parts.length === 1) return first === 127 || first === 0;
+    return first === 127 || first === 0;
+  }
+  // 非标准数字段（0x7f / 0177 等）→ 保守拦截（fail-closed）
+  if (/^[0-9a-fx.]+$/i.test(v4)) return true;
+  return false;
+}
+
 /** 嵌入浏览器 URL 校验（v3.1 审计修复：拒绝 file:// 等非 Web scheme——webview 无沙箱，
- *  file:// 可直读磁盘；Agent 驱动与 UI 地址栏共用，非法返回 null 不导航） */
+ *  file:// 可直读磁盘；Agent 驱动与 UI 地址栏共用，非法返回 null 不导航。
+ *  v3.4 审计修复（M1）：拦截 loopback 目标（见 isLoopbackTarget）。
+ *  v3.5 审计修复（H1 收口）：loopback 拦截改为**仅 InFu 服务自身端口**——v3.4 拦全部
+ *  回环地址把本地 dev server 预览（如 vite 5173）一并误伤，而嵌入式浏览器预览本地服务
+ *  是核心用途；真正要防的是带 __INFU_TOKEN__ 注入面的 InFu 服务（端口随冲突自增，
+ *  用当前实际 serverPort 判定；URL 省略端口 = 默认端口 80/443，非 InFu 服务 → 放行） */
 function sanitizeBrowserUrl(raw?: string): string | null {
   if (!raw || !raw.trim()) return null;
   const u = raw.trim();
-  if (/^https?:/i.test(u)) return u;
+  if (/^https?:/i.test(u)) {
+    try {
+      if (isLoopbackTarget(new URL(u))) {
+        const port = new URL(u).port;
+        if (!port || Number(port) === serverPort) {
+          console.log(`[infu-desktop] 拒绝本机服务导航: ${u.slice(0, 120)}`);
+          return null;
+        }
+      }
+    } catch {
+      return null;
+    }
+    return u;
+  }
   if (u === "about:blank") return u;
   if (/^[\w-]+(\.[\w-]+)+(\/.*)?$/.test(u)) return `https://${u}`;
   console.log(`[infu-desktop] 拒绝非法浏览器地址: ${u.slice(0, 120)}`);
@@ -374,6 +459,14 @@ function sanitizeBrowserUrl(raw?: string): string | null {
     console.log(`[infu-desktop] 开机自启设置失败: ${(e as Error).message.slice(0, 120)}`);
   }
 };
+
+// v3.5 设置审计修复：启动复算开机自启——config 被直接修改/数据迁移后桌面不会主动补建；
+// 登录项本身跨重启持久，这里保证「配置为开」与「实际开启」一致（配置为关则保持不打扰）
+try {
+  if (loadConfig()?.general?.autoLaunch === true) {
+    app.setLoginItemSettings({ openAtLogin: true });
+  }
+} catch { /* 平台不支持忽略 */ }
 
 // ── computer-use 桌面通道（v3.0 vision 底座；v3.2 增强：DPI 感知/多显示器/滚动/按键/移动）──
 // 零依赖实现：截图 = PowerShell System.Drawing（CopyFromScreen）；
@@ -738,6 +831,30 @@ function registerIpc() {
   ipcMain.on("browser-view:open-external", (_e, url: string) => {
     if (/^https?:/i.test(url)) shell.openExternal(url);
   });
+  // v3.5 修复：UI 视口（📄 预设/适应窗口）→ CDP Emulation 同步（与 Agent
+  // browser_viewport 同一通道——此前只改元素 CSS，Agent 设过的设备度量残留 → 适应窗口无效）
+  ipcMain.handle("browser-view:set-viewport", async (_e, opts: { width?: number; height?: number; fit?: boolean }) => {
+    const wc = activeWc();
+    if (!wc || wc.isDestroyed()) return;
+    try {
+      if (opts?.fit) {
+        await wc.debugger.sendCommand("Emulation.clearDeviceMetricsOverride");
+      } else if (opts?.width && opts?.height) {
+        await wc.debugger.sendCommand("Emulation.setDeviceMetricsOverride", {
+          width: Math.round(opts.width),
+          height: Math.round(opts.height),
+          deviceScaleFactor: 0,
+          mobile: false,
+        });
+      }
+    } catch (e) {
+      console.log(`[infu-desktop] viewport 同步失败: ${(e as Error).message}`);
+      return;
+    }
+    // 通知渲染进程保持状态一致（fit 清 freeSize）
+    const notifyViewport = (globalThis as Record<string, unknown>).__infuNotifyViewport as ((opts: unknown) => void) | undefined;
+    notifyViewport?.(opts);
+  });
 }
 
 function createTray() {
@@ -772,6 +889,36 @@ app.whenReady().then(() => {
   startServer({
     host: "127.0.0.1",
     ...(staticDir ? { staticDir } : {}),
+    onEvent: (sessionId, ev) => {
+      // v3.5 常规设置：运行中防休眠（user-message 开始 / done·stopped 结束）
+      if (loadConfig()?.general?.preventSleep === true) {
+        if (ev.type === "user-message") {
+          if (powerSaveId == null) {
+            powerSaveId = powerSaveBlocker.start("prevent-app-suspension");
+          }
+        } else if (ev.type === "done") {
+          if (powerSaveId != null) {
+            try { powerSaveBlocker.stop(powerSaveId); } catch { /* 忽略 */ }
+            powerSaveId = null;
+          }
+        }
+      }
+      // v3.5 常规设置：任务完成系统通知（仅桌面端；done 是会话终态事件）
+      if (ev.type === "done") {
+        const g = loadConfig()?.general;
+        if (g?.taskNotifications !== false) {
+          try {
+            const ok = !String(ev.text ?? "").startsWith("任务已中止") && (ev.text?.length ?? 0) > 0;
+            new Notification({
+              title: ok ? "InFu · 任务完成" : "InFu · 任务结束",
+              body: String(ev.text ?? "").replace(/\s+/g, " ").slice(0, 160),
+              silent: g?.notificationSound === false,
+            }).show();
+          } catch { /* 通知失败忽略（未授权等） */ }
+        }
+      }
+      void sessionId;
+    },
     onListening: (port) => {
       serverPort = port;
       console.log(`[infu-desktop] agent 服务就绪: http://127.0.0.1:${port}`);
@@ -789,6 +936,15 @@ app.whenReady().then(() => {
   app.on("activate", () => {
     // macOS dock 点击（保留兼容）
     if (BrowserWindow.getAllWindows().length === 0) createMainWindow();
+  });
+
+  // v3.5 关闭到托盘：真正的退出（托盘菜单/系统）标记后放行 close 拦截
+  app.on("before-quit", () => {
+    quitting = true;
+    if (powerSaveId != null) {
+      try { powerSaveBlocker.stop(powerSaveId); } catch { /* 忽略 */ }
+      powerSaveId = null;
+    }
   });
 });
 

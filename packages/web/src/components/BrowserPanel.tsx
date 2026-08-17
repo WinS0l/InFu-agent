@@ -297,7 +297,15 @@ export default function BrowserPanel() {
                   className="flex w-full cursor-pointer items-center gap-2 rounded-lg px-2.5 py-1.5 text-left text-xs text-text transition-colors hover:bg-hover"
                   onClick={() => {
                     setMenu(null);
-                    setFreeSize("fit" in v ? null : { w: v.w, h: v.h });
+                    // v3.5 修复：UI 预设/适应窗口必须同步主进程 CDP Emulation——
+                    // 只改元素 CSS 时 Agent 设过的设备度量覆盖残留 → 「适应窗口」无效
+                    if ("fit" in v) {
+                      setFreeSize(null);
+                      void desktop.browserSetViewport({ fit: true });
+                    } else {
+                      setFreeSize({ w: v.w, h: v.h });
+                      void desktop.browserSetViewport({ width: v.w, height: v.h });
+                    }
                   }}
                 >
                   <v.icon className="h-3.5 w-3.5 text-sub" />
@@ -333,6 +341,7 @@ export default function BrowserPanel() {
                       const h = parseInt(customH, 10);
                       if (w > 100 && h > 100 && w < 4000 && h < 4000) {
                         setFreeSize({ w, h });
+                        void desktop.browserSetViewport({ width: w, height: h });
                         setCustomOpen(false);
                         setMenu(null);
                       }

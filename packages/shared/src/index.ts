@@ -58,12 +58,6 @@ export interface ModelConfig {
   fallbackModelIds?: string[];
   /** 适配角色（v2.2 轻量模型选择：声明该模型可担任的角色；低于 config 级 roles 显式指定） */
   roles?: Array<"planner" | "executor" | "reviewer">;
-  /** 能力探测结果（可选，运行时推断） */
-  capabilities?: {
-    toolCalling?: boolean;
-    vision?: boolean;
-    streaming?: boolean;
-  };
 }
 
 /** 角色模型引用：模型 id，或 {model, thinkingLevel}（角色独立思考级别） */
@@ -192,8 +186,14 @@ export interface SkillConfig {
 
 // ── v2.4 设置界面（权限等级 / 沙箱等级 / 常规 / 外观；全部可选节，passthrough 兼容）──
 
-/** 全局审批档位：auto=非人工必需全自动放行；smart=低风险自动、中/高人工（默认）；confirm=全部人工 */
-export type ApprovalMode = "auto" | "smart" | "confirm";
+/**
+ * 全局审批档位：
+ * auto=非人工必需全自动放行；smart=低风险自动、中/高人工（默认）；confirm=全部人工；
+ * full=完全信任（v3.5，对标 Codex --auto / harness danger-full-access）——所有审批
+ * 自动放行（含联网/高危命令/自注册/写委派等安全红线），仅剩硬闸：工具被显式禁用、
+ * 受保护路径/路径越界/SSRF/断网策略/INFU.md 路径作用域
+ */
+export type ApprovalMode = "auto" | "smart" | "confirm" | "full";
 
 /** 工具级风险/禁用覆盖（工具名精确 或 前缀*通配；与 MCP riskOverrides 同模式） */
 export interface ToolRiskOverride {
@@ -221,7 +221,7 @@ export interface SandboxConfig {
   mode?: "auto" | "off" | "soft" | "restricted" | "docker";
 }
 
-/** 常规设置（v2.4：Web 默认值） */
+/** 常规设置（v2.4：Web 默认值；v3.5 扩展对标 ZCode 常规设置） */
 export interface GeneralConfig {
   /** 默认项目根目录（Web 输入框初始值） */
   defaultRoot?: string;
@@ -229,6 +229,26 @@ export interface GeneralConfig {
   terminalShell?: "auto" | "cmd" | "powershell" | "bash";
   /** 开机自启（v3.0 批 12：桌面版可选，默认关闭——用户主动开启才生效） */
   autoLaunch?: boolean;
+  /** 任务通知（v3.5）：任务完成/失败/需要确认时发送桌面通知（Electron Notification；缺省 true） */
+  taskNotifications?: boolean;
+  /** 通知声音（v3.5）：通知开启时可单独关闭提示音（缺省 true） */
+  notificationSound?: boolean;
+  /** 关闭窗口时隐藏到托盘（v3.5，仅 Windows）：点关闭按钮/快捷键隐藏窗口，托盘「退出」才完全退出（缺省 false） */
+  closeToTray?: boolean;
+  /** 保持电脑运行（v3.5，桌面端全局生效）：阻止系统因空闲进入休眠，仍可手动睡眠/合盖休眠（缺省 false） */
+  preventSleep?: boolean;
+  /** 提问自动继续（v3.5）：Agent 提问（ask_user）5 分钟未回答自动继续；关闭则一直等待（缺省 false） */
+  autoContinueQuestions?: boolean;
+  /** 显示思考过程（v3.5）：消息流展示完整思考内容；关闭时每轮仍展示第一次思考（缺省 true） */
+  showThinking?: boolean;
+  /** 显示待办（v3.5）：消息流展示 Todo 工具卡片（缺省 true） */
+  showTodos?: boolean;
+  /** 任务完成自动提交（v3.5）：git 仓库中任务成功且有改动时自动 git add -A + commit（消息=任务摘要，绝不 push；缺省 false） */
+  autoCommit?: boolean;
+  /** 自动归档旧任务（v3.5）：定时扫描已完成、未置顶、最后更新早于保留期的会话自动归档（缺省 true） */
+  autoArchive?: boolean;
+  /** 归档保留时长（天，v3.5）：任务最后更新早于该时长才进入自动归档候选（缺省 7） */
+  archiveRetentionDays?: number;
 }
 
 /** 外观设置（v2.4：Web 界面偏好，随配置持久化） */
@@ -241,10 +261,13 @@ export interface AppearanceConfig {
   theme?: "light" | "dark";
 }
 
-/** 记忆设置（v2.7：记忆系统开关） */
+/** 记忆设置（v2.7：记忆系统开关；v3.5 加自动提炼） */
 export interface MemoryConfig {
   /** 任务结束自动沉淀项目历史（.infu/history/）开关；缺省 true */
   autoSediment?: boolean;
+  /** 任务结束自动提炼记忆（v3.5，对标 Codex 会话后提炼）：轻量模型把任务摘要分类提炼为
+   *  conventions/lessons/preferences 写入项目记忆；失败静默不影响交付；缺省 true */
+  autoRefine?: boolean;
 }
 
 /** 浏览器设置（v2.7：browser-use 插件运行配置） */
@@ -324,8 +347,9 @@ export type AgentEvent =
   | { type: "retry"; attempt: number; maxAttempts: number; delayMs: number; message: string; subagentId?: string }
   // ── v3.0 UI 审查：统计页真实数据源 ──
   /** 单次模型调用（loop 每轮成功流式结束后 emit；子 Agent 自动带 subagentId 归属；
-   *  统计页按天×模型聚合真实 token，替代 phase-start 阶段数占比近似） */
-  | { type: "model-call"; model: string; promptTokens: number; completionTokens: number; cacheHit?: number; cacheMiss?: number; subagentId?: string }
+   *  统计页按天×模型聚合真实 token，替代 phase-start 阶段数占比近似；
+   *  summary=true：上下文压缩的摘要调用（v3.4——此前压缩调用不计入统计，长会话用量被低估） */
+  | { type: "model-call"; model: string; promptTokens: number; completionTokens: number; cacheHit?: number; cacheMiss?: number; subagentId?: string; summary?: boolean }
   // ── v2.5 子智能体委派新增 ──
   /** 子智能体启动（delegate_task 委派；parentCallId 关联父级委派工具调用的 callId；readOnly=只读委派免审批；background=v2.11 后台模式） */
   | { type: "subagent-start"; id: string; name: string; prompt: string; parentCallId?: string; model?: string; readOnly?: boolean; background?: boolean }
@@ -614,14 +638,6 @@ const modelConfigSchema = z
     thinkingOverride: z.array(z.record(z.string(), z.unknown()).nullable()).optional(),
     fallbackModelIds: z.array(z.string()).optional(),
     roles: z.array(z.enum(["planner", "executor", "reviewer"])).optional(),
-    capabilities: z
-      .object({
-        toolCalling: z.boolean().optional(),
-        vision: z.boolean().optional(),
-        streaming: z.boolean().optional(),
-      })
-      .passthrough()
-      .optional(),
   })
   .passthrough();
 
@@ -674,7 +690,7 @@ const toolRiskOverrideSchema = z
 
 export const approvalPolicySchema = z
   .object({
-    mode: z.enum(["auto", "smart", "confirm"]).optional(),
+    mode: z.enum(["auto", "smart", "confirm", "full"]).optional(),
     toolOverrides: z.array(toolRiskOverrideSchema).optional(),
     commandAllowlist: z.array(z.string().min(1)).optional(),
   })
@@ -691,6 +707,16 @@ export const generalConfigSchema = z
     defaultRoot: z.string().optional(),
     terminalShell: z.enum(["auto", "cmd", "powershell", "bash"]).optional(),
     autoLaunch: z.boolean().optional(),
+    taskNotifications: z.boolean().optional(),
+    notificationSound: z.boolean().optional(),
+    closeToTray: z.boolean().optional(),
+    preventSleep: z.boolean().optional(),
+    autoContinueQuestions: z.boolean().optional(),
+    showThinking: z.boolean().optional(),
+    showTodos: z.boolean().optional(),
+    autoCommit: z.boolean().optional(),
+    autoArchive: z.boolean().optional(),
+    archiveRetentionDays: z.number().int().min(1).max(365).optional(),
   })
   .passthrough();
 

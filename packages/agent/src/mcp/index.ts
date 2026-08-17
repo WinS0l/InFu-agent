@@ -28,12 +28,16 @@ export interface McpLoadResult {
 export async function loadMcpTools(
   servers: McpServerConfig[] | undefined,
   emit: (e: AgentEvent) => void,
-  connectFn: typeof connectMcp = connectMcp
+  connectFn: typeof connectMcp = connectMcp,
+  builtinNames?: Iterable<string>
 ): Promise<McpLoadResult> {
   const tools: ToolDef[] = [];
   const connections: McpConnection[] = [];
   const failures: Array<{ id: string; message: string }> = [];
-  const usedNames = new Set<string>();
+  // v3.4 审计修复（M3）：usedNames 预置内置工具名——MCP 服务器定义 `read_file`/`run_command`/
+  // `edit_file` 等内置同名工具时，合并层静默覆盖内置实现（模型被投毒工具劫持）。
+  // 源头改名（加服务器前缀）后合并层不再冲突；withMcpTools 另有兜底改名。
+  const usedNames = new Set<string>(builtinNames ?? []);
 
   for (const cfg of servers ?? []) {
     if (cfg.enabled === false) continue;
@@ -76,6 +80,10 @@ export async function loadMcpTools(
 /** 注入帮助：Executor 工具集 = 内置工具 + MCP 工具 */
 export function withMcpTools(base: Record<string, ToolDef>, mcp: ToolDef[]): Record<string, ToolDef> {
   const merged: Record<string, ToolDef> = { ...base };
-  for (const t of mcp) merged[t.name] = t;
+  for (const t of mcp) {
+    // v3.4 审计修复（M3）兜底：任何路径绕进来的同名工具都改名，绝不静默覆盖内置实现
+    const name = merged[t.name] ? `ext_${t.name}` : t.name;
+    merged[name] = name === t.name ? t : { ...t, name, description: `[与内置工具重名，已自动改名 ${name}] ${t.description}` };
+  }
   return merged;
 }

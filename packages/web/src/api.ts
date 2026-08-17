@@ -27,6 +27,18 @@ async function apiFetch(input: RequestInfo | URL, init?: RequestInit): Promise<R
 // v3.0 审计修复（S7）：导出供 store/组件复用（裸 fetch 绕过 API_BASE，桌面 dev 端口错）
 export { apiFetch };
 
+/**
+ * v3.4 审计修复：资源 URL 生成（img/audio 等浏览器原生加载无法带 header）——
+ * 生产模式（同端口）下 /api/* 有本地令牌校验，img 不带 X-InFu-Token 会 401；
+ * 这里把 token 挂到 query（服务端同时接受 ?token= 与 header），桌面 dev 模式拼绝对地址。
+ */
+export function apiUrl(p: string): string {
+  const base = API_BASE + p;
+  const token = (globalThis as { __INFU_TOKEN__?: string }).__INFU_TOKEN__;
+  if (!token) return base;
+  return `${base}${base.includes("?") ? "&" : "?"}token=${encodeURIComponent(token)}`;
+}
+
 /** 加载模型列表 */
 export async function fetchModels() {
   const res = await apiFetch("/api/models");
@@ -78,32 +90,6 @@ export async function fetchProviderModels(id: string): Promise<Array<{ id: strin
   const data = await res.json();
   if (!res.ok || data.ok === false) throw new Error(data.message || `获取模型失败: ${res.status}`);
   return data.models ?? [];
-}
-
-// ── v2.3 角色路由（面板：每角色 模型 + 独立思考级别）──
-
-export interface RoleConfig {
-  role: "planner" | "executor" | "reviewer";
-  modelId?: string;
-  thinkingLevel?: number;
-}
-
-export async function fetchRoles(): Promise<RoleConfig[]> {
-  const res = await apiFetch("/api/roles");
-  if (!res.ok) throw new Error(`角色配置加载失败: ${res.status}`);
-  const data = await res.json();
-  return data.roles ?? [];
-}
-
-export async function saveRoles(body: Record<string, { model?: string; thinkingLevel?: number } | undefined>) {
-  const res = await apiFetch("/api/roles", {
-    method: "PUT",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify(body),
-  });
-  const data = await res.json();
-  if (!res.ok || data.ok === false) throw new Error(data.message || `保存角色配置失败: ${res.status}`);
-  return data;
 }
 
 // ── v2.3 MCP 服务器管理（MCP 客户端作为第一个插件类型：工具动态注入执行阶段）──
@@ -250,7 +236,7 @@ export const deleteAgent = (name: string) => providerApi(`/api/agents/${encodeUR
 
 // ── v2.4 设置界面（配置系统 UI 化：权限等级 / 沙箱等级 / 常规 / 外观）──
 
-export type ApprovalMode = "auto" | "smart" | "confirm";
+export type ApprovalMode = "auto" | "smart" | "confirm" | "full";
 export type SandboxModeValue = "auto" | "off" | "soft" | "restricted" | "docker";
 
 export interface ToolRiskOverrideInput {
@@ -271,7 +257,21 @@ export interface SettingsConfig {
     dockerAvailable?: boolean;
     winRestrictedOk?: boolean;
   };
-  general: { defaultRoot?: string; terminalShell?: "auto" | "cmd" | "powershell" | "bash"; autoLaunch?: boolean };
+  general: {
+    defaultRoot?: string;
+    terminalShell?: "auto" | "cmd" | "powershell" | "bash";
+    autoLaunch?: boolean;
+    // v3.5 常规设置（对齐 ZCode：通知/托盘/防休眠/提问自动继续/显示开关/自动归档/保留期）
+    taskNotifications?: boolean;
+    notificationSound?: boolean;
+    closeToTray?: boolean;
+    preventSleep?: boolean;
+    autoContinueQuestions?: boolean;
+    showThinking?: boolean;
+    showTodos?: boolean;
+    autoArchive?: boolean;
+    archiveRetentionDays?: number;
+  };
   appearance: { fontSize?: "xs" | "sm" | "base"; streamCursor?: boolean; theme?: "light" | "dark" | "system" };
   browser?: { headless?: boolean; executablePath?: string };
   memory?: { autoSediment?: boolean };
@@ -468,7 +468,7 @@ function handleEvent(ev: AgentEvent, connSid: string | null) {
   if (ev && "subagentId" in ev && ev.subagentId) {
     st.updateSubagent(ev);
     // 子智能体内部的高危审批/提问也必须进同一队列（否则服务端挂起死等）
-    if (ev.type === "approval-required") st.requestApproval(ev);
+    if (ev.type === "approval-required") st.requestApproval(ev, connSid ?? undefined);
     if (ev.type === "ask-user") st.setAskQuestion({ id: ev.id, question: ev.question, options: ev.options });
     return;
   }
@@ -501,7 +501,7 @@ function handleEvent(ev: AgentEvent, connSid: string | null) {
       st.finishTool(ev);
       break;
     case "approval-required":
-      st.requestApproval(ev);
+      st.requestApproval(ev, connSid ?? undefined);
       break;
     case "ask-user":
       st.setAskQuestion({ id: ev.id, question: ev.question, options: ev.options });

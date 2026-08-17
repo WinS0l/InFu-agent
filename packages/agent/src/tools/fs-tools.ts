@@ -9,7 +9,7 @@ import fs from "node:fs";
 import path from "node:path";
 import type { ToolDef, ToolContext } from "@infu/shared";
 import { isProtectedPath } from "../sandbox/index.js";
-import { isPathInside, clip } from "./util.js";
+import { isPathInside, clip, guard, sessionRootReadOnlyBlock } from "./util.js";
 import { checkPathScope } from "../memory/index.js";
 
 /** 递归目录树（v3.1；跳过噪音目录，depth 限制，文件带大小） */
@@ -86,6 +86,14 @@ export const fsTools: Record<string, ToolDef> = {
       const op = args.op as string;
       const rel = args.path as string;
       const destRel = args.dest as string | undefined;
+      // v3.4 审计修复（H4）：声明 medium 却零审批的破口——rm 递归删除/覆盖移动
+      // 在 confirm 档也静默执行。补齐审批门（与 write_file/edit_file/git_add 同级），
+      // 并补只读容器检查（自由会话默认根目录禁止写操作，此前只有 isProtectedPath）。
+      if (!(await guard(ctx, "file_ops", "medium", `文件操作 ${op}: ${rel}${destRel ? ` → ${destRel}` : ""}`))) {
+        return "用户拒绝：文件操作未执行";
+      }
+      const roBlock = sessionRootReadOnlyBlock(ctx);
+      if (roBlock) return `错误：${roBlock}`;
       const abs = path.resolve(ctx.root, rel);
       if (!isPathInside(ctx.root, abs)) return "错误：源路径越界";
       const scopeErr = checkPathScope(rel, ctx.scopeRules);

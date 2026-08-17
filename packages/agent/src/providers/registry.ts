@@ -150,32 +150,37 @@ export function createModel(cfg: ModelConfig): LanguageModel {
   }
 }
 
-/** 按模型 ID 推断能力（粗粒度；精确探测后续实现） */
-export function inferCapabilities(cfg: ModelConfig): NonNullable<ModelConfig["capabilities"]> {
-  const id = cfg.model.toLowerCase();
-  const vision = /vision|vl|4o|omni|gemini|gpt-4|gpt-5|claude/.test(id);
-  return {
-    toolCalling: true, // 现代模型均支持；不可用时 Agent 自动降级为建议模式
-    streaming: true,
-    vision,
-  };
-}
-
 /** 读取用户配置（~/.infu/config.json；zod schema 校验 + v1 在线迁移 + 损坏备份） */
-import { readFileSync, existsSync, copyFileSync, mkdirSync, writeFileSync } from "node:fs";
-import { homedir } from "node:os";
+import { readFileSync, existsSync, copyFileSync, mkdirSync, writeFileSync, chmodSync, renameSync } from "node:fs";
 import { join } from "node:path";
 import { parseInfuConfig } from "@infu/shared";
+import { resolveDataDir } from "../data-dir.js";
 
-export const CONFIG_PATH = join(homedir(), ".infu", "config.json");
+export function configPath(): string {
+  return join(resolveDataDir(), "config.json");
+}
 
 /** 安全写入配置（v2.1 起带 schema 版本号；v2.4 统一收敛：server/cli/mcp-register/plugin-register 共用本实现） */
 export function saveConfig(cfg: InfuConfig): void {
-  mkdirSync(join(homedir(), ".infu"), { recursive: true });
-  writeFileSync(CONFIG_PATH, JSON.stringify({ ...cfg, version: cfg.version ?? 1 }, null, 2), "utf-8");
+  const dir = resolveDataDir();
+  mkdirSync(dir, { recursive: true });
+  const p = join(dir, "config.json");
+  // v3.5：原子写（tmp + rename）——多进程并发（server/CLI/定时任务）直写会截断
+  // 半写内容，读方 JSON.parse 失败 → 反复产生 .corrupt-* 备份
+  const tmp = join(dir, `config.json.tmp-${process.pid}`);
+  writeFileSync(tmp, JSON.stringify({ ...cfg, version: cfg.version ?? 1 }, null, 2), "utf-8");
+  // v3.4 审计修复：配置文件含 API Key，落盘后收紧权限（win32 无 POSIX 权限位，
+  // 靠用户目录 ACL 兜底；POSIX 下 0600 防同机其他用户读取密钥）
+  try {
+    if (process.platform !== "win32") chmodSync(tmp, 0o600);
+  } catch {
+    /* 权限设置失败不影响写入（Windows 无此概念） */
+  }
+  renameSync(tmp, p);
 }
 
 export function loadConfig(): InfuConfig | null {
+  const CONFIG_PATH = configPath();
   if (!existsSync(CONFIG_PATH)) return null;
   try {
     const raw = JSON.parse(readFileSync(CONFIG_PATH, "utf-8"));

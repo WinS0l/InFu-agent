@@ -8,9 +8,10 @@
  * 任务注册表：~/.infu/schedules.json（{id, cron, prompt, root, enabled, lastRun, nextRun}）
  */
 import { randomUUID } from "node:crypto";
-import { homedir } from "node:os";
 import { join } from "node:path";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync, copyFileSync, renameSync } from "node:fs";
+import { cleanupOldBackups } from "./cleanup.js";
+import { resolveDataDir } from "./data-dir.js";
 
 export interface ScheduleEntry {
   id: string;
@@ -24,19 +25,54 @@ export interface ScheduleEntry {
   nextRun?: string;
 }
 
-const SCHED_PATH = join(homedir(), ".infu", "schedules.json");
+function schedPath(): string {
+  return join(resolveDataDir(), "schedules.json");
+}
 
+function isValidEntry(x: unknown): x is ScheduleEntry {
+  if (typeof x !== "object" || x === null) return false;
+  const o = x as Record<string, unknown>;
+  return (
+    typeof o.id === "string" &&
+    typeof o.cron === "string" &&
+    typeof o.prompt === "string" &&
+    typeof o.root === "string" &&
+    typeof o.enabled === "boolean"
+  );
+}
+
+/**
+ * 读取定时任务注册表。
+ * v3.4 审计修复：原实现 JSON.parse 直接当数组用——损坏/手改/旧版本文件静默返回 []，
+ * 用户所有定时任务「消失」且无任何提示；逐条字段校验，损坏条目丢弃并备份原文件。
+ */
 function loadSchedules(): ScheduleEntry[] {
+  const SCHED_PATH = schedPath();
   try {
     if (!existsSync(SCHED_PATH)) return [];
-    return JSON.parse(readFileSync(SCHED_PATH, "utf-8")) as ScheduleEntry[];
-  } catch {
+    const raw = JSON.parse(readFileSync(SCHED_PATH, "utf-8"));
+    if (!Array.isArray(raw)) throw new Error("注册表不是数组");
+    return raw.filter(isValidEntry);
+  } catch (e) {
+    try {
+      const backup = `${SCHED_PATH}.broken-${Date.now()}`;
+      if (existsSync(SCHED_PATH)) copyFileSync(SCHED_PATH, backup);
+      console.error(`[infu] 定时任务注册表损坏（已备份到 ${backup}）：${(e as Error).message}`);
+    } catch {
+      /* 备份失败忽略 */
+    }
+    // v3.5 数据生命周期：顺带清理超期损坏备份（.broken-* 永久累积）
+    try { cleanupOldBackups(SCHED_PATH); } catch { /* ignore */ }
     return [];
   }
 }
 function saveSchedules(list: ScheduleEntry[]): void {
-  mkdirSync(join(homedir(), ".infu"), { recursive: true });
-  writeFileSync(SCHED_PATH, JSON.stringify(list, null, 2));
+  const SCHED_PATH = schedPath();
+  mkdirSync(join(resolveDataDir()), { recursive: true });
+  // v3.5：原子写（tmp + rename）——防多进程并发写截断（与 projects/config 同款修复）
+  const tmp = `${SCHED_PATH}.tmp-${process.pid}`;
+  writeFileSync(tmp, JSON.stringify(list, null, 2));
+  renameSync(tmp, SCHED_PATH);
 }
 
 /** cron 5 字段解析 → 当前时刻是否命中。支持 * / 数字（分 时 日 月 周；周 0=周日） */
@@ -44,7 +80,9 @@ export function cronMatches(cron: string, date: Date): boolean {
   const parts = cron.trim().split(/\s+/);
   if (parts.length !== 5) return false;
   const [min, hour, dom, mon, dow] = parts;
-  const match = (field: string, value: number, max: number, min0 = 0): boolean => {
+  // v3.4 审计修复：删除 min0 死参数（从未被使用——DOM/月 的 1 起始在解析侧无意义，
+  // 值比较自然成立；参数存在即误导）
+  const match = (field: string, value: number): boolean => {
     if (field === "*") return true;
     if (field.startsWith("*/")) {
       const step = parseInt(field.slice(2), 10);
@@ -56,12 +94,13 @@ export function cronMatches(cron: string, date: Date): boolean {
   };
   const dowVal = date.getDay(); // 0=周日
   return (
-    match(min, date.getMinutes(), 59) &&
-    match(hour, date.getHours(), 23) &&
-    match(dom, date.getDate(), 31, 1) &&
-    match(mon, date.getMonth() + 1, 12, 1) &&
-    // v3.1 审计修复：cron 周字段 `7` 也代表周日——`0 9 * * 7` 此前永不匹配（7===0 恒 false）
-    match(dow, dowVal === 0 ? 7 : dowVal, 7)
+    match(min, date.getMinutes()) &&
+    match(hour, date.getHours()) &&
+    match(dom, date.getDate()) &&
+    match(mon, date.getMonth() + 1) &&
+    // v3.1 审计修复：cron 周字段 `7` 也代表周日；v3.5 补：`0`（标准周日写法）此前被
+    // 映射成 7 后恒不匹配——两种写法都接受
+    (match(dow, dowVal) || (dowVal === 0 && match(dow, 7)))
   );
 }
 

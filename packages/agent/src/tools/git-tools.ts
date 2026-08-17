@@ -12,7 +12,7 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import type { ToolDef, ToolContext } from "@infu/shared";
 import { sanitizeEnv } from "../sandbox/index.js";
-import { clip } from "./util.js";
+import { clip, isPathInside } from "./util.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -34,6 +34,12 @@ async function gitRun(ctx: ToolContext, rel: unknown, args: unknown[]): Promise<
     valid.push(a);
   }
   const abs = path.resolve(ctx.root, rel || ".");
+  // v3.4 审计修复（M12）：path 越界拦截——git_add/commit/branch 是写操作，
+  // `git status` 前不加防护时 `../../external-repo` 会在项目根外的仓库执行
+  // add/commit（外部仓库索引/HEAD 被改动）。与文件工具同款双检（词法 + realpath）。
+  if (!isPathInside(ctx.root, abs)) {
+    return { ok: false, out: `错误：path 越界——${abs} 不在项目根 ${ctx.root} 内。git 操作只能在项目内目录执行。`, repo: false };
+  }
   try {
     const probe = await execFileAsync("git", ["rev-parse", "--is-inside-work-tree"], { cwd: abs, timeout: 15000, windowsHide: true, encoding: "utf8", maxBuffer: 8 * 1024 * 1024, env: sanitizeEnv() });
     if (!/true/i.test(probe.stdout.trim())) {

@@ -109,6 +109,22 @@ export function interruptBackgroundAgent(sessionId: string | undefined, id: stri
   return true;
 }
 
+/**
+ * v3.4 审计修复（M6）：后台子智能体注册表剪枝——注册表只增不减：每会话最多 6 个运行中
+ * 有上限，但已完成/异常条目**永久累积**（长时间运行的会话可挂几千个僵尸句柄 = 内存泄漏）。
+ * 已完成条目保留最近 20 个（list_agents/report 短期仍可回收结果），更老的一律删除。
+ */
+function trimBackgroundAgents(sessionId: string | undefined): void {
+  const key = sessionId ?? "";
+  const m = backgroundAgents.get(key);
+  if (!m) return;
+  const done = [...m.entries()].filter(([, h]) => h.status === "done" || h.status === "error");
+  if (done.length > 20) {
+    done.slice(0, done.length - 20).forEach(([id]) => m.delete(id));
+  }
+  if (m.size === 0) backgroundAgents.delete(key);
+}
+
 /** v2.11：给等待中的后台子智能体发消息（send_message 工具；resolve 挂起队列 → 子循环恢复继续） */
 export function sendMessageToAgent(sessionId: string | undefined, id: string, message: string): string {
   const h = getBackgroundAgent(sessionId, id);
@@ -573,6 +589,8 @@ export function startBackgroundSubagent(spec: SubagentSpec, ctx: DelegationConte
         if (n <= 0) activeBySession.delete(sid);
         else activeBySession.set(sid, n);
       }
+      // v3.4 审计修复（M6）：剪掉最老已完成条目防注册表无限膨胀
+      trimBackgroundAgents(ctx.sessionId);
     }
   })();
 

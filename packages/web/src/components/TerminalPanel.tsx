@@ -112,13 +112,18 @@ export default function TerminalPanel() {
     if (!id || blockedRef.current) return;
     blockedRef.current = true; // 等待服务端裁决期间暂停后续输入处理
     enqueue(async () => {
-      const r = await terminalInput(id, { data: command + "\r", command });
-      if (r.requireApproval) {
-        setApproval({ command, description: r.description ?? `执行高风险命令：${command}` });
-      } else if (r.ok === false && r.message) {
-        termRef.current?.write(`\r\n⛔ ${r.message}\r\n`);
+      try {
+        const r = await terminalInput(id, { data: command + "\r", command });
+        if (r.requireApproval) {
+          setApproval({ command, description: r.description ?? `执行高风险命令：${command}` });
+        } else if (r.ok === false && r.message) {
+          termRef.current?.write(`\r\n⛔ ${r.message}\r\n`);
+        }
+      } catch (e) {
+        termRef.current?.write(`\r\n⛔ 终端请求失败：${(e as Error).message}\r\n`);
+      } finally {
+        blockedRef.current = false; // M10：异常也解锁（此前网络错误永久冻结输入）
       }
-      blockedRef.current = false;
     });
   };
 
@@ -130,12 +135,17 @@ export default function TerminalPanel() {
     if (!id || !a) return;
     blockedRef.current = true;
     enqueue(async () => {
-      if (approved) {
-        await terminalInput(id, { data: a.command + "\r", command: a.command, confirmed: true });
-      } else {
-        termRef.current?.write("\r\n⛔ 已拒绝（审批策略）：" + a.command + "\r\n");
+      try {
+        if (approved) {
+          await terminalInput(id, { data: a.command + "\r", command: a.command, confirmed: true });
+        } else {
+          termRef.current?.write("\r\n⛔ 已拒绝（审批策略）：" + a.command + "\r\n");
+        }
+      } catch (e) {
+        termRef.current?.write(`\r\n⛔ 终端请求失败：${(e as Error).message}\r\n`);
+      } finally {
+        blockedRef.current = false;
       }
-      blockedRef.current = false;
     });
   };
 

@@ -13,7 +13,7 @@
 
 import fs from "node:fs";
 import path from "node:path";
-import os from "node:os";
+import { resolveDataDir } from "../data-dir.js";
 
 export type MemoryScope = "project" | "global";
 
@@ -56,9 +56,9 @@ export const DEFAULT_TOPICS: Record<string, string> = {
 /** 记忆读取上限（单主题截断，防止撑爆上下文） */
 export const MEMORY_READ_LIMIT = 24 * 1024;
 
-/** 全局记忆目录（~/.infu/memory/） */
+/** 全局记忆目录（<dataDir>/memory/） */
 export function globalMemoryDir(): string {
-  return path.join(os.homedir(), ".infu", "memory");
+  return path.join(resolveDataDir(), "memory");
 }
 
 /** 项目记忆目录（<root>/.infu/memory/） */

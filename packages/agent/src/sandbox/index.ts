@@ -14,8 +14,9 @@ import { promisify } from "node:util";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { appendFileSync, mkdirSync } from "node:fs";
+import { appendFileSync, mkdirSync, statSync, existsSync, renameSync, rmSync } from "node:fs";
 import type { InfuConfig } from "@infu/shared";
+import { resolveDataDir } from "../data-dir.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -23,13 +24,15 @@ export type SandboxMode = "auto" | "off" | "soft" | "restricted" | "docker";
 
 export const SANDBOX_MODES: SandboxMode[] = ["auto", "off", "soft", "restricted", "docker"];
 
-/** 环境变量消毒：剔除敏感凭据（防沙箱/子进程读取宿主密钥） */
+/** 环境变量消毒：剔除敏感凭据（防沙箱/子进程读取宿主密钥）。
+ *  v3.4 审计修复：补 URL/URI/DSN/CONNECTION 键名——`DATABASE_URL`/`MONGO_URI`/
+ *  `REDIS_URL` 等连接串值内嵌凭据，模型 echo 可读（原正则只拦 KEY/TOKEN 类） */
 export function sanitizeEnv(env: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
-  const SENSITIVE = /(KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL|AUTH)/i;
+  const SENSITIVE = /(KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL|AUTH|URL|URI|DSN|CONNECTION)/i;
   const out: NodeJS.ProcessEnv = {};
   for (const [k, v] of Object.entries(env)) {
     if (v === undefined) continue;
-    if (SENSITIVE.test(k)) continue; // INFU_*_API_KEY、OPENAI_API_KEY 等全部剔除
+    if (SENSITIVE.test(k)) continue; // INFU_*_API_KEY、OPENAI_API_KEY、DATABASE_URL 等全部剔除
     out[k] = v;
   }
   return out;
@@ -39,11 +42,14 @@ export function sanitizeEnv(env: NodeJS.ProcessEnv = process.env): NodeJS.Proces
 const PROTECTED_PATTERNS: Array<{ name: string; match: (abs: string) => boolean }> = [
   { name: "SSH 密钥目录", match: (a) => /(^|[\\/])\.ssh([\\/]|$)/.test(a) },
   // v2.3 批 2：项目内 .infu/ 有合法场景（项目级 .infu/skills/ 技能目录）——
-  // 保护精确到用户级 ~/.infu（全局配置/凭据/日志），项目内 .infu 放开写
+  // 保护精确到用户级数据目录（全局配置/凭据/日志），项目内 .infu 放开写；
+  // v3.5：跟随迁移后的实际数据目录（含默认 ~/.infu 与 redirect 指向的新目录）
   {
     name: "InFu 配置目录",
     match: (a) => {
-      const home = path.join(os.homedir(), ".infu");
+      const home = process.platform === "win32"
+        ? resolveDataDir().toLowerCase()
+        : resolveDataDir();
       return a === home || a.startsWith(home + path.sep);
     },
   },
@@ -53,19 +59,50 @@ const PROTECTED_PATTERNS: Array<{ name: string; match: (abs: string) => boolean 
   { name: "浏览器凭据", match: (a) => /(^|[\\/])(AppData|Application Data)([\\/])/.test(a) && /(Login Data|Cookies|Local State)/i.test(a) },
 ];
 
-/** 检查路径是否命中写保护清单，返回保护名或 null */
+/**
+ * 检查路径是否命中写保护清单，返回保护名或 null。
+ * v3.4 审计修复（M9）：win32 下先统一小写再匹配——Windows 文件系统大小写不敏感，
+ * `C:\Users\x\.SSH\authorized_keys` / `C:\USERS\X\.INFU\config.json` 大小写变体
+ * 此前可穿透写保护（盘符/路径大小写变体全部归一化）。
+ */
 export function isProtectedPath(abs: string): string | null {
+  const norm = process.platform === "win32" ? abs.toLowerCase() : abs;
   for (const p of PROTECTED_PATTERNS) {
-    if (p.match(abs)) return p.name;
+    if (p.match(norm)) return p.name;
   }
   return null;
 }
 
 /** 命令审计日志 */
-export const COMMAND_LOG = path.join(os.homedir(), ".infu", "logs", "commands.log");
-export function auditCommand(cwd: string, command: string, ok: boolean, detail: string, sandbox = "", logPath = COMMAND_LOG) {
+export function commandLogPath(): string {
+  return path.join(resolveDataDir(), "logs", "commands.log");
+}
+
+/**
+ * v3.5 数据生命周期：日志轮转——追加前检查大小，超限滚动保留 N 份
+ * （file → file.1 → file.2 … file.KEEP，最旧删除）；失败静默（日志本身不重要）
+ */
+export const MAX_LOG_BYTES = 5 * 1024 * 1024;
+export const KEEP_LOG_FILES = 3;
+export function maybeRotateLog(filePath: string): void {
+  try {
+    const st = statSync(filePath);
+    if (st.size < MAX_LOG_BYTES) return;
+    for (let i = KEEP_LOG_FILES; i >= 1; i--) {
+      const from = i === 1 ? filePath : `${filePath}.${i - 1}`;
+      const to = `${filePath}.${i}`;
+      if (existsSync(to)) rmSync(to, { force: true });
+      if (existsSync(from)) renameSync(from, to);
+    }
+  } catch {
+    /* 轮转失败忽略 */
+  }
+}
+
+export function auditCommand(cwd: string, command: string, ok: boolean, detail: string, sandbox = "", logPath = commandLogPath()) {
   try {
     mkdirSync(path.dirname(logPath), { recursive: true });
+    maybeRotateLog(logPath);
     const tag = sandbox ? ` | sandbox=${sandbox}` : "";
     const line = `[${new Date().toISOString()}] ${ok ? "OK " : "ERR"} | cwd=${cwd} | ${command.slice(0, 200)} | ${detail.slice(0, 120)}${tag}`;
     appendFileSync(logPath, line + "\n", "utf-8");

@@ -61,9 +61,12 @@ const fakeSummarize = async (h: ChatMessageLike[]) => {
 // 小窗口（8k）：触发压缩
 const small = await compressMessages(longHistory, 8000, fakeSummarize);
 check("小窗口触发压缩（after ≤ 窗口×60%）", small.after <= 8000 * 0.6, `after=${small.after}`);
-check("压缩后含摘要消息", small.messages[0].content.includes("此前会话摘要"));
+// v3.4 审计修复（H2）：system 永不参与压缩——首条必为原 system
+check("压缩后首条保留 system", small.messages[0].role === "system" && small.messages[0].content === "你是 InFu", JSON.stringify(small.messages[0]));
+check("压缩后含摘要消息（紧随 system）", small.messages[1]?.content.includes("此前会话摘要") === true, JSON.stringify(small.messages[1]?.content));
 check("保留最近内容（非摘要消息仍在）", small.messages.length < longHistory.length && small.messages.some((m) => m.role === "assistant"));
-check("压缩了部分历史（摘要输入 = 被压缩段）", summarizeCalls.length === 1 && summarizeCalls[0] === `history=${longHistory.length - (small.messages.length - 1)}`, summarizeCalls.join(","));
+// 摘要输入 = 被压缩段（不含 system：200 条消息中 system 占 1 → 其余 199 条压缩到 kept）
+check("压缩了部分历史（摘要输入 = 被压缩段）", summarizeCalls.length === 1 && summarizeCalls[0] === `history=${longHistory.length - 1 - (small.messages.length - 2)}`, summarizeCalls.join(","));
 check("压缩后估算 < 压缩前", small.after < small.before, `${small.before} → ${small.after}`);
 
 // 大窗口（1M）：不触发
@@ -87,11 +90,13 @@ let called = false;
 const noop = await compressMessages(tiny, 8000, async () => { called = true; return "x"; });
 check("未超预算原样返回", noop.messages.length === tiny.length && !called);
 
-// 6. system 消息不被压缩掉
+// 6. v3.4 审计修复（H2）：system 消息永不参与压缩（强断言——旧弱断言「或保留 system」
+// 恰好掩盖了 system 被压缩进摘要的行为）
 console.log("\n▶ system 保留");
 const sys = await compressMessages(longHistory, 8000, fakeSummarize);
-check("压缩后首条非摘要（若摘要注入）或保留 system", sys.messages[0].role === "user", sys.messages[0].role);
-check("压缩后不含原 system（被摘要替换为 user 摘要）或 system 保留——至少 1 条", sys.messages.length >= 2);
+check("压缩后首条必为原 system", sys.messages[0].role === "system" && sys.messages[0].content === "你是 InFu", JSON.stringify(sys.messages[0]));
+check("摘要紧随 system（不夹在 system 与历史之间）", sys.messages[1]?.content.includes("此前会话摘要") === true, JSON.stringify(sys.messages[1]?.content));
+check("压缩后消息数 = system + 摘要 + kept（≥3）", sys.messages.length >= 3, String(sys.messages.length));
 
 // 6.5. v3.2 摘要过大拒绝（SUMMARY_MUST_BE_SMALLER：摘要 ≥ 被替换内容时降级为直接丢弃，
 // 避免"压缩后反而更占"的无效压缩——估算低估时的保护）

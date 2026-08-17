@@ -12,9 +12,9 @@
  */
 
 import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
-import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import type { InfuConfig, SkillMeta } from "@infu/shared";
+import { resolveDataDir } from "../data-dir.js";
 
 /** 插件自带技能目录（v2.7：loadPlugins 注册，listSkills/use_skill 统一读取；全局配置级，模块级即可） */
 let pluginSkillDirs: string[] = [];
@@ -91,8 +91,8 @@ function collectDir(dir: string, level: SkillMeta["level"], out: Map<string, Ski
 /** 列出全部可用 skill（用户级 > 项目级 > config 显式 > 插件自带 > 内置；同名首个胜出） */
 export function listSkills(cfg: InfuConfig | null, root: string): SkillMeta[] {
   const out = new Map<string, SkillMeta>();
-  // 1. 用户级 ~/.infu/skills/
-  collectDir(join(homedir(), ".infu", "skills"), "user", out);
+  // 1. 用户级 <dataDir>/skills/
+  collectDir(join(resolveDataDir(), "skills"), "user", out);
   // 2. 项目级 <root>/.infu/skills/
   collectDir(join(root, ".infu", "skills"), "project", out);
   // 3. config 显式引用（path 指向 skill 目录；缺省按 name 查找）
@@ -112,7 +112,7 @@ export function listSkills(cfg: InfuConfig | null, root: string): SkillMeta[] {
 
 /** 按 name 在用户级/项目级目录查找 skill 目录（config 无 path 时） */
 function findSkillDir(name: string, root: string): string | null {
-  const user = join(homedir(), ".infu", "skills", name);
+  const user = join(resolveDataDir(), "skills", name);
   if (existsSync(join(user, "SKILL.md"))) return user;
   const proj = join(root, ".infu", "skills", name);
   if (existsSync(join(proj, "SKILL.md"))) return proj;

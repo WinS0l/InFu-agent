@@ -16,6 +16,7 @@ import {
   winRestrictedAvailable, runRestricted, type RestrictedRunResult,
 } from "../sandbox/win-restricted.js";
 import { loadConfig } from "../providers/registry.js";
+import { findProjectByRoot } from "../projects.js";
 import {
   currentApprovalPolicy, isToolDisabled, resolveToolRisk, shouldAutoApprove, isCommandAllowed,
 } from "../approval/policy.js";
@@ -67,6 +68,23 @@ export function isPathInside(root: string, abs: string): boolean {
 export function clip(s: string, max = MAX_OUTPUT): string {
   if (s.length <= max) return s;
   return s.slice(0, max) + `\n...（已截断，共 ${s.length} 字符）`;
+}
+
+/**
+ * v3 默认会话根目录只读保护：root = config.general.defaultRoot 且未注册为项目时，
+ * 禁止写操作（自由会话容器目录；已注册项目 = 用户显式授权，豁免）。
+ * v3.4 审计修复（H4）：从 tools/index.ts 提取到 util.js——fs-tools（file_ops）与
+ * index（write/edit）共用同一实现，防 file_ops 绕过只读容器检查。
+ */
+export function isReadOnlySessionRoot(root: string): boolean {
+  const cfg = loadConfig();
+  const sessionRoot = cfg?.general?.defaultRoot;
+  if (!sessionRoot) return false;
+  return path.resolve(root) === path.resolve(sessionRoot) && !findProjectByRoot(root);
+}
+export function sessionRootReadOnlyBlock(ctx: ToolContext): string | null {
+  if (!isReadOnlySessionRoot(ctx.root)) return null;
+  return "默认会话根目录为只读容器——自由会话不能修改此目录，请先在侧栏选择/创建项目后执行写操作";
 }
 
 /** 命令输出格式化 */

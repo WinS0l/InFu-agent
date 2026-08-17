@@ -129,6 +129,11 @@ export default function App() {
         if (cfg.defaultModelId) {
           st.setModelId(cfg.defaultModelId);
         }
+        // v3.5 常规设置：对话流显示开关（config.general.showThinking/showTodos）
+        st.setUiFlags({
+          showThinking: cfg.general.showThinking !== false,
+          showTodos: cfg.general.showTodos !== false,
+        });
       })
       .catch(() => {});
     // v2.1 会话：v1 localStorage 数据迁移 + 加载会话列表 + 恢复上次会话

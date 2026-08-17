@@ -320,7 +320,9 @@ export default function ChatPanel() {
   const [projects, setProjects] = useState<Array<{ id: string; name: string; root: string }>>([]);
   // v3：思考模式下拉 + 全局审批档位下拉 + 模型下拉（主流 composer 对齐）
   const [thinkOpen, setThinkOpen] = useState(false);
-  const [approvalMode, setApprovalMode] = useState<ApprovalMode>("smart");
+  // v3.5：审批档位提升为全局 store 状态——composer 与设置「命令」Tab 共享同一数据源（双向联动）
+  const approvalMode = useStore((s) => s.approvalMode);
+  const setApprovalMode = useStore((s) => s.setApprovalMode);
   const [approvalOpen, setApprovalOpen] = useState(false);
   const [modelOpen, setModelOpen] = useState(false);
   // v3.1 附件：草稿列表 + 添加菜单 + 隐藏文件/文件夹选择器
@@ -335,7 +337,10 @@ export default function ChatPanel() {
   const atRef = useRef<{ start: number; len: number } | null>(null);
   const [plugins, setPlugins] = useState<PluginInfo[]>([]);
   useEffect(() => {
-    fetchPlugins().then((list) => setPlugins(list.filter((p) => p.enabled !== false))).catch(() => {});
+    // v3.4 审计修复：加载失败不再静默——@ 面板缺失插件是用户可见的功能缺失
+    fetchPlugins().then((list) => setPlugins(list.filter((p) => p.enabled !== false))).catch(() => {
+      useStore.getState().addError("插件列表加载失败，@插件 不可用");
+    });
   }, []);
   const bottomRef = useRef<HTMLDivElement>(null);
   // v3.0 批 12：下拉栏点击空白处自动收起（审批/模型/思考/附件）
@@ -364,7 +369,12 @@ export default function ChatPanel() {
   useEffect(() => {
     fetchConfig()
       .then((cfg) => setApprovalMode(cfg.approvalPolicy.mode ?? "smart"))
-      .catch(() => {});
+      // v3.4 审计修复：档位加载失败静默 → 用户以为设置了 confirm 实际是默认 smart（高危操作
+      // 静默放行）；提示 + 明确当前实际档位
+      .catch(() => {
+        setApprovalMode("smart");
+        useStore.getState().addError("审批档位加载失败，已回退默认（smart）");
+      });
   }, []);
 
   // v2 模型选择器：按供应商分组 + 思考级别映射提示
@@ -444,7 +454,7 @@ export default function ChatPanel() {
     const el = scrollRef.current;
     if (el) {
       // 离底 <48px 视为「在底部」→ 恢复跟随；向上滑出 → 停止跟随
-      atBottomRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 48;
+      atBottomRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 24;
       setShowBackTop(el.scrollHeight - el.scrollTop - el.clientHeight > 240);
     }
     updateActiveMsg();
@@ -671,7 +681,10 @@ export default function ChatPanel() {
 
   // v3：hero 工作区菜单数据（项目注册表）
   useEffect(() => {
-    fetchProjects().then(setProjects).catch(() => {});
+    // v3.4 审计修复：项目列表失败静默 → 工作区菜单空白无提示
+    fetchProjects().then(setProjects).catch(() => {
+      useStore.getState().addError("项目列表加载失败，工作区菜单不可用");
+    });
   }, []);
 
   // v2.14 批 11：工作树并入（点击消息旁的按钮直接执行；成功/失败 toast 提示）
@@ -741,7 +754,7 @@ export default function ChatPanel() {
         ? Math.max(0, 1 - lastTurnChars / totalChars)
         : null;
 
-  // v3 思考模式档位（低/中/高/MAX）与审批档位（auto/smart/confirm）
+  // v3 思考模式档位（低/中/高/MAX）与审批档位（auto/smart/confirm/full）
   const THINK_LABEL = ["低", "中", "高", "MAX"];
   const MODE_LABEL: Record<ApprovalMode, { label: string; desc: string; icon: React.ElementType; color: string }> = {
     // v2.14 批 18：全自动 = 盾牌+感叹号（ShieldAlert）警告色（警示全自动放行）；
@@ -749,6 +762,8 @@ export default function ChatPanel() {
     auto: { label: "全自动", desc: "非人工必需场景自动放行（联网等安全线仍需确认）", icon: ShieldAlert, color: "text-warn" },
     smart: { label: "智能", desc: "低风险自动放行，中/高风险人工确认", icon: Scale, color: "text-sub" },
     confirm: { label: "全部确认", desc: "所有风险等级都弹窗人工确认", icon: ShieldCheck, color: "text-sub" },
+    // v3.5：全权放行（对齐 Codex 完全信任）——红色警示三角：红线（联网/自注册等）也自动放行
+    full: { label: "全权放行", desc: "一切审批（含安全红线）自动放行，零弹窗", icon: AlertTriangle, color: "text-danger" },
   };
 
   /** 输入胶囊（hero 与普通模式共用；hero 版最小两行对齐 主流） */
@@ -1282,6 +1297,8 @@ const MessageItem = memo(function MessageItem({
   onStartEdit: (seq: number, text: string) => void;
   onMerge: () => void;
 }) {
+  // v3.5 常规设置 showThinking（开关变化触发重渲染）
+  const showThinking = useStore((s) => s.uiShowThinking);
   return m.role === "user" ? (
     /* 用户消息：右对齐气泡 + 下方悬停操作行（复制/回滚到此）；data-infumsg = 定位浮标锚点 */
     <div data-infumsg={m.id} data-time-hover-root className={`group flex flex-col items-end transition-opacity duration-200 ${pending ? "opacity-40" : ""}`}>
@@ -1335,8 +1352,8 @@ const MessageItem = memo(function MessageItem({
     /* 助手消息（v3：对齐 主流——turn 内连成一条连续流，无头像/无阶段徽标；
        操作行（复制/时间）只在 turn 末尾的总结消息后出现一次） */
     <div data-time-hover-root className={`group transition-opacity duration-200 ${pending ? "opacity-40" : ""}`}>
-      {/* 思考过程（折叠行） */}
-      {m.reasoning && <ReasoningBlock text={m.reasoning} running={m.streaming} />}
+      {/* 思考过程（折叠行；v3.5 常规设置 showThinking 可关闭） */}
+      {m.reasoning && showThinking && <ReasoningBlock text={m.reasoning} running={m.streaming} />}
       {/* v2.2 模型降级事件（v3.2：折叠行；展开显示原因明细） */}
       {m.fallbacks && m.fallbacks.length > 0 && (
         <div className="my-0.5 space-y-0.5">

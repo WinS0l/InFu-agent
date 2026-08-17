@@ -70,28 +70,52 @@ check("文件存在", existsSync(join(proj, "src", "new.txt")));
 const escape = await run("write_file", { path: "../../evil.txt", content: "x" });
 check("路径越界被拦截", escape.includes("越界"), escape);
 
-// 6. edit_file
-console.log("\n▶ edit_file");
-// v3.2 read-before-edit：未读文件直接编辑被拒
+// 6. edit_file + read-before-edit（v3.5 升级对齐 ZCode：未读/partial/stale 三层门禁）
+console.log("\n▶ edit_file（read-before-edit 门禁）");
+// 未读直接编辑 → 拒绝
 const ed0 = await run("edit_file", { path: "README.md", old_text: "# Fixture", new_text: "# InFu" });
-check("未读文件编辑被拒（先读后改）", ed0.includes("先 read_file"), ed0);
-const ed = await run("edit_file", { path: "src/app.ts", old_text: "Hello ${name}", new_text: "Hi ${name}" });
-check("已读文件编辑成功", ed.includes("已修改"), ed);
+check("未读编辑被拒绝", ed0.includes("尚未读取"), ed0);
+// 读取后再编辑 → 成功
+const rd0 = await run("read_file", { path: "README.md" });
+check("read README.md 成功", rd0.includes("Fixture"), rd0);
+const ed1 = await run("edit_file", { path: "README.md", old_text: "# Fixture", new_text: "# InFu" });
+check("读取后编辑成功", ed1.includes("已修改"), ed1);
+// stale：读后外部修改文件 → 编辑被拒（防基于过期缓存覆盖）
+const staleTarget = join(proj, "src", "stale.txt");
+writeFileSync(staleTarget, "version 1", "utf-8");
+await run("read_file", { path: "src/stale.txt" });
+await new Promise((r) => setTimeout(r, 20)); // mtime 前进
+writeFileSync(staleTarget, "version 2 (external)", "utf-8");
+const edStale = await run("edit_file", { path: "src/stale.txt", old_text: "version", new_text: "v" });
+check("外部修改后编辑被拒（stale）", edStale.includes("已被修改"), edStale);
+// 重读后再编辑 → 成功
+await run("read_file", { path: "src/stale.txt" });
+const edStale2 = await run("edit_file", { path: "src/stale.txt", old_text: "version 2", new_text: "v2" });
+check("重读后编辑成功", edStale2.includes("已修改"), edStale2);
+// 编辑成功后无需重读可继续改（写后状态刷新）
+const ed4 = await run("edit_file", { path: "README.md", old_text: "# InFu", new_text: "# Fixture" });
+check("编辑后直接续改成功（状态刷新）", ed4.includes("已修改"), ed4);
+// partial：读取内容超长被截断 → 编辑被拒
+const bigTarget = join(proj, "src", "big.txt");
+writeFileSync(bigTarget, "line ".repeat(5000), "utf-8");
+const rdBig = await run("read_file", { path: "src/big.txt" });
+check("大文件读取被截断", rdBig.includes("已截断"), rdBig);
+const edBig = await run("edit_file", { path: "src/big.txt", old_text: "line", new_text: "LINE" });
+check("截断视图编辑被拒（partial）", edBig.includes("不完整"), edBig);
+// 原文不匹配报错（提示先读）
 const ed2 = await run("edit_file", { path: "src/app.ts", old_text: "不存在的内容", new_text: "x" });
-check("原文不匹配报错", ed2.includes("未找到"), ed2);
-// v3.2：read 后允许 edit（README.md 之前未读 → 读后编辑成功）
-const rdReadme = await run("read_file", { path: "README.md" });
-check("read README.md 成功", rdReadme.includes("Fixture"), rdReadme);
-const ed3 = await run("edit_file", { path: "README.md", old_text: "# Fixture", new_text: "# InFu" });
-check("读取后编辑成功", ed3.includes("已修改"), ed3);
-// v3.2：覆盖已存在文件必须先读（用本会话从未读过的 package.json）
-const wr2 = await run("write_file", { path: "package.json", content: "{\"name\":\"evil\"}" });
-check("已存在文件未读覆盖被拒（先读后改）", wr2.includes("先 read_file"), wr2);
+check("原文不匹配报错（提示先读）", ed2.includes("read_file"), ed2);
+// write_file：未读覆盖已存在文件 → 拒绝；读取后覆盖 → 成功（内容恢复夹具 package.json）
+console.log("\n▶ write_file（read-before-edit 门禁）");
+const wr0 = await run("write_file", { path: "package.json", content: JSON.stringify({ name: "fixture", version: "1.0.0", dependencies: { react: "^19.0.0", express: "^5.0.0" }, scripts: { test: "echo hello-test" } }, null, 2) });
+check("未读覆盖已存在文件被拒绝", wr0.includes("尚未读取"), wr0);
 const rdPkg = await run("read_file", { path: "package.json" });
 check("read package.json 成功", rdPkg.includes("fixture"), rdPkg);
+const wr2 = await run("write_file", { path: "package.json", content: JSON.stringify({ name: "fixture", version: "1.0.0", dependencies: { react: "^19.0.0", express: "^5.0.0" }, scripts: { test: "echo hello-test" } }, null, 2) });
+check("读取后覆盖成功", wr2.includes("已写入"), wr2);
 const wr3 = await run("write_file", { path: "src/new.txt", content: "hello again" });
-check("读取后覆盖成功", wr3.includes("已写入"), wr3);
-// v3.2：新建文件无需先读
+check("覆盖成功（写后免重读）", wr3.includes("已写入"), wr3);
+// 新建文件无需先读
 const wr4 = await run("write_file", { path: "src/brand-new.txt", content: "fresh" });
 check("新建文件无需先读", wr4.includes("已写入"), wr4);
 

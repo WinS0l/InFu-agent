@@ -11,7 +11,9 @@ import { useStore } from "../store";
 export default function TodoPanel() {
   const todos = useStore((s) => s.todos);
   const [open, setOpen] = useState(false);
-  if (!todos.length) return null;
+  // v3.5 常规设置 showTodos（关闭 = 完全隐藏待办面板）
+  const showTodos = useStore((s) => s.uiShowTodos);
+  if (!todos.length || !showTodos) return null;
 
   const done = todos.filter((t) => t.status === "completed").length;
   const inProg = todos.filter((t) => t.status === "in_progress").length;

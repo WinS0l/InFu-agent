@@ -4,12 +4,16 @@
  *
  * 网络策略（与 run_command network=true 同门禁）：
  *   - 默认断网：本机网络出站是软控制（net-policy.ts），联网 = 用户显式授权
- *   - 每次调用走 guard high + requireExplicit（-y 不自动放行；auto/smart 档位也不豁免）
+ *   - v2.10 批 4 更新：只读联网（webfetch/web_search）降为 low——smart 档自动放行（对齐主流），
+ *     confirm 档仍确认；默认断网的首次联网放行由审批记忆（已批准记忆）承担
  *   - 审计：工具调用本身全量落库（tool-start/tool-result），无需额外命令审计
  *
  * v2.10 批 4 更新：只读联网（webfetch/web_search）降为 low——smart 档自动放行（对齐主流），
  * confirm 档仍确认；断网策略不豁免（默认仍断网，首次联网需用户放行，见上面门禁语义）。
  * SSRF 防护（v2.13）：初始 URL 与每个重定向目标均拒绝内网/回环/链路本地/云元数据地址。
+ * v3.4 审计修复：头注释修正——原「每次调用走 guard high + requireExplicit」描述已被
+ * v2.10 批 4 取代（现为 low + netGuard），注释与实现保持一致（requireExplicit 语义
+ * 现只适用于 run_command network=true 等命令级联网）。
  *
  * v2.10 修复 web_search「经常搜不到」根因：原 DuckDuckGo Instant Answer API 只返回
  * 「即时答案」卡片（绝大多数查询为空）→ 改为 **DuckDuckGo HTML 搜索端点**（真实结果
@@ -39,6 +43,10 @@ export function normalizeV4Shorthand(host: string): number[] | null {
   const vals: number[] = [];
   for (const p of parts) {
     if (!/^\d{1,10}$/.test(p)) return null;
+    // v3.4 审计修复（M8）：前导零八进制变体 fail-closed——`0177.0.0.1` 的 parseInt 按
+    // 十进制解析为 177（判公网放行），而系统 inet_addr 按**八进制**解析为 127.0.0.1
+    // → webfetch 打到本机（本机服务/云元数据 SSRF）。前导零（长度>1）一律保守拦截。
+    if (p.length > 1 && p.startsWith("0")) return null;
     const n = Number(p);
     if (!Number.isSafeInteger(n) || n < 0) return null;
     vals.push(n);

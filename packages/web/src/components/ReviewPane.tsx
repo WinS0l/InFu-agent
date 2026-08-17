@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { FileDiff, FlaskConical, GitCompare, Loader2, ArrowLeft } from "lucide-react";
 import { useStore } from "../store";
 import { fetchReviewFiles, fetchReviewFileDiff, type ReviewFileInfo } from "../api";
@@ -68,7 +68,11 @@ export default function ReviewPane() {
   const [sel, setSel] = useState<string | null>(null);
   const [diff, setDiff] = useState("");
   const [loading, setLoading] = useState(false);
+  // v3.4 审计修复：diff 请求竞态守卫——快速连续点两个文件（或期间 root 变化）时，
+  // 旧请求的响应晚到会覆盖新选中文件的 diff；序号守卫让过期响应丢弃
+  const diffSeq = useRef(0);
   useEffect(() => {
+    diffSeq.current++; // root 变化 → 作废在途请求
     setFiles(null);
     setSel(null);
     setDiff("");
@@ -84,16 +88,17 @@ export default function ReviewPane() {
   }, [root]);
 
   const pickFile = async (path: string) => {
+    const seq = ++diffSeq.current;
     setSel(path);
     setLoading(true);
     setDiff("");
     try {
       const d = await fetchReviewFileDiff(root, path);
-      setDiff(d);
+      if (seq === diffSeq.current) setDiff(d);
     } catch (e) {
-      setDiff(`加载 diff 失败：${(e as Error).message}`);
+      if (seq === diffSeq.current) setDiff(`加载 diff 失败：${(e as Error).message}`);
     } finally {
-      setLoading(false);
+      if (seq === diffSeq.current) setLoading(false);
     }
   };
 

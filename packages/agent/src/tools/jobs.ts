@@ -63,6 +63,22 @@ function genJobId(): string {
   return `job-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
 }
 
+/**
+ * v3.4 审计修复（M6）：job 注册表剪枝——每会话运行中上限 8 但已完成条目**永久累积**
+ * （长时间会话可挂数百个含输出缓冲的僵尸句柄 = 内存泄漏）。已完成条目保留最近 20 个
+ * （job_output 短期仍可查输出），更老的删除；整个会话全清时空 map 一并删除。
+ */
+function trimJobRegistry(sessionId: string | undefined): void {
+  const key = sessionId ?? "";
+  const m = jobsBySession.get(key);
+  if (!m) return;
+  const done = [...m.entries()].filter(([, j]) => j.status !== "running");
+  if (done.length > 20) {
+    done.slice(0, done.length - 20).forEach(([id]) => m.delete(id));
+  }
+  if (m.size === 0) jobsBySession.delete(key);
+}
+
 function finalizeJob(h: JobHandle, code: number | null, signal: string | null): void {
   h.code = code;
   h.endedAt = Date.now();
@@ -177,6 +193,8 @@ export function startBackgroundJob(
     };
     emit({ type: "task-notification", ...note });
     notify?.(note);
+    // v3.4 审计修复（M6）：完成即剪枝（已完成条目保留最近 20 个）
+    trimJobRegistry(sessionId);
   };
   child.stdout?.on("data", append);
   child.stderr?.on("data", append);

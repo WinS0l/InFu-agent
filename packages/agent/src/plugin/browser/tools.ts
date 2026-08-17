@@ -198,8 +198,10 @@ export const browserTools: ToolDef[] = [
         const tab = await getPage();
         const dir = join(ctx.root, ".infu", "browser");
         if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+        // v3.5 数据生命周期：文件名带会话前缀（会话删除时联动清理该会话的浏览器截图）
+        const sid = (ctx.sessionId ?? "cli").replace(/[^a-zA-Z0-9-]/g, "").slice(0, 8);
         const name = (typeof args.name === "string" && args.name.trim() ? args.name.trim() : "shot") + "-" + Date.now().toString(36);
-        const file = join(dir, `${name}.png`);
+        const file = join(dir, `${sid}-${name}.png`);
         const buf = await tab.screenshot();
         writeFileSync(file, buf);
         return `截图已保存：${file}`;

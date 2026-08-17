@@ -22,6 +22,10 @@ import { sedimentTask } from "../memory/index.js";
 import { loadConfig } from "../providers/registry.js";
 import type { ModelCandidate } from "../providers/gateway.js";
 import type { ChatMessageLike } from "../providers/chat.js";
+import { existsSync, readdirSync } from "node:fs";
+import { join } from "node:path";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 
 /** 运行时模型配置（与 loop 的 modelConfig 同构） */
 export interface ModelConfigRuntime {
@@ -249,6 +253,12 @@ export async function runOrchestratedTask(opts: OrchestratedRunOptions): Promise
     // 真实干活（调过工具）才任务沉淀；纯文本回复直接 done（对齐 v2.6.2 寒暄短路语义）
     accUsage(exec);
     emit({ type: "done", text: exec.text, toolCount: exec.toolCount, steps: exec.steps, usage: usageAgg });
+    let commitNote = "";
+    if (worked) {
+      // v3.5：自动 git 提交（可选）+ 记忆自动提炼（默认开，失败静默）
+      try { commitNote = await tryAutoCommit(root, prompt); } catch { /* 忽略 */ }
+      try { await tryAutoRefine(root, prompt, exec, emit); } catch { /* 忽略 */ }
+    }
     if (worked && loadConfig()?.memory?.autoSediment !== false) {
       try {
         const sed = sedimentTask({
@@ -264,7 +274,7 @@ export async function runOrchestratedTask(opts: OrchestratedRunOptions): Promise
         emit({ type: "error", message: `任务沉淀失败（不影响交付）：${(e as Error).message}` });
       }
     }
-    return { text: exec.text, steps: exec.steps, toolCount: exec.toolCount, approvals: exec.approvals, toolLogs: exec.toolLogs, planText: "", reviewText: "" };
+    return { text: exec.text + commitNote, steps: exec.steps, toolCount: exec.toolCount, approvals: exec.approvals, toolLogs: exec.toolLogs, planText: "", reviewText: "" };
   }
 
   // ① Planner：只读规划（v2.2 按角色路由模型；v2.3 阶段级续跑 startPhase=executor
@@ -455,6 +465,20 @@ export async function runOrchestratedTask(opts: OrchestratedRunOptions): Promise
   accUsage(exec);
   emit({ type: "done", text: exec.text, toolCount: exec.toolCount, steps: exec.steps, usage: usageAgg });
 
+  // v3.5：自动 git 提交（可选）+ 记忆自动提炼（默认开，失败静默）
+  let commitNote = "";
+  if (exec.text !== ABORTED_MSG && exec.toolCount > 0) {
+    try { commitNote = await tryAutoCommit(root, prompt); } catch { /* 忽略 */ }
+    try { await tryAutoRefine(root, prompt, exec, emit); } catch { /* 忽略 */ }
+  }
+
+  // v3.5 数据生命周期：任务收尾自动清理无改动的 worktree（.infu/worktrees/ 由
+  // server/cli 创建、仅用户手动 merge/discard——无改动任务永久残留）。有改动的保留
+  // （用户可能 review / merge）；失败静默不影响交付。
+  try {
+    await discardCleanWorktrees(root);
+  } catch { /* 忽略 */ }
+
   // v2.6 任务自动沉淀（L4 项目历史）：结构化元数据归档 .infu/history/YYYY-MM-DD.md。
   // 零额外模型调用（用户拍板方案：报告归档 + 工具补充）；稳定约定/教训由 Agent 中途 memory_write 记录。
   // 沉淀失败不影响交付（try/catch 放行）。v2.7：config.memory.autoSediment=false 时关闭。
@@ -475,5 +499,72 @@ export async function runOrchestratedTask(opts: OrchestratedRunOptions): Promise
     }
   }
 
-  return { text: exec.text, steps: exec.steps, toolCount: exec.toolCount, approvals: exec.approvals, toolLogs: exec.toolLogs, planText, reviewText };
+  return { text: exec.text + commitNote, steps: exec.steps, toolCount: exec.toolCount, approvals: exec.approvals, toolLogs: exec.toolLogs, planText, reviewText };
+}
+
+const execFileAsync = promisify(execFile);
+
+/**
+ * v3.5 常规设置「自动 git 提交」（general.autoCommit，默认关）：
+ * 任务真实干活（调过工具）且未中止时，在任务 root 执行 git add -A + commit，
+ * 消息 = 任务指令前 50 字。**绝不 push**（本地提交，用户自行推送/合并）。
+ * 非 git 仓库 / 无改动 / 未配置 git 身份 → 静默跳过；提交成功返回提示行。
+ * enabled 由调用方解析（测试可直传，避免依赖真实配置）。
+ */
+export async function tryAutoCommit(root: string, prompt: string, enabled = loadConfig()?.general?.autoCommit === true): Promise<string> {
+  try {
+    if (!enabled) return "";
+    const repo = await execFileAsync("git", ["-C", root, "rev-parse", "--git-dir"], { windowsHide: true, timeout: 5000 }).catch(() => null);
+    if (!repo) return ""; // 非 git 仓库
+    const status = await execFileAsync("git", ["-C", root, "status", "--porcelain"], { windowsHide: true, timeout: 5000 }).catch(() => null);
+    if (!status || !status.stdout.trim()) return ""; // 无改动
+    await execFileAsync("git", ["-C", root, "add", "-A"], { windowsHide: true, timeout: 10000 });
+    const msg = `InFu: ${prompt.replace(/\s+/g, " ").slice(0, 50)}`;
+    const commit = await execFileAsync("git", ["-C", root, "commit", "-m", msg], { windowsHide: true, timeout: 10000 }).catch(() => null);
+    if (!commit) return ""; // 无身份等 → 静默
+    return `\n\n（已自动提交到本地 git，未推送：${msg}）`;
+  } catch {
+    return ""; // 失败静默不影响交付
+  }
+}
+
+/**
+ * v3.5 记忆自动提炼（config.memory.autoRefine，默认开）：
+ * 任务收尾用轻量模型把本次任务沉淀为项目记忆（conventions/lessons/preferences），
+ * 补齐「Agent 不主动写 memory」的缺口（对齐 Codex 会话后自动总结）。
+ * 只读校验：仅 Executor 模型配置（避免额外角色模型缺失）；失败静默。
+ */
+async function tryAutoRefine(root: string, prompt: string, result: RunResult, emit: (e: AgentEvent) => void): Promise<void> {
+  try {
+    const cfg = loadConfig();
+    if (cfg?.memory?.autoRefine === false) return;
+    const { refineMemory } = await import("../memory/refine.js");
+    await refineMemory({ root, prompt, result, emit });
+  } catch { /* 提炼失败静默 */ }
+}
+
+/**
+ * v3.5 数据生命周期：清理无改动的 git worktree。
+ * 每个 worktree 目录名 = 分支名（server.ts:1417 创建时的 -b <name>）。
+ * 无改动（status --porcelain 空）→ worktree remove + 分支删除；
+ * 有改动/非 git 仓库/失败 → 保留，用户手动处理。全程静默。
+ */
+async function discardCleanWorktrees(root: string): Promise<void> {
+  const dir = join(root, ".infu", "worktrees");
+  if (!existsSync(dir)) return;
+  for (const name of readdirSync(dir)) {
+    const wt = join(dir, name);
+    try {
+      const status = await execFileAsync("git", ["-C", wt, "status", "--porcelain"], {
+        windowsHide: true,
+        timeout: 5000,
+        maxBuffer: 4 * 1024 * 1024,
+      }).catch(() => null);
+      if (!status || status.stdout.trim() !== "") continue; // 非 git / 有改动 → 保留
+      await execFileAsync("git", ["worktree", "remove", "--force", wt], { windowsHide: true, timeout: 10000 }).catch(() => {});
+      await execFileAsync("git", ["-C", root, "branch", "-D", name], { windowsHide: true, timeout: 10000 }).catch(() => {});
+    } catch {
+      /* 单个 worktree 失败跳过 */
+    }
+  }
 }

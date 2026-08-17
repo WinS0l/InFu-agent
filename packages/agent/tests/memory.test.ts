@@ -22,9 +22,10 @@ import {
   readMemory, writeMemory, listTopics, validateTopic, resolveMemoryPath, detectSensitiveContent,
 } from "../src/memory/store.js";
 import { sedimentTask } from "../src/memory/sediment.js";
+import { setDataDirForTest } from "../src/data-dir.js";
 import type { AgentEvent, ToolContext } from "@infu/shared";
 import { mkdtempSync, writeFileSync, mkdirSync, existsSync, readFileSync, rmSync } from "node:fs";
-import { tmpdir, homedir } from "node:os";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 let passed = 0;
@@ -36,9 +37,13 @@ function check(name: string, cond: boolean, detail = "") {
 
 console.log("\n=== v2.6 记忆系统自测 ===\n");
 
-// ── 0. 测试夹具：临时项目 ──
+// ── 0. 测试夹具：临时项目 + 临时数据目录 ──
+// v3.5 审计修复：数据目录重定向到临时目录——原实现直接读写用户真实 ~/.infu/memory
+// （污染全局记忆 + 清理时递归删除用户全部记忆，危险）；setDataDirForTest 是进程级
+// 缓存注入，只影响本测试进程（isProtectedPath 的「InFu 配置目录」规则跟随 dataDir）
 const proj = mkdtempSync(join(tmpdir(), "infu-memory-test-"));
-const HOME = homedir();
+const tmpData = mkdtempSync(join(tmpdir(), "infu-memory-data-"));
+setDataDirForTest(tmpData);
 
 // ── 1. 指令文件发现 ──
 console.log("\n── 指令文件发现 ──");
@@ -151,7 +156,9 @@ console.log("\n── 记忆读写 ──");
   check("replace 写入成功", w2.ok);
   const after2 = readMemory("project", "conventions", projMem).text;
   check("replace 覆盖旧内容", after2.includes("只剩这个") && !after2.includes("构建命令"));
-  check("replace 后仍保留默认模板标题（被替换）", !after2.includes("# conventions") || true); // 替换后标题可能被覆盖，不强制
+  // v3.5 审计修复：原断言 `|| true` 恒真（假阳性）——replace 语义 = 整体覆盖（store.ts
+  // writeMemory replace 直接 writeFileSync 全量替换），默认模板标题随之消失，断言其真实行为
+  check("replace 整体覆盖后默认模板标题消失", !after2.includes("# conventions"));
 
   check("空 content 拒绝", writeMemory("project", "conventions", "  ", "append", projMem).ok === false);
 
@@ -167,10 +174,10 @@ console.log("\n── 记忆读写 ──");
 
   check("非法 topic 拒绝", writeMemory("project", "..\\x", "内容", "append", projMem).ok === false);
 
-  // 全局记忆路径（~/.infu/memory）
-  const gdir = join(HOME, ".infu", "memory");
+  // 全局记忆路径（数据目录/memory，测试已重定向到临时目录）
+  const gdir = join(tmpData, "memory");
   const wg = writeMemory("global", "preferences", "测试模型用 agnes", "append", projMem);
-  check("全局记忆写入 ~/.infu/memory", wg.ok && existsSync(join(gdir, "preferences.md")));
+  check("全局记忆写入数据目录/memory", wg.ok && existsSync(join(gdir, "preferences.md")));
   check("全局记忆读取", readMemory("global", "preferences", projMem).text.includes("测试模型用 agnes"));
   const wg2 = writeMemory("global", "preferences", "不许用 deepseek", "append", projMem);
   check("全局记忆追加两条", readMemory("global", "preferences", projMem).text.includes("不许用 deepseek"));
@@ -232,9 +239,9 @@ console.log("\n── 工具接线 ──");
     const rReadBlock = await TOOLS.read_file.execute({ path: "keep.txt" }, denyCtx);
     check("read_file 命中禁止规则 → 拒绝", rReadBlock.includes("超出作用域"));
 
-    // 写保护不变：write_file 写 ~/.infu 仍被拦截（绝对路径先触 root 越界，随后是保护检查；两种都算拦截成功）
-    const rProt = await TOOLS.write_file.execute({ path: join(HOME, ".infu", "memory", "evil.md"), content: "x" }, mkCtx());
-    check("write_file 写 ~/.infu 仍被拦截", rProt.includes("越界") || rProt.includes("受保护区域"));
+    // 写保护不变：write_file 写数据目录（含记忆区）仍被拦截（绝对路径先触 root 越界，随后是保护检查；两种都算拦截成功）
+    const rProt = await TOOLS.write_file.execute({ path: join(tmpData, "memory", "evil.md"), content: "x" }, mkCtx());
+    check("write_file 写数据目录/记忆 仍被拦截", rProt.includes("越界") || rProt.includes("受保护区域"));
   })();
 }
 
@@ -288,10 +295,9 @@ console.log("\n── 自动沉淀 ──");
 // ── 汇总（清理在最后：工具接线节是 microtask，先于同步清理执行）──
 setTimeout(() => {
   rmSync(proj, { recursive: true, force: true });
-  // 清理全局记忆测试残留（保持用户环境干净）
+  // 清理临时数据目录（v3.5 审计修复：只删测试自己的临时目录，绝不动用户 ~/.infu）
   try {
-    rmSync(join(HOME, ".infu", "memory", "preferences.md"), { force: true });
-    rmSync(join(HOME, ".infu", "memory"), { recursive: true, force: true });
+    rmSync(tmpData, { recursive: true, force: true });
   } catch { /* ignore */ }
   console.log(`\n=== 记忆系统自测完成：${passed} 通过，${failed} 失败 ===\n`);
   if (failed > 0) process.exit(1);

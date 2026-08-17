@@ -7,7 +7,7 @@
  */
 import { z } from "zod";
 import { join, resolve } from "node:path";
-import { existsSync, readFileSync, mkdirSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, mkdirSync, writeFileSync, statSync } from "node:fs";
 import type { ToolDef, ToolContext } from "@infu/shared";
 import { isPathInside } from "./util.js";
 
@@ -75,6 +75,12 @@ export const visionTools: Record<string, ToolDef> = {
       if (typeof cap !== "function") return "错误：桌面截图通道不可用（主进程未接线）";
       const file = cap(shotDir(ctx), args.minimize === true, ctx.sessionId);
       if (!file || !existsSync(file)) return "截图失败：桌面截图通道未返回文件";
+      // v3.4 审计修复（M7）：screen_capture 补大小上限（原实现无检查——4K 双屏 PNG
+      // 可达 10-40MB，base64 后直接撑爆下一轮模型请求；read_image 有 8MB 检查它没有）
+      const shotSize = statSync(file).size;
+      if (shotSize > MAX_IMG) {
+        return `截图过大（${(shotSize / 1024 / 1024).toFixed(1)}MB > 8MB 上限）：${file}——请用 read_image 按需读取或先压缩/裁剪后再分析`;
+      }
       const b64 = readFileSync(file).toString("base64");
       const name = file.split(/[\\/]/).pop() ?? "shot.png";
       return (

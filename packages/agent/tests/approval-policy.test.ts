@@ -15,7 +15,7 @@ import {
   resolveApprovalPolicy, shouldAutoApprove, matchOverride, isToolDisabled, resolveToolRisk,
   globToRegExp, isCommandAllowed, DEFAULT_POLICY, DEFAULT_COMMAND_ALLOWLIST,
 } from "../src/approval/policy.js";
-import { CONFIG_PATH, saveConfig } from "../src/providers/registry.js";
+import { configPath, saveConfig } from "../src/providers/registry.js";
 import { readFileSync, writeFileSync, existsSync, copyFileSync, rmSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -53,6 +53,7 @@ console.log("▶ shouldAutoApprove 档位矩阵");
   const auto = { mode: "auto" as const, toolOverrides: [], commandAllowlist: [] };
   const smart = { mode: "smart" as const, toolOverrides: [], commandAllowlist: [] };
   const confirm = { mode: "confirm" as const, toolOverrides: [], commandAllowlist: [] };
+  const full = { mode: "full" as const, toolOverrides: [], commandAllowlist: [] };
 
   check("auto 档 low → 放行", shouldAutoApprove(auto, "low") === true);
   check("auto 档 medium → 放行", shouldAutoApprove(auto, "medium") === true);
@@ -69,6 +70,13 @@ console.log("▶ shouldAutoApprove 档位矩阵");
   check("confirm 档 medium → 人工", shouldAutoApprove(confirm, "medium") === null);
   check("confirm 档 high → 人工", shouldAutoApprove(confirm, "high") === null);
   check("confirm 档 + requireExplicit → 人工", shouldAutoApprove(confirm, "low", true) === null);
+
+  // v3.5 full 档：全权放行——所有级别 + requireExplicit 红线全部自动放行
+  check("full 档 low → 放行", shouldAutoApprove(full, "low") === true);
+  check("full 档 medium → 放行", shouldAutoApprove(full, "medium") === true);
+  check("full 档 high → 放行", shouldAutoApprove(full, "high") === true);
+  check("full 档 + requireExplicit → 也放行（全权）", shouldAutoApprove(full, "high", true) === true);
+  check("full 档 + requireExplicit medium → 也放行", shouldAutoApprove(full, "medium", true) === true);
 }
 
 // ── 3. 工具覆盖 ──
@@ -119,7 +127,7 @@ console.log("▶ 命令白名单（glob 通配）");
 console.log("▶ guard 集成（write_file × 档位）");
 {
   // 备份/恢复用户配置
-  const CONFIG = CONFIG_PATH;
+  const CONFIG = configPath();
   const had = existsSync(CONFIG);
   const backup = join(homedir(), ".infu", "config.json.approval-test-backup");
   if (had) copyFileSync(CONFIG, backup);
@@ -172,6 +180,18 @@ console.log("▶ guard 集成（write_file × 档位）");
     check("auto 档 + requireExplicit：仍弹窗", approvals.length === 1, JSON.stringify(approvals));
     check("requireExplicit 风险为 high", approvals[0]?.risk === "high");
     check("mock 批准后注册成功", regOut.includes("已注册"), regOut);
+
+    // v3.5 full 档：红线（mcp_register requireExplicit）也直接放行，不触发审批
+    saveConfig({ models: [], approvalPolicy: { mode: "full" } });
+    approvals.length = 0;
+    const fullRegOut = await TOOLS.mcp_register.execute({ name: "xyz2", type: "stdio", command: "node x.mjs" }, mkCtx());
+    check("full 档 + requireExplicit：不弹窗", approvals.length === 0, JSON.stringify(approvals));
+    check("full 档红线放行后注册成功", fullRegOut.includes("已注册"), fullRegOut);
+
+    // full 档：显式禁用工具仍拒绝（对齐 opencode 显式 deny 不覆盖）
+    saveConfig({ models: [], approvalPolicy: { mode: "full", toolOverrides: [{ tool: "write_file", disabled: true }] } });
+    const fullDisabledOut = await TOOLS.write_file.execute({ path: "f.txt", content: "x" }, mkCtx());
+    check("full 档 + 禁用工具：仍拒绝", fullDisabledOut.includes("用户拒绝"), fullDisabledOut);
   } finally {
     // 恢复用户配置
     if (had) {

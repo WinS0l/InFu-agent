@@ -4,7 +4,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
-import { homedir } from "node:os";
+import { resolveDataDir } from "../data-dir.js";
 
 export interface IndexEntry { file: string; size: number; mtime: number; }
 export interface ProjectIndex { root: string; builtAt: number; files: IndexEntry[]; }
@@ -22,7 +22,7 @@ const SKIP_DIRS = new Set(["node_modules", ".git", "dist", "build", "out", ".nex
 
 function indexPath(root: string): string {
   const hash = crypto.createHash("sha1").update(path.resolve(root)).digest("hex").slice(0, 12);
-  const dir = path.join(homedir(), ".infu", "index");
+  const dir = path.join(resolveDataDir(), "index");
   fs.mkdirSync(dir, { recursive: true });
   return path.join(dir, hash + ".json");
 }
@@ -80,4 +80,11 @@ export function indexStatus(root: string): IndexStatus {
   } catch {
     return { built: false, fileCount: 0, builtAt: null, sizeBytes: 0, path: p };
   }
+}
+
+/** v3.5 数据生命周期：删除某 root 的索引文件（项目移除时清理孤儿索引；不存在静默） */
+export function deleteIndex(root: string): void {
+  try {
+    fs.rmSync(indexPath(root), { force: true });
+  } catch { /* 忽略 */ }
 }

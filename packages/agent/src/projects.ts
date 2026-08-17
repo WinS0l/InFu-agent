@@ -10,9 +10,12 @@
  */
 
 import fs from "node:fs";
-import path from "node:path";
 import os from "node:os";
+import path from "node:path";
 import { randomUUID } from "node:crypto";
+import { cleanupOldBackups } from "./cleanup.js";
+import { deleteIndex } from "./index/index.js";
+import { resolveDataDir } from "./data-dir.js";
 
 export interface Project {
   id: string;
@@ -21,7 +24,9 @@ export interface Project {
   createdAt: number;
 }
 
-const PROJECTS_FILE = path.join(os.homedir(), ".infu", "projects.json");
+function projectsFilePath(): string {
+  return path.join(resolveDataDir(), "projects.json");
+}
 
 /** root 归一化（去尾部分隔符；Windows 大小写不敏感比较用 lower） */
 export function normalizeRoot(root: string): string {
@@ -35,6 +40,7 @@ export function sameRoot(a: string, b: string): boolean {
 
 /** 读取注册表（文件缺失/损坏返回空列表；损坏备份后重建） */
 export function listProjects(): Project[] {
+  const PROJECTS_FILE = projectsFilePath();
   try {
     if (!fs.existsSync(PROJECTS_FILE)) return [];
     const raw = JSON.parse(fs.readFileSync(PROJECTS_FILE, "utf-8"));
@@ -44,13 +50,20 @@ export function listProjects(): Project[] {
       .map((p: Project) => ({ id: p.id, name: p.name, root: normalizeRoot(p.root), createdAt: Number(p.createdAt) || 0 }));
   } catch {
     try { fs.renameSync(PROJECTS_FILE, `${PROJECTS_FILE}.corrupt-${Date.now()}`); } catch { /* ignore */ }
+    // v3.5 数据生命周期：顺带清理超期损坏备份（.corrupt-* 永久累积）
+    try { cleanupOldBackups(PROJECTS_FILE); } catch { /* ignore */ }
     return [];
   }
 }
 
 function saveProjects(projects: Project[]) {
+  const PROJECTS_FILE = projectsFilePath();
   fs.mkdirSync(path.dirname(PROJECTS_FILE), { recursive: true });
-  fs.writeFileSync(PROJECTS_FILE, JSON.stringify({ version: 1, projects }, null, 2), "utf-8");
+  // v3.5：原子写（tmp + rename）——多进程并发（server/CLI/定时任务）直写会截断半写内容，
+  // 读方 JSON.parse 失败 → 反复产生 .corrupt-* 备份（本机曾累积 9 个）
+  const tmp = `${PROJECTS_FILE}.tmp-${process.pid}`;
+  fs.writeFileSync(tmp, JSON.stringify({ version: 1, projects }, null, 2), "utf-8");
+  fs.renameSync(tmp, PROJECTS_FILE);
 }
 
 /** 注册项目；root 必须存在；返回 {ok, project?, message} */
@@ -75,13 +88,16 @@ export function createProject(root: string, name?: string): { ok: boolean; proje
   return { ok: true, project, message: `已创建项目「${project.name}」` };
 }
 
-/** 移除项目（只删注册；会话保留为自由会话） */
+/** 移除项目（只删注册；会话保留为自由会话；v3.5：连带清理孤儿索引文件） */
 export function removeProject(id: string): { ok: boolean; message: string } {
   const projects = listProjects();
   const next = projects.filter((p) => p.id !== id);
   if (next.length === projects.length) return { ok: false, message: "项目不存在" };
   const removed = projects.find((p) => p.id === id)!;
   saveProjects(next);
+  // v3.5 数据生命周期：~/.infu/index/<root-hash>.json 按 root 哈希命名——项目移除后
+  // 索引永久孤儿；这里同步删除（仅索引文件，不动项目文件夹）；失败不影响移除
+  try { deleteIndex(removed.root); } catch { /* ignore */ }
   return { ok: true, message: `已移除项目「${removed.name}」（会话保留为自由会话，文件夹未删除）` };
 }
 
@@ -104,6 +120,7 @@ export function resolveProjectByName(name: string): string[] {
     if (fs.existsSync(p)) roots.push(p);
   }
   roots.push(os.homedir());
+  roots.push(resolveDataDir());
   const out: string[] = [];
   for (const root of roots) {
     try {

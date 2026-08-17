@@ -10,7 +10,8 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import type { InfuConfig, McpServerConfig } from "@infu/shared";
-import { loadConfig, CONFIG_PATH } from "../providers/registry.js";
+import { loadConfig, configPath } from "../providers/registry.js";
+import { resolveDataDir } from "../data-dir.js";
 import { connectMcp, resolveToolRisk } from "./index.js";
 
 // ── 终端着色（与 cli.ts 一致）──
@@ -43,7 +44,8 @@ function ask(question: string, def?: string): Promise<string> {
 }
 
 function saveConfig(cfg: InfuConfig) {
-  mkdirSync(join(homedir(), ".infu"), { recursive: true });
+  mkdirSync(join(resolveDataDir()), { recursive: true });
+  const CONFIG_PATH = configPath();
   writeFileSync(CONFIG_PATH, JSON.stringify({ ...cfg, version: cfg.version ?? 1 }, null, 2), "utf-8");
 }
 

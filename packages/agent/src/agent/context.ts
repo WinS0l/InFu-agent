@@ -158,27 +158,38 @@ export async function compressMessages(
     return { messages: pruned, before, after: before, summary: "" };
   }
 
-  // 找压缩边界：从后往前保留最近消息直到 ≤ target（system 消息不参与压缩）
+  // system 消息（角色提示词/INFU.md/技能/工具纪律）永不参与压缩——提取出来，
+  // 压缩只作用于其余消息，结果头部始终保留全部 system（v3.4 审计修复 H2：
+  // 原实现 keepFrom 保底=2 会把 messages[0] system 压进摘要，长任务二次压缩后
+  // 模型失去全部工具纪律与角色指令；compress.test.ts 弱断言恰好掩盖）
+  const systemMsgs = pruned.filter((m) => m.role === "system");
+  const others = pruned.filter((m) => m.role !== "system");
+  const othersBefore = estimateTokens(others);
+  if (othersBefore <= trigger) {
+    return { messages: pruned, before, after: before, summary: "" };
+  }
+
+  // 找压缩边界：从后往前保留最近消息直到 ≤ target
   // 预留摘要消息自身开销（标题 + 400 字摘要正文 ≈ 512 token；保证压缩后整体 ≤ target）
   const RESERVED_FOR_SUMMARY = 512;
-  let keepFrom = pruned.length;
+  let keepFrom = others.length;
   let acc = 0;
-  for (let i = pruned.length - 1; i >= 1; i--) {
-    acc += estimateTokens([pruned[i]]);
+  for (let i = others.length - 1; i >= 1; i--) {
+    acc += estimateTokens([others[i]]);
     if (acc > target - RESERVED_FOR_SUMMARY) break;
     keepFrom = i;
   }
-  // 至少要压缩掉一条（keepFrom 前进至少 1），且不能把 system 压缩掉
-  if (keepFrom <= 1) keepFrom = 2; // 保底：压缩最老的一条非 system
-  if (keepFrom >= pruned.length) {
+  // 至少要压缩掉一条（keepFrom 前进至少 1）
+  if (keepFrom <= 1) keepFrom = 2; // 保底：压缩最老的一条（system 已剔除，此处必为非 system）
+  if (keepFrom >= others.length) {
     // 全部在预算内（理论上不会走到）：不压缩
     return { messages: pruned, before, after: before, summary: "" };
   }
   // v3.2：工具对平衡——边界前移保证 assistant(tool_calls)/tool 结果对完整（防 API 400）
-  keepFrom = balanceToolPairs(pruned, keepFrom);
+  keepFrom = balanceToolPairs(others, keepFrom);
 
-  const toCompress = pruned.slice(0, keepFrom);
-  const kept = pruned.slice(keepFrom);
+  const toCompress = others.slice(0, keepFrom);
+  const kept = others.slice(keepFrom);
   // 摘要生成失败 → 降级为直接丢弃最老部分（保最新，不阻塞任务）
   let summary = "";
   try {
@@ -191,13 +202,12 @@ export async function compressMessages(
   const summaryMsg: ChatMessageLike[] = summary
     ? [{ role: "user", content: `【此前会话摘要（历史已压缩，原内容可从会话记录恢复）】\n${summary}` }]
     : [];
-  const after = estimateTokens([...summaryMsg, ...kept]);
   if (SUMMARY_MUST_BE_SMALLER && summaryMsg.length && estimateTokens(summaryMsg) >= estimateTokens(toCompress)) {
     summary = ""; // 摘要不比原文小：丢弃，用 kept 裸保留
   }
   const compressed: ChatMessageLike[] = summary
-    ? [summaryMsg[0], ...kept]
-    : kept;
+    ? [...systemMsgs, summaryMsg[0], ...kept]
+    : [...systemMsgs, ...kept];
   return { messages: compressed, before, after: estimateTokens(compressed), summary };
 }
 

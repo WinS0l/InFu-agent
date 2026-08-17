@@ -118,7 +118,6 @@ console.log("\n▶ mcpToolToDef 适配器");
   const out1 = await t1.execute({ path: "a" }, ctx);
   check("调用转发 + 结果文本化", out1 === "RESULT:read" && calls.length === 1 && calls[0].name === "read");
   check("medium 触发审批（description 含服务器名与工具名）", approvals.length === 1 && approvals[0].risk === "medium" && approvals[0].desc.includes("FS") && approvals[0].desc.includes("read"));
-  check("审批拒绝 → 返回拒绝文本（不抛错）", true);
 
   // 审批拒绝
   const denied: string[] = [];

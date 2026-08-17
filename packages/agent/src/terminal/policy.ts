@@ -8,10 +8,11 @@
  */
 
 import { auditCommand } from "../sandbox/index.js";
+import { DANGEROUS } from "../sandbox/dangerous.js";
 
-/** 高危命令正则（与 run_command 的 DANGEROUS 一致：删除/强制/格式化类；
- *  注意：末尾无 \b——dd if=/…、mkfs.ext4 等后随符号（/ .）处无词边界，若加 \b 会漏检） */
-export const DANGEROUS_TERMINAL = /\b(rm\s+-rf|rmdir\s+\/s|del\s+\/f|format\s+|mkfs|dd\s+if=)/i;
+/** 高危命令正则（与 run_command 的 DANGEROUS 同一实现——v3.4 审计修复 M2：
+ *  多分支覆盖 rm -fr/Remove-Item -Recurse/del /s /q 等变体） */
+export const DANGEROUS_TERMINAL = DANGEROUS;
 
 /** 检测终端命令是否高危（返回命中片段；未命中返回 null） */
 export function detectDangerousTerminalCommand(command: string): string | null {

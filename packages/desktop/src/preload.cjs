@@ -40,6 +40,9 @@ contextBridge.exposeInMainWorld("infuDesktop", {
   browserStop: () => ipcRenderer.send("browser-view:stop"),
   browserDevtools: () => ipcRenderer.send("browser-view:devtools"),
   browserOpenExternal: (url) => ipcRenderer.send("browser-view:open-external", url),
+  // v3.5 修复：UI 侧视口（📄 预设/适应窗口）→ 主进程 CDP Emulation 同步——
+  // 此前用户点击只改元素 CSS，Agent 设过的设备度量覆盖（Emulation）残留 → 「适应窗口」无效
+  browserSetViewport: (opts) => ipcRenderer.invoke("browser-view:set-viewport", opts),
   // 主进程广播：Agent/主进程请求建 tab / 切 tab（渲染进程创建 webview 元素 / 切换显隐）
   onOpenRequest: (cb) => {
     const listener = (_e, url) => cb(url);

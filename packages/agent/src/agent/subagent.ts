@@ -187,6 +187,16 @@ export interface DelegationContext {
   askUser?: ToolContext["askUser"];
   /** v2.9：父级会话 id（per-session 子 Agent 活跃上限计数） */
   sessionId?: string;
+  /** v3.3 异步任务编排：后台任务完成通知入队（父循环每步注入 user XML 消息；
+   *  delegate_task 工具从 ToolContext 透传；未接线时仅发事件不注入上下文） */
+  enqueueTaskNotification?: (note: {
+    taskType: "subagent" | "job";
+    taskId: string;
+    name: string;
+    status: "completed" | "failed" | "stopped" | "killed";
+    summary: string;
+    outputFile?: string;
+  }) => void;
 }
 
 /** 子任务结果（回收给父级） */
@@ -484,6 +494,24 @@ export function startBackgroundSubagent(spec: SubagentSpec, ctx: DelegationConte
     },
   };
 
+  /**
+   * v3.3 异步任务编排：后台子智能体完成通知——
+   * ① emit task-notification 事件（SSE 前端通知行 + 落库可重放）；
+   * ② 入队父循环 pendingNotes（下一轮请求注入 user XML 消息，模型实时感知）。
+   * 通知摘要裁剪（上下文预算；完整结果仍可 report 回收 / 事件落库查）。
+   */
+  const notifyCompletion = (status: "completed" | "failed" | "stopped" | "killed", summary: string) => {
+    const note = {
+      taskType: "subagent" as const,
+      taskId: p.id,
+      name: p.name,
+      status,
+      summary: summary.length > 600 ? `${summary.slice(0, 600)}…（完整结果用 report 回收）` : summary,
+    };
+    ctx.emit({ type: "task-notification", ...note });
+    ctx.enqueueTaskNotification?.(note);
+  };
+
   // 异步执行（不阻塞父级循环）
   void (async () => {
     try {
@@ -520,6 +548,11 @@ export function startBackgroundSubagent(spec: SubagentSpec, ctx: DelegationConte
         toolCount: result.toolCount,
         ok: handle.ok,
       });
+      // v3.3：完成通知（正常完成 / 任务被中止（用户 stop/父级 abort）→ stopped / 异常 → failed）
+      notifyCompletion(
+        handle.ok ? "completed" : result.text.startsWith("任务已停止") ? "stopped" : "failed",
+        handle.ok ? result.text : handle.result
+      );
     } catch (e) {
       handle.status = "error";
       handle.ok = false;
@@ -532,6 +565,7 @@ export function startBackgroundSubagent(spec: SubagentSpec, ctx: DelegationConte
         toolCount: handle.toolCount,
         ok: false,
       });
+      notifyCompletion("failed", handle.result);
     } finally {
       // 释放 per-session 活跃计数
       if (sid) {

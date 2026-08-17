@@ -547,6 +547,10 @@ function handleEvent(ev: AgentEvent, connSid: string | null) {
     case "context-compressed":
       st.appendCompressed(ev.before, ev.after, ev.summary);
       break;
+    case "task-notification":
+      // v3.3 后台任务完成通知（EventRow 通知行）
+      st.appendTaskNotification({ taskType: ev.taskType, taskId: ev.taskId, name: ev.name, status: ev.status, summary: ev.summary });
+      break;
     case "subagent-start":
       st.startSubagent(ev);
       break;

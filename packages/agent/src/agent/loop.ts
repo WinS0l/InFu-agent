@@ -170,7 +170,12 @@ export const DEFAULT_SYSTEM_PROMPT = `你是 Infu（In 和 F 大写），一个�
 7. 文件级操作（移动/复制/删除/建目录）用 file_ops 工具，不要用 run_command 调 mv/cp/rm——file_ops 有路径边界与保护检查且无需 shell，审批更轻。
 8. 读文件优先 read_file 指定行号范围，不要整文件转储（大文件截断会浪费上下文）；批量读多个文件用 read_files。
 9. 运行测试用 run_test（自动检测框架），只有需要自定义命令时才用 run_command。
-10. 每轮只做一个状态改变（一次写操作后先观察结果再继续），成功路径上不要重复执行同一命令——重复调用会打扰用户审批。`;
+10. 每轮只做一个状态改变（一次写操作后先观察结果再继续），成功路径上不要重复执行同一命令——重复调用会打扰用户审批。
+
+异步任务纪律（v3.3，对齐 ZCode <task-notification> 机制）：
+11. 耗时任务（长命令、独立子任务、搜索调研）优先异步启动：run_command background=true 或 delegate_task background=true——立即拿到 job id / 子智能体 id，**先去做其他工作**，不要阻塞空等。
+12. 后台任务完成时你会收到一条 <task-notification> 系统消息（含 task-id/status/summary）——看到通知后：结果有用就回收（子智能体用 report，job 用 job_output），需要继续驱动就用 send_message，任务已死就中断（interrupt_agent / job_kill）。
+13. 需要结果才能继续时才等待：wait_task（阻塞等待指定任务完成，可设超时）；未完成会返回进度——此时要么继续等，要么先做别的，不要反复轮询同一任务。`;
 
 /**
  * v3.1 附件：用户消息内容 parts（text + 图片视觉 base64）。
@@ -379,6 +384,37 @@ export async function runAgent(opts: AgentRunOptions): Promise<RunResult> {
     agentChannel,
     // v2.14 批 18：沙箱档位覆盖（子智能体 agent 文件 sandbox 字段）
     sandboxMode,
+    // v3.3 异步任务编排：后台任务完成通知入队（drainTaskNotifications 消费 →
+    // 每步开始注入 user XML 消息，模型实时感知等待的任务已完成）
+    enqueueTaskNotification: (note) => pendingNotes.push(note),
+  };
+
+  /**
+   * v3.3 异步任务编排（对齐 ZCode <task-notification> 机制）：
+   * 后台任务（delegate_task background / run_command background）完成时，
+   * 完成点 emit task-notification 事件（前端通知行 + 落库）+ 通过
+   * ctx.enqueueTaskNotification 入队本循环的 pendingNotes——每步开始 drain 为
+   * role=user 的 XML 消息注入 messages，模型下一轮请求即看到「任务已完成」通知，
+   * 自主决定回收结果 / 继续其他工作。局部队列随循环结束自然消亡（无泄漏）。
+   */
+  type TaskNotificationNote = Parameters<NonNullable<ToolContext["enqueueTaskNotification"]>>[0];
+  const pendingNotes: TaskNotificationNote[] = [];
+  /** 渲染 <task-notification> XML（与 rebuild 同格式；纯文本 user 消息，不破坏工具配对） */
+  const renderTaskNotificationXml = (n: TaskNotificationNote): string =>
+    `<task-notification>\n` +
+    `<task-type>${n.taskType}</task-type>\n` +
+    `<task-id>${n.taskId}</task-id>\n` +
+    `<status>${n.status}</status>\n` +
+    `<summary>${n.summary.replace(/</g, "&lt;").replace(/>/g, "&gt;")}</summary>\n` +
+    (n.outputFile ? `<output-file>${n.outputFile}</output-file>\n` : "") +
+    `</task-notification>`;
+  /** 每步开始消费队列（队列是用户消息——下一步请求前注入即可；模型自行决定下一步动作） */
+  const drainTaskNotifications = (): void => {
+    if (!pendingNotes.length) return;
+    const notes = pendingNotes.splice(0);
+    for (const n of notes) {
+      messages.push({ role: "user", content: renderTaskNotificationXml(n) });
+    }
   };
 
   // 模型降级链（v2.2）：主模型重试耗尽 → 依次切换备用模型；切换时发事件（审计/前端徽标）
@@ -497,6 +533,9 @@ export async function runAgent(opts: AgentRunOptions): Promise<RunResult> {
 
     // v2.2 上下文压缩：超当前模型窗口预算 → 摘要化最老部分（DB 无损；预算跟当前活动模型走）
     await ensureContextBudget();
+
+    // v3.3 异步任务编排：drain 后台任务完成通知（注入 user XML 消息——本步请求即可见）
+    drainTaskNotifications();
 
     // 1) 调用模型（流式：reasoning / text / toolCalls）
     let text = "";

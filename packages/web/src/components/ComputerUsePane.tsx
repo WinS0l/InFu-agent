@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Monitor, MonitorUp, MousePointerClick, Keyboard, X } from "lucide-react";
+import { Monitor, MonitorUp, MousePointerClick, Keyboard, X, Move, AppWindow } from "lucide-react";
 import { useStore } from "../store";
 import { apiFetch } from "../api";
 
@@ -95,6 +95,14 @@ export default function ComputerUsePane() {
                 {op.tool === "screen_capture" ? (
                   <MonitorUp className="mt-0.5 h-3.5 w-3.5 shrink-0 text-info" />
                 ) : op.tool === "screen_click" ? (
+                  <MousePointerClick className="mt-0.5 h-3.5 w-3.5 shrink-0 text-info" />
+                ) : op.tool === "screen_move" ? (
+                  <Move className="mt-0.5 h-3.5 w-3.5 shrink-0 text-info" />
+                ) : op.tool === "screen_drag" ? (
+                  <Move className="mt-0.5 h-3.5 w-3.5 shrink-0 text-warn" />
+                ) : op.tool === "screen_windows" ? (
+                  <AppWindow className="mt-0.5 h-3.5 w-3.5 shrink-0 text-info" />
+                ) : op.tool === "screen_scroll" ? (
                   <MousePointerClick className="mt-0.5 h-3.5 w-3.5 shrink-0 text-info" />
                 ) : (
                   <Keyboard className="mt-0.5 h-3.5 w-3.5 shrink-0 text-info" />

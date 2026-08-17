@@ -3,6 +3,7 @@ import {
   Send, Square, GitBranch, Loader2,
   RotateCcw, AlertTriangle, Files, Folder, FolderOpen, ChevronDown, Check,
   BrainCircuit, ShieldCheck, ShieldAlert, Scale, Cpu, Paperclip, FileText, X, Pencil, Image as ImageIcon, WifiOff, Zap,
+  CheckCircle2, XCircle, OctagonX, Skull,
 } from "lucide-react";
 import { Streamdown } from "streamdown";
 import type { PhaseId } from "@infu/shared";
@@ -1372,6 +1373,43 @@ const MessageItem = memo(function MessageItem({
               }
             />
           ))}
+        </div>
+      )}
+      {/* v3.3 后台任务完成通知（对齐 ZCode <task-notification>：EventRow 通知行——
+          完成/失败/中止实时可见；展开看摘要；subagent 可点击跳右栏子 Agent tab） */}
+      {m.taskNotes && m.taskNotes.length > 0 && (
+        <div className="my-0.5 space-y-0.5">
+          {m.taskNotes.map((n, i) => {
+            const isSub = n.taskType === "subagent";
+            const stMeta = n.status === "completed"
+              ? { icon: <CheckCircle2 className="h-3.5 w-3.5" />, cls: "text-success", label: "完成" }
+              : n.status === "failed"
+                ? { icon: <XCircle className="h-3.5 w-3.5" />, cls: "text-danger", label: "失败" }
+                : n.status === "stopped"
+                  ? { icon: <OctagonX className="h-3.5 w-3.5" />, cls: "text-warn", label: "已停止" }
+                  : { icon: <Skull className="h-3.5 w-3.5" />, cls: "text-danger", label: "已终止" };
+            return (
+              <EventRow
+                key={i}
+                icon={stMeta.icon}
+                iconCls={stMeta.cls}
+                title={`后台${isSub ? "子智能体" : "任务"}${stMeta.label}：${n.name}`}
+                summary={`${isSub ? n.taskId : `job ${n.taskId}`} · ${n.summary.split("\n")[0]}`}
+                detail={
+                  <>
+                    <div className="font-medium text-text">
+                      {isSub ? `子智能体 ${n.taskId}（${n.name}）` : `后台任务 ${n.taskId}`}
+                      <span className="ml-1.5 text-caption">{stMeta.label}</span>
+                    </div>
+                    <div className="mt-0.5 whitespace-pre-wrap text-[13px] leading-6 text-sub">{n.summary}</div>
+                    {isSub && (
+                      <div className="mt-1.5 text-caption">可在右侧栏「子 Agent」tab 查看完整过程；用 report 回收结果</div>
+                    )}
+                  </>
+                }
+              />
+            );
+          })}
         </div>
       )}
       {/* 错误消息（addError 产生）：专用错误行（对齐 主流 TurnErrorItem：红点 + 标题 + 消息） */}

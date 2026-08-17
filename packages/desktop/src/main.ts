@@ -420,9 +420,10 @@ let lastShotOrigin = { x: 0, y: 0 };
 /** 桌面输入（SendInput P/Invoke）——返回 "OK" 或错误描述。
  *  action：click（坐标点击）/ type（文本粘贴）/ move（仅移动光标）/
  *          scroll（滚轮：direction up/down/left/right + amount 格数）/
- *          key（按键组合：如 ctrl+c、alt+tab、enter、f5） */
+ *          key（按键组合：如 ctrl+c、alt+tab、enter、f5）/
+ *          drag（v3.3 拖拽：x1,y1 → x2,y2，steps 分步） */
 (globalThis as Record<string, unknown>).__infuScreenInput = (
-  action: "click" | "type" | "move" | "scroll" | "key",
+  action: "click" | "type" | "move" | "scroll" | "key" | "drag",
   ...params: Array<string | number>
 ): string => {
   try {
@@ -444,6 +445,18 @@ public static class InFuInput {
     inputs[0].type = 0; inputs[0].mi.dwFlags = down;
     inputs[1].type = 0; inputs[1].mi.dwFlags = up;
     SendInput(2, inputs, Marshal.SizeOf(typeof(INPUT)));
+  }
+  // v3.3 computer use 补齐：拖拽（左键按下 → 分步移动 → 松开；对齐 Codex/Claude Code drag 能力）
+  public static void Drag(int x1, int y1, int x2, int y2, int steps) {
+    SetCursorPos(x1, y1); Thread.Sleep(50);
+    INPUT down = new INPUT(); down.type = 0; down.mi.dwFlags = 0x0002; // LEFT DOWN
+    SendInput(1, new INPUT[] { down }, Marshal.SizeOf(typeof(INPUT)));
+    for (int i = 1; i <= steps; i++) {
+      SetCursorPos(x1 + (x2 - x1) * i / steps, y1 + (y2 - y1) * i / steps);
+      Thread.Sleep(15);
+    }
+    INPUT up = new INPUT(); up.type = 0; up.mi.dwFlags = 0x0004; // LEFT UP
+    SendInput(1, new INPUT[] { up }, Marshal.SizeOf(typeof(INPUT)));
   }
   public static void Move(int x, int y) { SetCursorPos(x, y); }
   public static void Scroll(int delta, bool horizontal) {
@@ -479,6 +492,14 @@ public static class InFuKeys {
       const x = Math.round(Number(params[0])) + shift.x;
       const y = Math.round(Number(params[1])) + shift.y;
       script += `[InFuInput]::Move(${x}, ${y})`;
+    } else if (action === "drag") {
+      // v3.3：拖拽（x1,y1 → x2,y2；steps 分步移动，默认 10）
+      const x1 = Math.round(Number(params[0])) + shift.x;
+      const y1 = Math.round(Number(params[1])) + shift.y;
+      const x2 = Math.round(Number(params[2])) + shift.x;
+      const y2 = Math.round(Number(params[3])) + shift.y;
+      const steps = Math.max(1, Math.min(50, Math.round(Number(params[4] ?? 10))));
+      script += `[InFuInput]::Drag(${x1}, ${y1}, ${x2}, ${y2}, ${steps})`;
     } else if (action === "scroll") {
       // params: direction("up"|"down"|"left"|"right"), amount(格数，默认 1)
       const dir = String(params[0] ?? "down");
@@ -522,6 +543,61 @@ public static class InFuKeys {
     return "OK";
   } catch (e) {
     return `输入失败：${(e as Error).message.slice(0, 120)}`;
+  }
+};
+
+/**
+ * v3.3 computer use 补齐：窗口管理（PowerShell 零依赖）——
+ *  list：Get-Process 主窗口句柄非零的进程（可见窗口；标题/进程名/窗口句柄）；
+ *  activate：按进程名或标题关键词模糊匹配 → SetForegroundWindow + ShowWindow(SW_RESTORE 9)。
+ * 返回 "OK" 或错误描述；每次调用启动一次 PS（~300ms）。
+ */
+(globalThis as Record<string, unknown>).__infuScreenWindows = (action: string, name?: string): string => {
+  try {
+    if (action === "list") {
+      const script =
+        `Get-Process | Where-Object { $_.MainWindowHandle -ne 0 } | ` +
+        `Select-Object -First 40 ProcessName, Id, MainWindowTitle | ` +
+        `ForEach-Object { "$($_.ProcessName)|$($_.Id)|$($_.MainWindowTitle)" }`;
+      const out = execFileSync("powershell", ["-NoProfile", "-Command", script], {
+        timeout: 15000, windowsHide: true, encoding: "utf8",
+      }).toString().trim();
+      if (!out) return "当前没有可见窗口（或主进程枚举受限）";
+      const lines = out.split(/\r?\n/).filter(Boolean).map((l) => {
+        const [proc, pid, ...titleParts] = l.split("|");
+        const title = titleParts.join("|").trim();
+        return `· ${proc}（pid ${pid}）${title ? `— ${title.slice(0, 80)}` : ""}`;
+      });
+      return `可见窗口（${lines.length} 个）：\n${lines.join("\n")}\n\n激活: screen_windows(action=activate, name=进程名或标题关键词)`;
+    }
+    if (action === "activate") {
+      if (!name) return "错误：activate 需要 name 参数";
+      const safe = String(name).replace(/'/g, "''");
+      const script =
+        `Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+public static class InFuWin {
+  [DllImport("user32.dll")] static extern bool SetForegroundWindow(IntPtr hWnd);
+  [DllImport("user32.dll")] static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
+  [DllImport("user32.dll")] static extern bool IsIconic(IntPtr hWnd);
+  public static bool Activate(IntPtr h) { if (IsIconic(h)) ShowWindow(h, 9); return SetForegroundWindow(h); }
+}
+'@;` +
+        // 模糊匹配用 Contains（-match 是正则——用户输入含元字符会报错/误配；' 已转义防注入）
+        `$ps = Get-Process | Where-Object { $_.MainWindowHandle -ne 0 -and ($_.ProcessName.Contains('${safe}') -or $_.MainWindowTitle.Contains('${safe}')) } | Select-Object -First 1;` +
+        `if (-not $ps) { "NOT_FOUND" } else { if ([InFuWin]::Activate($ps.MainWindowHandle)) { "OK:$($ps.ProcessName):$($ps.MainWindowTitle)" } else { "FAILED" } }`;
+      const out = execFileSync("powershell", ["-NoProfile", "-Command", script], {
+        timeout: 15000, windowsHide: true, encoding: "utf8",
+      }).toString().trim();
+      if (out === "NOT_FOUND") return `未找到匹配窗口「${name}」——先 screen_windows(action=list) 查看可见窗口（用进程名或标题关键词）`;
+      if (out === "FAILED") return `激活失败：窗口句柄无效或前台限制（Windows 前台锁——通常点击一次即可恢复）`;
+      const [, proc, title] = out.split(":");
+      return `已激活窗口 ${proc}${title ? `（${title}）` : ""}`;
+    }
+    return `错误：未知操作 ${action}（支持 list / activate）`;
+  } catch (e) {
+    return `窗口操作失败：${(e as Error).message.slice(0, 120)}`;
   }
 };
 

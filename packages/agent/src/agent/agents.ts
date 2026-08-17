@@ -59,6 +59,8 @@ export const READONLY_TOOLS = [
   "read_file", "search_code", "list_directory", "project_scan", "git_status", "git_diff", "use_skill",
   // v2.11：后台子智能体/后台任务状态查询（只读管理）
   "list_agents", "report", "job_list", "job_output",
+  // v3.3：阻塞等待后台任务完成（只读等待）
+  "wait_task",
   // v3.1：目录树 / 环境 / 时间（只读探索）
   "project_tree", "os_info", "current_time",
 ];

@@ -15,7 +15,7 @@ import {
   GitBranch, GitCompare, FlaskConical, Building2, Wrench, Loader2, Check, X,
   Brain, Bot, Globe, History, PlusCircle, GitCommitHorizontal, ListChecks, HelpCircle,
   BookOpen, Files, Database, List, Send, FileCheck, Users, Plug, PackagePlus,
-  MessageSquare, OctagonX, FolderTree, MonitorCog, Clock3,
+  MessageSquare, OctagonX, FolderTree, MonitorCog, Clock3, Move, AppWindow,
 } from "lucide-react";
 import { useStore, type ToolEventState } from "../store";
 import { CodeBlock } from "./ui";
@@ -63,6 +63,10 @@ const TOOL_ICON: Record<string, React.ElementType> = {
   file_ops: Wrench,
   os_info: MonitorCog,
   current_time: Clock3,
+  // v3.3 异步任务编排：wait_task（阻塞等待）；computer use 补齐：screen_drag / screen_windows
+  wait_task: Clock3,
+  screen_drag: Move,
+  screen_windows: AppWindow,
 };
 
 /** 摘要关键键（主流 SUMMARY_KEYS 同语义：优先展示命令/路径/查询等核心参数） */

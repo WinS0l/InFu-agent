@@ -23,6 +23,14 @@ export interface ChatMsg {
   fallbacks?: Array<{ from: string; to: string; reason: string }>;
   /** v2.2 上下文压缩记录（历史超预算自动摘要；DB 无损） */
   compressed?: Array<{ before: number; after: number; summary: string }>;
+  /** v3.3 后台任务完成通知（task-notification 事件；EventRow 通知行——对齐 ZCode） */
+  taskNotes?: Array<{
+    taskType: "subagent" | "job";
+    taskId: string;
+    name: string;
+    status: "completed" | "failed" | "stopped" | "killed";
+    summary: string;
+  }>;
   /** v2.1：该轮第一条事件的 seq（Rewind 回滚锚点；历史重放时标记） */
   seqStart?: number;
   /** v3.1：用户消息附加的文件/文件夹/图片（attachments 事件挂载；渲染附件行） */
@@ -251,6 +259,14 @@ interface StoreState {
   appendFallback: (from: string, to: string, reason: string) => void;
   /** v2.2 上下文压缩记录（提示条展示） */
   appendCompressed: (before: number, after: number, summary: string) => void;
+  /** v3.3 后台任务完成通知（EventRow 通知行） */
+  appendTaskNotification: (note: {
+    taskType: "subagent" | "job";
+    taskId: string;
+    name: string;
+    status: "completed" | "failed" | "stopped" | "killed";
+    summary: string;
+  }) => void;
   /** 阶段开始：若当前 assistant 消息已有内容则开新消息（每轮 = 一条消息，对齐主流 Agent turn 语义） */
   beginStep: (n: number) => void;
   startTool: (ev: Extract<AgentEvent, { type: "tool-start" }>) => void;
@@ -808,6 +824,19 @@ export const useStore = create<StoreState>()(
             cur.compressed = [...(cur.compressed ?? []), { before: event.before, after: event.after, summary: event.summary }];
           }
           break;
+        case "task-notification":
+          // v3.3 后台任务完成通知：附加到当前轮次（EventRow 通知行；无当前轮则忽略——
+          // 任务已结束的后台通知只进上下文（后端注入）与落库，不再补渲染）
+          if (cur) {
+            cur.taskNotes = [...(cur.taskNotes ?? []), {
+              taskType: event.taskType,
+              taskId: event.taskId,
+              name: event.name,
+              status: event.status,
+              summary: event.summary,
+            }];
+          }
+          break;
         case "error":
           msgs.push({ id: nextId(), role: "assistant", text: `⚠️ ${event.message}`, tools: [], ts });
           cur = null;
@@ -1023,6 +1052,18 @@ export const useStore = create<StoreState>()(
       patchMsgs(s, (m) =>
         m.map((x) =>
           x.id === msg.id ? { ...x, compressed: [...(x.compressed ?? []), { before, after, summary }] } : x
+        )
+      )
+    );
+  },
+
+  /** v3.3 后台任务完成通知：附加到当前 assistant 轮次（EventRow 通知行） */
+  appendTaskNotification: (note) => {
+    const msg = get().ensureAssistant();
+    set((s) =>
+      patchMsgs(s, (m) =>
+        m.map((x) =>
+          x.id === msg.id ? { ...x, taskNotes: [...(x.taskNotes ?? []), note] } : x
         )
       )
     );

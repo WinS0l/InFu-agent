@@ -16,10 +16,10 @@ import { registerPlugin, type RegisterPluginInput } from "../plugin/register.js"
 import { listSkills, readSkillContent } from "../plugin/skills.js";
 import { listAgents, readAgentFile } from "../agent/agents.js";
 import { delegateTasks, describeDelegation, isReadOnlyDelegation, startBackgroundSubagent,
-  listBackgroundAgents, interruptBackgroundAgent, sendMessageToAgent, getAgentReport,
+  listBackgroundAgents, getBackgroundAgent, interruptBackgroundAgent, sendMessageToAgent, getAgentReport,
   availableSubagentSlots, MAX_ACTIVE_SUBAGENTS_PER_SESSION,
   type SubagentSpec } from "../agent/subagent.js";
-import { startBackgroundJob, listJobs, getJobOutput, killJob, auditJobStart } from "./jobs.js";
+import { startBackgroundJob, listJobs, getJob, getJobOutput, killJob, auditJobStart } from "./jobs.js";
 import { readMemory, writeMemory, validateTopic, checkPathScope } from "../memory/index.js";
 import { loadConfig } from "../providers/registry.js";
 import { currentApprovalPolicy, isCommandAllowed, hasShellCombinators } from "../approval/policy.js";
@@ -399,7 +399,8 @@ export const TOOLS: Record<string, ToolDef> = {
       if (args.background === true) {
         let job;
         try {
-          job = startBackgroundJob(command, ctx.root, ctx.sessionId, ctx.delegationDepth ?? 0, ctx.emit);
+          // v3.3：透传 enqueueTaskNotification——job 完成时入队父循环（模型收到 <task-notification> 通知）
+          job = startBackgroundJob(command, ctx.root, ctx.sessionId, ctx.delegationDepth ?? 0, ctx.emit, ctx.enqueueTaskNotification);
         } catch (e) {
           return `错误：${(e as Error).message}`;
         }
@@ -407,6 +408,7 @@ export const TOOLS: Record<string, ToolDef> = {
         return (
           `已后台启动任务 ${job.id}（不阻塞，可继续其他工作）：\n${command}` +
           `\n\n管理：job_list 查看状态 / job_output(job_id) 看输出 / job_kill(job_id) 终止。` +
+          `\n任务完成时你会收到 <task-notification> 通知消息（含状态与输出尾部）。` +
           netNote + netTag
         );
       }
@@ -594,6 +596,8 @@ export const TOOLS: Record<string, ToolDef> = {
           parentCallId: ctx.callId,
           readOnly,
           sessionId: ctx.sessionId,
+          // v3.3 异步任务编排：后台子智能体完成通知 → 父循环上下文注入
+          enqueueTaskNotification: ctx.enqueueTaskNotification,
         };
         // v2.11 后台模式：立即返回 id（不阻塞父级）；子 Agent 在注册表异步跑完，父级用
         // list_agents/report/send_message/interrupt_agent 管理
@@ -608,7 +612,8 @@ export const TOOLS: Record<string, ToolDef> = {
           return (
             `已后台启动 ${started.length} 个子智能体（不阻塞，父级可继续其他任务）：\n` +
             started.map((h) => `· ${h.id}（${h.name}）`).join("\n") +
-            `\n\n管理：list_agents 查看状态；report(agent_id) 回收结果；send_message(agent_id, message) 回复等待中的子智能体；interrupt_agent(agent_id) 中止。`
+            `\n\n管理：list_agents 查看状态；report(agent_id) 回收结果；send_message(agent_id, message) 回复等待中的子智能体；interrupt_agent(agent_id) 中止。` +
+            `\n子智能体完成时你会收到 <task-notification> 通知消息（含状态与摘要）。`
           );
         }
         return await delegateTasks(tasks, delegationCtx);
@@ -755,6 +760,57 @@ export const TOOLS: Record<string, ToolDef> = {
     }),
     async execute(args, ctx) {
       return killJob(ctx.sessionId, String(args.job_id ?? ""));
+    },
+  },
+
+  // ── v3.3 异步任务编排：阻塞等待（对齐 ZCode TaskOutput block=true；
+  //  与 report/job_output（非阻塞查询）互补——需要结果才能继续时才用）──
+  wait_task: {
+    name: "wait_task",
+    description:
+      "阻塞等待后台任务完成（delegate_task background=true 的子智能体 / run_command background=true 的 job）。\n" +
+      "语义：等待直到任务结束或超时——完成返回最终结果（子智能体=摘要，job=输出尾部+退出码）；超时返回当前进度，由你决定继续等还是先做别的。\n" +
+      "何时用：下一步必须依赖该任务结果时。何时不用：任务完成你会收到 <task-notification> 通知消息——不依赖结果时可以先去干别的，收到通知后再 report/job_output 回收。",
+    risk: "low",
+    schema: z.object({
+      task_type: z.enum(["subagent", "job"]).describe("任务类型：subagent=后台子智能体；job=后台命令"),
+      task_id: z.string().describe("任务 id（子智能体：delegate_task background 返回的 id；job：run_command background 返回的 job id）"),
+      timeout: z.number().int().min(1).max(600).optional().describe("最长等待秒数（默认 120，上限 600）"),
+    }),
+    async execute(args, ctx) {
+      const taskType = args.task_type as "subagent" | "job";
+      const taskId = String(args.task_id ?? "");
+      const timeoutMs = (Number(args.timeout) || 120) * 1000;
+      // v3.3：等待期间向父循环注入通知（若完成于等待中，模型下一步即可看到通知消息）
+      const startedAt = Date.now();
+      let lastProgress = "";
+      for (;;) {
+        // 子智能体：轮询句柄状态（status 变 done/error 即结束）
+        if (taskType === "subagent") {
+          const h = getBackgroundAgent(ctx.sessionId, taskId);
+          if (!h) return `错误：未找到后台子智能体 ${taskId}（用 list_agents 查看当前会话的子智能体）`;
+          if (h.status === "running") {
+            lastProgress = `子智能体「${h.name}」（${h.steps} 步 / ${h.toolCount} 次工具）`;
+          } else if (h.status === "waiting") {
+            return `子智能体「${h.name}」（${taskId}）正在等待父级消息：${h.waiters[h.waiters.length - 1]?.message ?? ""}\n用 send_message 回复它以恢复任务（或 interrupt_agent 中止）`;
+          } else {
+            const state = h.status === "done" ? "已完成" : "异常结束";
+            return `子智能体「${h.name}」（${taskId}）${state}（${h.steps} 步 / ${h.toolCount} 次工具）：\n${h.result ?? "（无结果）"}`;
+          }
+        } else {
+          const j = getJob(ctx.sessionId, taskId);
+          if (!j) return `错误：未找到后台任务 ${taskId}（用 job_list 查看当前会话的后台任务）`;
+          if (j.status === "running") {
+            lastProgress = `任务 ${j.id}（${j.command.slice(0, 80)}）已运行 ${Math.round((Date.now() - j.startedAt) / 1000)}s`;
+          } else {
+            return `后台任务 ${taskId} 已${j.status === "done" ? "完成" : j.status === "killed" ? "被终止" : "失败"}（退出码 ${j.code}）：\n${(j.out || "(无输出)").slice(-2000)}`;
+          }
+        }
+        if (Date.now() - startedAt >= timeoutMs) {
+          return `等待超时（${Math.round(timeoutMs / 1000)}s）：${lastProgress}，仍在运行。可：① wait_task 继续等待（timeout 加大）；② 先做其他工作，任务完成会收到 <task-notification> 通知；③ job_kill/interrupt_agent 中止。`;
+        }
+        await new Promise((r) => setTimeout(r, 500));
+      }
     },
   },
 

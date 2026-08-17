@@ -179,6 +179,53 @@ export const visionTools: Record<string, ToolDef> = {
       return r.startsWith("OK") ? `鼠标已移动到 (${args.x}, ${args.y})` : `移动失败：${r}`;
     },
   },
+  // ── v3.3 computer use 补齐（对齐 Codex 官方契约 drag / Claude Code 拖拽能力）──
+  "screen_drag": {
+    name: "screen_drag",
+    description:
+      "从坐标 (x1,y1) 拖拽到 (x2,y2)（按下左键 → 移动 → 松开）——computer-use：拖拽文件/滑块/画布/选中文本范围。仅桌面版可用。坐标 = 屏幕像素（截图同坐标系）。",
+    risk: "medium",
+    schema: z.object({
+      x1: z.number().describe("起点屏幕 x 坐标（像素）"),
+      y1: z.number().describe("起点屏幕 y 坐标（像素）"),
+      x2: z.number().describe("终点屏幕 x 坐标（像素）"),
+      y2: z.number().describe("终点屏幕 y 坐标（像素）"),
+      steps: z.number().int().min(1).max(50).optional().describe("移动步数（默认 10；拖拽越慢越稳，长距离可加大）"),
+    }),
+    async execute(args, ctx) {
+      if (!isDesktop()) return "错误：screen_drag 仅桌面版可用";
+      const desc = `桌面拖拽 (${args.x1}, ${args.y1}) → (${args.x2}, ${args.y2})`;
+      if (!(await ctx.requestApproval(desc, "medium"))) return "用户拒绝：未拖拽";
+      const g = globalThis as Record<string, unknown>;
+      const input = g.__infuScreenInput as ((action: string, ...params: Array<string | number>) => string) | undefined;
+      if (typeof input !== "function") return "错误：桌面输入通道不可用（主进程未接线）";
+      const r = input("drag", args.x1 as number, args.y1 as number, args.x2 as number, args.y2 as number, (args.steps as number | undefined) ?? 10);
+      return r.startsWith("OK") ? `已拖拽 (${args.x1}, ${args.y1}) → (${args.x2}, ${args.y2})` : `拖拽失败：${r}`;
+    },
+  },
+  "screen_windows": {
+    name: "screen_windows",
+    description:
+      "窗口管理（computer-use：定位/切换到目标应用窗口）——action=list 列出当前可见窗口（进程名+窗口标题，只读）；action=activate 激活指定窗口（按进程名或标题模糊匹配，前台置顶并恢复最小化）。仅桌面版可用。何时用：screen_capture 截到的是当前前台窗口，需要操作其他应用时先 list 找目标再 activate。",
+    risk: "low",
+    schema: z.object({
+      action: z.enum(["list", "activate"]).describe("list=列出可见窗口；activate=激活指定窗口"),
+      name: z.string().optional().describe("activate 用：进程名（如 notepad/chrome）或窗口标题关键词（模糊匹配）"),
+    }),
+    async execute(args, ctx) {
+      if (!isDesktop()) return "错误：screen_windows 仅桌面版可用";
+      const action = String(args.action ?? "list");
+      const name = String(args.name ?? "").trim();
+      if (action === "activate") {
+        if (!name) return "错误：activate 需要 name 参数（进程名或窗口标题关键词）";
+        if (!(await ctx.requestApproval(`激活窗口：${name}`, "medium"))) return "用户拒绝：未激活";
+      }
+      const g = globalThis as Record<string, unknown>;
+      const win = g.__infuScreenWindows as ((action: string, name?: string) => string) | undefined;
+      if (typeof win !== "function") return "错误：桌面窗口通道不可用（主进程未接线）";
+      return win(action, name);
+    },
+  },
 };
 
 /** 写文件辅助（截图工具内部用；避免循环依赖 util 的 guard） */

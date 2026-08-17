@@ -341,6 +341,23 @@ export type AgentEvent =
   | { type: "job-start"; id: string; command: string }
   /** 后台命令结束（正常退出/失败/被杀） */
   | { type: "job-done"; id: string; code: number | null; ok: boolean }
+  // ── v3.3 异步任务编排新增（对齐 ZCode <task-notification> 机制）──
+  /** 后台任务完成通知（子智能体/job 结束时 emit；前端显示 EventRow 通知行，
+   *  运行时注入父循环上下文（loop drain → user XML 消息），rebuild 同格式恢复——
+   *  模型「实时感知等待的任务已完成」，自主决定回收结果或继续其他工作） */
+  | {
+      type: "task-notification";
+      taskType: "subagent" | "job";
+      taskId: string;
+      /** 子智能体名 / job 命令（展示用） */
+      name: string;
+      /** completed=正常完成 / failed=失败或异常 / stopped=任务中止 / killed=被杀 */
+      status: "completed" | "failed" | "stopped" | "killed";
+      /** 完成摘要（子智能体=最终摘要；job=输出尾部+退出码） */
+      summary: string;
+      /** 结果输出文件（job 时可选；.infu-outputs 落盘路径） */
+      outputFile?: string;
+    }
   // ── v2.1 会话持久化新增 ──
   /** SSE 首帧：回传新会话 id（Web 端绑定 activeSessionId） */
   | { type: "session"; id: string }
@@ -449,6 +466,17 @@ export interface ToolContext {
    *  read_image / screen_capture 等把图片推入，loop 下一轮请求合并为 image part（视觉模型）；
    *  非视觉模型由既有降级机制（图片转文本）兜底 */
   visionQueue?: string[];
+  /** v3.3 异步任务编排：后台任务（子智能体/job）完成时向父循环通知队列入队——
+   *  loop 每步开始 drain 为 user XML 消息（<task-notification>），模型实时感知；
+   *  delegate_task/run_command 后台分支注入给 startBackgroundSubagent/startBackgroundJob */
+  enqueueTaskNotification?: (note: {
+    taskType: "subagent" | "job";
+    taskId: string;
+    name: string;
+    status: "completed" | "failed" | "stopped" | "killed";
+    summary: string;
+    outputFile?: string;
+  }) => void;
 }
 
 /** v2.6：路径作用域规则（INFU.md 声明式；语义对齐主流：deny > allow，命中禁止直接拒绝） */

@@ -98,6 +98,24 @@ export function rebuildMessages(events: StoredEvent[], opts: RebuildOptions = {}
         flush();
         messages.push({ role: "user", content: event.text });
         break;
+      case "task-notification": {
+        // v3.3 异步任务编排：后台任务完成通知 → 同运行时注入格式的 user XML 消息
+        // （对齐 ZCode <task-notification>；纯文本 user 消息，不破坏 assistant/tool 配对）
+        const n = event as Extract<import("@infu/shared").AgentEvent, { type: "task-notification" }>;
+        flush();
+        messages.push({
+          role: "user",
+          content:
+            `<task-notification>\n` +
+            `<task-type>${n.taskType}</task-type>\n` +
+            `<task-id>${n.taskId}</task-id>\n` +
+            `<status>${n.status}</status>\n` +
+            `<summary>${n.summary.replace(/</g, "&lt;").replace(/>/g, "&gt;")}</summary>\n` +
+            (n.outputFile ? `<output-file>${n.outputFile}</output-file>\n` : "") +
+            `</task-notification>`,
+        });
+        break;
+      }
       case "step-start":
         flush(); // 新一轮 = 新 assistant 消息
         break;

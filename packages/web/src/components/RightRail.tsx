@@ -9,7 +9,7 @@ import ComputerUsePane from "./ComputerUsePane";
 
 /**
  * v2.9 右侧栏（浏览器式）：顶部 tab 条（活动高亮 + 状态徽标 + 关闭 ×）+ 内容区。
- * 无 Tab 时显示初始面板（「打开 Tab」标题 + 居中按钮组：审查/浏览器/子 Agent/computer-use 待开发）。
+ * 无 Tab 时显示初始面板（「打开 Tab」标题 + 居中按钮组：审查/浏览器/子 Agent/computer-use，均已激活）。
  */
 
 /** tab 上的子 Agent 状态徽标（运行中 spinner / 完成 / 异常） */

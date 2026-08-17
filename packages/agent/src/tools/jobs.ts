@@ -96,14 +96,23 @@ export function killProcessTree(child: ChildProcess): void {
 
 /**
  * 启动后台任务：spawn 直跑（软沙箱语义：cwd 校验 + env 消毒；审批/断网/审计由 run_command 启动前完成）。
- * 返回句柄；完成后 status 更新 + emit job-done（落库审计；前端暂不展示）。
+ * 返回句柄；完成后 status 更新 + emit job-done（落库审计）+ v3.3 emit task-notification 完成通知
+ * （前端通知行 + 父循环上下文注入——notify 回调由 run_command 透传 ToolContext.enqueueTaskNotification）。
  */
 export function startBackgroundJob(
   command: string,
   cwd: string,
   sessionId: string | undefined,
   parentDepth: number,
-  emit: (e: import("@infu/shared").AgentEvent) => void
+  emit: (e: import("@infu/shared").AgentEvent) => void,
+  notify?: (note: {
+    taskType: "subagent" | "job";
+    taskId: string;
+    name: string;
+    status: "completed" | "failed" | "stopped" | "killed";
+    summary: string;
+    outputFile?: string;
+  }) => void
 ): JobHandle {
   if (!fs.existsSync(cwd) || !fs.statSync(cwd).isDirectory()) {
     throw new Error(`目录不存在: ${cwd}`);
@@ -155,6 +164,19 @@ export function startBackgroundJob(
       finalizeJob(handle, code, signal);
     }
     emit({ type: "job-done", id, code: handle.code, ok: handle.status === "done" });
+    // v3.3 异步任务编排：job 完成通知（killed=被杀 / completed=退出码 0 / failed=失败或 spawn 错误）
+    // 摘要 = 输出尾部 + 退出码（上下文预算裁剪；完整输出 job_output 可查）
+    const tail = (handle.out || "(无输出)").slice(-500);
+    const note = {
+      taskType: "job" as const,
+      taskId: id,
+      name: command.slice(0, 120),
+      status: handle.status === "killed" ? ("killed" as const) : handle.status === "done" ? ("completed" as const) : ("failed" as const),
+      summary:
+        `命令「${command.slice(0, 120)}」已结束（${handle.status}${handle.code != null ? `，退出码 ${handle.code}` : ""}）。输出尾部：\n${tail}`,
+    };
+    emit({ type: "task-notification", ...note });
+    notify?.(note);
   };
   child.stdout?.on("data", append);
   child.stderr?.on("data", append);

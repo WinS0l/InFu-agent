@@ -125,8 +125,10 @@ function createMainWindow() {
     title: "InFu",
     width: state.width ?? 1440,
     height: state.height ?? 900,
-    minWidth: 1080,
-    minHeight: 680,
+    // v3.3 补 8：最小尺寸放宽（1080×680 → 800×560）——此前过大的 min 限制导致
+    // 窗口无法像其他窗口一样正常缩小/调整尺寸（用户反馈）
+    minWidth: 800,
+    minHeight: 560,
     x: state.x,
     y: state.y,
     show: false,

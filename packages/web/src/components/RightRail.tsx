@@ -147,25 +147,32 @@ export default function RightRail({ onCollapse }: { onCollapse: () => void }) {
     <div className="flex h-full min-h-0 min-w-0 flex-col">
       {/* 顶部 tab 条（浏览器式：活动高亮 + 状态徽标 + 关闭 ×；v2.9 无下边框与内容区浑然一体。
           v3.0 批 9.5 拍板：折叠按钮在窗口最顶部（与原生三按钮同一高度，self-start 顶对齐）；
-          v3.3 补（用户拍板）：恢复右上角 pr-[140px] 让位——标签栏最大长度止于 Electron
+          v3.3 补 8：整行补回 -webkit-app-region: drag（批 9 定稿三栏顶部都是拖拽区，
+          但右栏 tab 条一直缺失——窗口最上方点右栏拖不动根因；可交互元素 no-drag）
+          v3.3 补 3（用户拍板）：恢复右上角 pr-[140px] 让位——标签栏最大长度止于 Electron
           原生三按钮（titleBarOverlay 悬浮右上角）左缘，不重叠；多 tab 时在让位边界内
           滚动堆叠；➕ 改为超大加号、描述「新建 tab」
-          整行 = 窗口拖拽区（tab 项/按钮 no-drag）
           v3.2：高度 60px → 3.25rem —— 与聊天 header / 侧栏 Logo 行统一（原生融合） */}
-      <div className="relative flex h-[3.25rem] shrink-0 items-end gap-1 px-2 pb-1.5 pr-[140px]">
+      <div
+        className="relative flex h-[3.25rem] shrink-0 items-end gap-1 px-2 pb-1.5 pr-[140px]"
+        style={{ WebkitAppRegion: "drag" } as React.CSSProperties}
+      >
         {/* 折叠按钮（最左 + 窗口最顶部：self-end 顶对齐 = 与原生三按钮同一高度；no-drag 可点） */}
         <button
           className="mb-0.5 flex h-9 w-9 shrink-0 cursor-pointer items-center justify-center self-end rounded-lg text-sub transition-colors hover:bg-hover hover:text-text"
           onClick={onCollapse}
           title="折叠右侧栏"
+          style={{ WebkitAppRegion: "no-drag" } as React.CSSProperties}
         >
           <PanelRightClose className="h-5 w-5" />
         </button>
         {/* tab 滚动区（z-0：任何滚动内容都被裁剪在本容器内；到达右侧让位边界即滚动堆叠。
             v3.3 补 7：滚轮水平滑动——Windows 普通滚轮默认只滚垂直，tab 条横向溢出时
-            滚轮事件转水平滚动（scrollLeft += deltaY），滑动机制真实可感） */}
+            滚轮事件转水平滚动（scrollLeft += deltaY），滑动机制真实可感）
+            no-drag：tab 项/关闭按钮可点（区域空白处由父容器 drag 接管） */}
         <div
           className="no-scrollbar relative z-0 flex min-w-0 flex-1 items-end gap-0.5 overflow-x-auto pr-1"
+          style={{ WebkitAppRegion: "no-drag" } as React.CSSProperties}
           onWheel={(e) => {
             const el = e.currentTarget;
             if (el.scrollWidth > el.clientWidth) {
@@ -208,7 +215,8 @@ export default function RightRail({ onCollapse }: { onCollapse: () => void }) {
           ))}
         </div>
         {/* 新建 tab（➕ 超大加号）：紧贴让位边界（原生三按钮左侧，绝不重叠）；bottom 对齐；
-            点击 = 上拉菜单 fixed 视口定位；no-drag——挂在 drag 拖拽区下，不加会被吞点击 */}
+            点击 = 上拉菜单 fixed 视口定位；no-drag（button 上直接设——span 是 inline 元素
+            app-region 不生效） */}
         <span className="relative mb-0.5 shrink-0">
           <button
             ref={plusRef}
@@ -223,6 +231,7 @@ export default function RightRail({ onCollapse }: { onCollapse: () => void }) {
               }
             }}
             title="新建 tab"
+            style={{ WebkitAppRegion: "no-drag" } as React.CSSProperties}
           >
             <Plus className="h-5 w-5" />
           </button>

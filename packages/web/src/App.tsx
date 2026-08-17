@@ -346,8 +346,9 @@ export default function App() {
             onPointerCancel={onDragEnd}
           />
         )}
-        {/* 右详情栏拖拽热区 +  12×32 拖柄（关闭态常显；点击重开，拖拽调宽）。
-            v3.0 UI 审查：代码模式完全隐藏（右栏 = 0 宽，热区会悬在代码视图右缘盖住内容） */}
+        {/* 右详情栏拖拽热区（8px 隐形；折叠态点击重开，拖拽调宽）。
+            v3.0 UI 审查：代码模式完全隐藏（右栏 = 0 宽，热区会悬在代码视图右缘盖住内容）
+            v3.3 补 8：可见拖柄块移除（用户拍板）——只留隐形热区，拖拽能力不变 */}
         {viewMode !== "code" && (
         <div
           className="group absolute bottom-0 top-0 z-30 w-2 cursor-col-resize"
@@ -358,13 +359,7 @@ export default function App() {
           onPointerCancel={onDragEnd}
           onClick={() => { if (!detailsOpen) setDetailsOpen(true); }}
           title={detailsOpen ? "拖拽调整详情栏宽度" : "点击重新打开详情栏（可拖拽调宽）"}
-        >
-          <div
-            className={`absolute left-1/2 top-1/2 h-8 w-3 -translate-x-1/2 -translate-y-1/2 rounded-[10px] border border-line bg-elevated shadow-lv2 transition-opacity ${
-              detailsOpen ? "opacity-0 group-hover:opacity-100" : "opacity-70 group-hover:opacity-100"
-            }`}
-          />
-        </div>
+        />
         )}
       </div>
 

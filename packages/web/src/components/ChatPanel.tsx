@@ -1067,8 +1067,11 @@ export default function ChatPanel() {
         )}
 
         {messages.length === 0 ? (
-          /* ── 空态 Hero（v2.14 批 17：去正方体图标；标题艺术字——大号粗体 + 单色渐变，深色主题白→灰） ── */
-          <div className="relative flex h-full flex-col items-center justify-center px-6">
+          /* ── 空态 Hero（v2.14 批 17：去正方体图标；标题艺术字——大号粗体 + 单色渐变，深色主题白→灰）
+             v3.3 补 8：无消息时无 header（拖拽区）——顶部加透明 drag 条，窗口最上方任何状态都可拖动（ZCode 式） ── */
+          <div className="relative flex h-full flex-col">
+            <div className="shrink-0" style={{ WebkitAppRegion: "drag", height: "3.25rem" } as React.CSSProperties} />
+            <div className="relative flex min-h-0 flex-1 flex-col items-center justify-center px-6">
             <div className="hero-glow" />
             <div className="relative flex flex-col items-center gap-4 text-center">
               <div>
@@ -1128,6 +1131,7 @@ export default function ChatPanel() {
             </div>
             {/* v3 hero：输入框与 hero 内容一起居中（主流 布局；发送首条后恢复底部固定） */}
             <div className="mt-8 w-full max-w-[780px]">{composer(true)}</div>
+            </div>
           </div>
         ) : (
           /* ── 消息流（用户右侧气泡 r22 / 助手无气泡全宽） ── */

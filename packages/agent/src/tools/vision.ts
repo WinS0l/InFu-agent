@@ -89,6 +89,31 @@ export const visionTools: Record<string, ToolDef> = {
       );
     },
   },
+  "screen_tree": {
+    name: "screen_tree",
+    description:
+      "读取桌面应用的 UI 可访问性树（Windows UI Automation——对齐 Codex get_app_state）：控件类型/名称/位置矩形/可用状态。交互控件带 [n] 编号 + 绝对坐标（物理像素，与 screen_capture 截图/screen_click 点击同坐标系）。何时用：操作桌面应用前**先读树**——比截图+视觉猜坐标精确得多（控件名称直接可读）；截图用于操作后的视觉验证。点击坐标 = 矩形中心 (x + 宽/2, y + 高/2)。仅桌面版可用。",
+    risk: "low",
+    schema: z.object({
+      max_depth: z.number().int().min(1).max(10).optional().describe("树最大深度（默认 5；深层应用如浏览器可加大）"),
+      max_elements: z.number().int().min(10).max(300).optional().describe("最多输出交互元素数（默认 120）"),
+      pid: z.number().int().min(0).optional().describe("目标窗口的进程 id（screen_windows 查看；缺省 = 当前前台窗口）"),
+    }),
+    async execute(args, ctx) {
+      if (!isDesktop()) return "错误：screen_tree 仅桌面版可用（Web 版无桌面访问能力）";
+      const g = globalThis as Record<string, unknown>;
+      const tree = g.__infuScreenTree as ((opts: { maxDepth?: number; maxElements?: number; pid?: number }) => Promise<string>) | undefined;
+      if (typeof tree !== "function") return "错误：桌面 UI 树通道不可用（主进程未接线）";
+      const r = await tree({
+        maxDepth: args.max_depth as number | undefined,
+        maxElements: args.max_elements as number | undefined,
+        pid: args.pid as number | undefined,
+      });
+      // 树文本 8K 截断（超长折叠提示——大应用树可达数百行）
+      const body = r.length > 8000 ? r.slice(0, 8000) + `\n…（UI 树过长已截断，共 ${r.length} 字符——可用 max_elements/max_depth 收窄或 pid 指定窗口）` : r;
+      return `【桌面 UI 可访问性树】\n${body}`;
+    },
+  },
   "screen_click": {
     name: "screen_click",
     description:

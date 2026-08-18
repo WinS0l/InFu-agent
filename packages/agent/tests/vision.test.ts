@@ -83,10 +83,31 @@ const preLen = ctx.visionQueue!.length;
   const f = join(dir, `huge-${Date.now()}.png`);
   fs.writeFileSync(f, Buffer.alloc(9 * 1024 * 1024, 0));
   return f;
-};
-const scBig = await TOOLS.screen_capture.execute({}, { ...ctx, callId: "c3" });
+};const scBig = await TOOLS.screen_capture.execute({}, { ...ctx, callId: "c3" });
 check("超大截图拒绝并提示", scBig.includes("过大") && scBig.includes("8MB"), scBig.slice(0, 80));
 check("超大截图未注入队列", ctx.visionQueue!.length === preLen, String(ctx.visionQueue!.length));
+
+// 4.5 B3：screen_tree（UI 可访问性树——对齐 Codex get_app_state；桌面通道模拟）
+console.log("\n> screen_tree（UI 树）");
+let treeOpts: Record<string, unknown> | null = null;
+(globalThis as Record<string, unknown>).__infuScreenTree = async (opts: Record<string, unknown>) => {
+  treeOpts = opts;
+  return '【窗口】 测试应用\n- Pane "主窗口"\n  [0] Button "确定" (100,200 80x30)\n  [1] Edit "搜索框" (100,240 300x22)';
+};
+const st = await TOOLS.screen_tree.execute({ max_depth: 6, max_elements: 50, pid: 1234 }, { ...ctx, callId: "c4" });
+check("screen_tree 返回 UI 树", st.includes("【桌面 UI 可访问性树】") && st.includes('[0] Button "确定"') && st.includes("100,200 80x30"), st.slice(0, 120));
+check("screen_tree 参数透传", treeOpts?.maxDepth === 6 && treeOpts?.maxElements === 50 && treeOpts?.pid === 1234, JSON.stringify(treeOpts));
+check("screen_tree 未注入视觉队列（纯文本）", ctx.visionQueue!.length === preLen, String(ctx.visionQueue!.length));
+// 超长树截断（mock 10000 字符 > 8000 截断线）
+(globalThis as Record<string, unknown>).__infuScreenTree = async () => "行\n".repeat(5000);
+const stLong = await TOOLS.screen_tree.execute({}, { ...ctx, callId: "c5" });
+check("超长 UI 树截断并提示", stLong.includes("已截断") && stLong.length < 9000, String(stLong.length));
+// 非桌面拒绝
+const savedElectron = process.versions.electron;
+delete (process.versions as Record<string, string>).electron;
+const stWeb = await TOOLS.screen_tree.execute({}, { ...ctx, callId: "c6" });
+check("非桌面拒绝 screen_tree", stWeb.includes("仅桌面版可用"), stWeb);
+(process.versions as Record<string, string>).electron = savedElectron as string;
 
 // 5. screen_click 审批拒绝/批准
 console.log("\n> screen_click 审批");

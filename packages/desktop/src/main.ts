@@ -26,7 +26,8 @@ import type { WebContents } from "electron";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { existsSync, mkdirSync, readFileSync, writeFileSync, renameSync } from "node:fs";
-import { execFileSync } from "node:child_process";
+import { execFileSync, execFile } from "node:child_process";
+import { promisify } from "node:util";
 import { startServer } from "@infu/agent/dist/server.js";
 import { loadConfig } from "@infu/agent/dist/providers/registry.js";
 import { resolveDataDir } from "@infu/agent/dist/data-dir.js";
@@ -511,6 +512,86 @@ try {
 // 并把虚拟原点（可能为负）存全局——click/move 时坐标加回原点偏移。
 let lastShotOrigin = { x: 0, y: 0 };
 
+
+/**
+ * B3（v6.0）：桌面 UI 可访问性树读取——对齐 Codex get_app_state。
+ * 实现 = Windows UI Automation（UIAutomationClient 系统自带，零依赖）：
+ * 读取前台窗口（或指定 pid 窗口）的控件树——类型/名称/位置/可用状态，
+ * Agent 不再只靠截图猜坐标（名称直接可读、坐标物理像素与截图/点击同坐标系）。
+ * 异步执行（promisify execFile——不阻塞主进程；截图通道的历史 busy-wait 不复用）。
+ */
+const execFileAsync = promisify(execFile);
+(globalThis as Record<string, unknown>).__infuScreenTree = async (opts: {
+  maxDepth?: number;
+  maxElements?: number;
+  pid?: number;
+} = {}): Promise<string> => {
+  const maxDepth = Math.max(1, Math.min(10, opts.maxDepth ?? 5));
+  const maxElements = Math.max(10, Math.min(300, opts.maxElements ?? 120));
+  const pid = opts.pid ? Math.max(0, Math.floor(opts.pid)) : 0;
+  // 参数全为数字（无用户字符串进脚本）——无注入面。
+  // ⚠ -Command 单行模式：每条语句必须以 ; 结尾（换行不可用——`')'if(` 直接拼接是
+  // 解析错误，本机冒烟实证）
+  const script =
+    // PS 5.1 默认以 OEM 代码页（GBK）输出——Node 按 UTF-8 解码会乱码（本机冒烟实证），
+    // 强制 stdout 编码 UTF-8
+    `[Console]::OutputEncoding=[System.Text.Encoding]::UTF8;` +
+    `Add-Type -AssemblyName UIAutomationClient;` +
+    `Add-Type -AssemblyName UIAutomationTypes;` +
+    `Add-Type -TypeDefinition 'using System;using System.Runtime.InteropServices;public static class UiaWin{[DllImport("user32.dll")]public static extern IntPtr GetForegroundWindow();}';` +
+    `$hwnd=[UiaWin]::GetForegroundWindow();` +
+    (pid > 0
+      ? `$p=Get-Process -Id ${pid} -ErrorAction SilentlyContinue;` +
+        `if(-not $p){Write-Output "ERR: 进程 ${pid} 不存在";exit 1};` +
+        `if($p.MainWindowHandle -ne 0){$hwnd=$p.MainWindowHandle};` +
+        `if($p.MainWindowHandle -eq 0){Write-Output "ERR: 进程 ${pid} 无主窗口";exit 1};`
+      : "") +
+    `if($hwnd -eq 0){Write-Output "ERR: 未找到前台窗口";exit 1};` +
+    `$root=[System.Windows.Automation.AutomationElement]::FromHandle($hwnd);` +
+    `if(-not $root){Write-Output "ERR: 窗口不支持 UIA";exit 1};` +
+    `$walker=[System.Windows.Automation.TreeWalker]::ControlViewWalker;` +
+    `$out=New-Object System.Collections.Generic.List[string];` +
+    `$script:count=0;` +
+    `$maxD=${maxDepth};` +
+    `$maxN=${maxElements};` +
+    `function Walk($el,$depth){` +
+    `if($depth -gt $maxD -or $script:count -ge $maxN){return};` +
+    `try{` +
+    `$name=($el.Current.Name -replace "[\\r\\n]+"," ");` +
+    `$ct=($el.Current.ControlType.ProgrammaticName -replace 'ControlType\\.','');` +
+    `$r=$el.Current.BoundingRectangle;` +
+    `$en=$el.Current.IsEnabled;` +
+    `$inter=$ct -in @('Button','Edit','ListItem','MenuItem','CheckBox','RadioButton','ComboBox','TabItem','Hyperlink','TreeItem','Slider','Spinner','SplitButton','Custom','DataItem','HeaderItem');` +
+    `if($r.Width -gt 0 -and $r.Height -gt 0){` +
+    `$indent='  ' * $depth;` +
+    `if($inter){` +
+    `$line=$indent+'['+$script:count+'] '+$ct+' "'+$name+'" ('+[int]$r.X+','+[int]$r.Y+' '+[int]$r.Width+'x'+[int]$r.Height+')';` +
+    `if(-not $en){$line+=' [禁用]'};` +
+    `$script:count++;` +
+    `}else{$line=$indent+'- '+$ct+' "'+$name+'"'};` +
+    `if($line.Trim().Length -gt 0){$out.Add($line)};` +
+    `};` +
+    `}catch{};` +
+    `$c=$walker.GetFirstChild($el);` +
+    `while($c -ne $null){Walk $c ($depth+1);$c=$walker.GetNextSibling($c)};` +
+    `};` +
+    `Walk $root 0;` +
+    `$title=$root.Current.Name;` +
+    `Write-Output "【窗口】 $title";` +
+    `if($out.Count -eq 0){Write-Output "（无可访问控件——应用可能不支持 UI Automation）"}` +
+    `else{$out | ForEach-Object { Write-Output $_ }};`;
+  try {
+    const { stdout } = await execFileAsync(
+      "powershell",
+      ["-NoProfile", "-NonInteractive", "-Command", script],
+      { timeout: 10000, windowsHide: true, encoding: "utf-8", maxBuffer: 4 * 1024 * 1024 }
+    );
+    return (stdout ?? "").trim() || "（空树）";
+  } catch (e) {
+    console.log(`[infu-desktop] UI 树读取失败: ${(e as Error).message.slice(0, 120)}`);
+    return `UI 树读取失败：${(e as Error).message.slice(0, 120)}`;
+  }
+};
 
 /** 桌面截图 → 保存 PNG → 返回路径（失败 null）。dir 必须已存在；
  *  minimize=true 时先最小化 InFu 窗口（单屏用户 InFu 挡在最前 → 永远截到 InFu 界面），

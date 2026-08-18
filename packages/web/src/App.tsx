@@ -9,6 +9,7 @@ import RightRail from "./components/RightRail";
 import ApprovalModal from "./components/ApprovalModal";
 import AskModal from "./components/AskModal";
 import SettingsModal from "./components/SettingsModal";
+import { TerminalToggleButton } from "./components/TerminalPanel";
 
 /**
  * v3 UI 打磨：三栏骨架——
@@ -170,6 +171,9 @@ export default function App() {
   // v3：顶部区域（仅非空会话显示）——「对话/代码」推拉 + 左侧会话归属
   const hasMessages = useStore((s) => s.messages.length > 0);
   const { viewMode, setViewMode } = useStore();
+  // v3.3 补 13：终端开关移入聊天 header 右上角（store 状态与 ChatPanel 共享）
+  const terminalOpen = useStore((s) => s.terminalOpen);
+  const setTerminalOpen = useStore((s) => s.setTerminalOpen);
   // v3.0 UI 审查：代码视图可用性——root 为空（自由会话未配默认工作目录）时禁用「代码」按钮
   const root = useStore((s) => s.root);
   // v3：右侧栏折叠后保留 56px rail（与左侧栏 rail 对称；代码模式完全隐藏）
@@ -293,6 +297,12 @@ export default function App() {
                   >
                     代码
                   </button>
+                </div>
+                {/* v3.3 补 13：终端开关 → 聊天界面顶部区域右上角（用户拍板；no-drag 可点） */}
+                <div className="ml-auto flex items-center pr-3" style={{ WebkitAppRegion: "no-drag" } as React.CSSProperties}>
+                  {viewMode === "chat" && (
+                    <TerminalToggleButton open={terminalOpen} onClick={() => setTerminalOpen(!terminalOpen)} />
+                  )}
                 </div>
               </header>
             )}

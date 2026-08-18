@@ -17,7 +17,7 @@ import TodoPanel from "./TodoPanel";
 import { useCleanMarkdownBoxes } from "./markdown-clean";
 import AttachmentRail, { AttachmentLine, ATTACH_LIMITS, type AttachmentDraft } from "./AttachmentRail";
 import PlanCard from "./PlanCard";
-import TerminalPanel, { TerminalToggleButton } from "./TerminalPanel";
+import TerminalPanel from "./TerminalPanel";
 import { CopyButton } from "./ui";
 
 /** 运行耗时（turn 尾操作行「· 运行 15s」；不足 60s 秒、以上 分:秒） */
@@ -418,8 +418,9 @@ export default function ChatPanel() {
   useEffect(() => {
     const el = scrollRef.current;
     if (!el) return;
-    // v3.0 批 4.5：阈值 560——聊天列不够宽裕（<560px）就隐藏浮标，宽度充裕才显示
-    const ro = new ResizeObserver(() => setNarrow(el.clientWidth < 560));
+    // v3.0 批 4.5：阈值 560——聊天列不够宽裕就隐藏浮标（批 4.5 480→560）
+    // v3.3 补 13：560 → 720——用户反馈隐藏触发不灵敏（浮标与 748 消息列/气泡边缘相触仍显示）
+    const ro = new ResizeObserver(() => setNarrow(el.clientWidth < 720));
     ro.observe(el);
     return () => ro.disconnect();
   }, []);
@@ -783,8 +784,6 @@ export default function ChatPanel() {
     };
     return (
     <div ref={composerRef} className="relative mx-auto w-full max-w-[780px] rounded-[22px] border border-line/60 bg-input px-4 pt-3 shadow-lv2">
-      {/* 终端开关（v3：输入框右上方、右边界对齐；对话界面常驻，代码界面被覆盖隐藏） */}
-      {viewMode === "chat" && <TerminalToggleButton open={terminalOpen} onClick={() => setTerminalOpen(!terminalOpen)} />}
       {/* v2.14 批 10：回滚/编辑待定操作组（输入框左上；大胶囊双按钮——确认 / 取消） */}
       {(pendingRollback || editingSeq != null) && (
         <div className="absolute -top-8 left-2 z-20 flex items-center gap-1.5">

@@ -20,9 +20,10 @@ export default function TodoPanel() {
   const pending = todos.length - done - inProg;
 
   return (
-    // v2.14 批 16：缩小 + 居中（max-w 780 → 500）——避开输入卡右上终端按钮的垂直区域；
+    // v2.14 批 16：缩小 + 居中（max-w 780 → 500）——避开输入卡右上终端按钮；
+    // v3.3 补 13：终端按钮移入 header 后恢复与输入框一致宽度（780）
     // 左右留白后按钮区空出，不重合；文字仍 13px 可读
-    <div className="mx-auto mb-2 w-full max-w-[500px] rounded-xl border border-line bg-elevated shadow-lv1">
+    <div className="mx-auto mb-2 w-full max-w-[780px] rounded-xl border border-line bg-elevated shadow-lv1">
       {/* 折叠标题栏（点击展开/收起） */}
       <button
         className="flex h-8 w-full cursor-pointer items-center gap-2 px-3 text-left transition-colors hover:bg-hover/60"

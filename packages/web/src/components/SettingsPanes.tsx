@@ -1401,15 +1401,24 @@ export function StatsPane() {
               const fmtDate = (d: Date) =>
                 `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
               const byDate = new Map(stats.dailyTrend.map((d) => [d.date, d.tokens]));
-              // 用户定稿：热力图固定最近 30 天（不受右上角 7/30 切换控制）；
-              // 30 列 × 7 行矩阵铺满卡片：列 = 天（从左到右 = 旧 → 新，今天 8/16 在最右列），
-              // 行 = 星期几；当天格子 = 数据格（有调用绿色深浅 / 无调用空框），同列其余 6 格 = 浅底占位
-              const HM_DAYS = 30;
+              // v3.3 补 14（用户拍板）：热力图改 GitHub 贡献图式周列——列 = 自然周
+              // （周一~周日），每周一新增一列；最后一列永远 = 最新一周（今天之后的日子为
+              // 未来占位格——列不空）。32 周 ≈ 224 天（保持 18px 格子密度铺满卡片宽）
+              const HM_WEEKS = 32;
               const now = new Date();
-              const start = new Date(now.getFullYear(), now.getMonth(), now.getDate() - (HM_DAYS - 1));
-              const daysArr = Array.from({ length: HM_DAYS }, (_, i) => {
-                const d = new Date(start.getFullYear(), start.getMonth(), start.getDate() + i);
-                return { date: d, tokens: byDate.get(fmtDate(d)) ?? 0, row: (d.getDay() + 6) % 7 };
+              const todayKey = fmtDate(now);
+              const thisMonday = new Date(now.getFullYear(), now.getMonth(), now.getDate() - ((now.getDay() + 6) % 7));
+              const weeksArr = Array.from({ length: HM_WEEKS }, (_, w) => {
+                const monday = new Date(
+                  thisMonday.getFullYear(), thisMonday.getMonth(),
+                  thisMonday.getDate() - (HM_WEEKS - 1 - w) * 7
+                );
+                const days = Array.from({ length: 7 }, (_, d) => {
+                  const date = new Date(monday.getFullYear(), monday.getMonth(), monday.getDate() + d);
+                  const key = fmtDate(date);
+                  return { date, tokens: byDate.get(key) ?? 0, future: key > todayKey };
+                });
+                return { monday, days };
               });
               // v3.3 补 12：色阶与按天趋势同标尺（8.5 亿 = 100% 等分 5 档）——
               // level = floor(当日 / 8.5亿 × 5)：日常消耗（几十万 ≈ 0.1% 以下）落最浅档，
@@ -1419,7 +1428,7 @@ export function StatsPane() {
                 const lvl = Math.min(4, Math.floor((tokens / TOKEN_Y_MAX) * 5));
                 return `rgba(34,197,94,${[0.15, 0.35, 0.55, 0.75, 0.95][lvl]})`;
               };
-              return <HeatmapGrid days={daysArr} levelBg={levelBg} fmtDate={fmtDate} />;
+              return <HeatmapGrid weeks={weeksArr} levelBg={levelBg} fmtDate={fmtDate} />;
             })()}
           </div>
         </div>
@@ -1546,46 +1555,55 @@ export function StatsPane() {
   );
 }
 
-/** 热力图矩阵（用户定稿：30 列 × 7 行铺满卡片——列 = 天（从左到右 = 旧 → 新，今天最右），
- *  行 = 星期几；左端星期标签；当天格子 = 数据格（绿色深浅 / 空框），同列其余 6 格 = 浅底占位） */
-function HeatmapGrid({ days, levelBg, fmtDate }: {
-  days: Array<{ date: Date; tokens: number; row: number }>;
+/** 热力图矩阵（v3.3 补 14 周列制：列 = 自然周（周一~周日，每周一新增一列），
+ *  行 = 周一~周日；左端星期标签；最新一周永远在最右列（今天之后 = 未来浅底占位——列不空）；
+ *  自动滚动到最新；18px 固定格子（GitHub 贡献图式）） */
+function HeatmapGrid({ weeks, levelBg, fmtDate }: {
+  weeks: Array<{ monday: Date; days: Array<{ date: Date; tokens: number; future: boolean }> }>;
   levelBg: (tokens: number) => string | null;
   fmtDate: (d: Date) => string;
 }) {
   const weekdays = ["一", "二", "三", "四", "五", "六", "日"];
+  const scrollRef = useRef<HTMLDivElement>(null);
+  // 自动滚动到最新（最右列 = 最新一周）
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (el) el.scrollLeft = el.scrollWidth;
+  }, [weeks]);
   return (
     <div className="flex items-stretch gap-[2px]">
-      {/* 左侧星期标签（周一~周日，与格子同高） */}
+      {/* 左侧星期标签（周一~周日，与格子同高 18px） */}
       <div className="flex shrink-0 flex-col gap-[2px]">
         {weekdays.map((w) => (
-          <span key={w} className="flex w-5 items-center justify-center text-[10px] leading-none text-sub" style={{ height: "auto", aspectRatio: "1" }}>
+          <span key={w} className="flex h-[18px] w-5 items-center justify-center text-[10px] leading-none text-sub">
             {w}
           </span>
         ))}
       </div>
-      {/* 30 列 × 7 行矩阵（列 = 天，铺满卡片宽） */}
-      {days.map((day) => (
-        <div key={fmtDate(day.date)} className="flex min-w-0 flex-1 flex-col gap-[2px]">
-          {Array.from({ length: 7 }, (_, r) => {
-            if (r !== day.row) {
-              // 占位格（该列非当天）：淡边框 + 浅底——30×7 全网格可见（用户要求矩阵所有方格都显示）
-              return <div key={r} className="aspect-square w-full rounded-[4px] border border-line/40 bg-muted/15" />;
-            }
-            const bg = levelBg(day.tokens);
-            return (
-              <div
-                key={r}
-                className={`aspect-square w-full rounded-[4px] border transition-transform duration-150 hover:scale-110 ${
-                  bg ? "border-line/70" : "border-line/60 bg-muted/40"
-                }`}
-                style={bg ? { background: bg } : undefined}
-                title={`${fmtDate(day.date)}：${fmtTokens(day.tokens)} tokens`}
-              />
-            );
-          })}
-        </div>
-      ))}
+      {/* 周列区（32 周；每周一新增一列，自动滚动到最新周） */}
+      <div ref={scrollRef} className="no-scrollbar flex min-w-0 flex-1 gap-[2px] overflow-x-auto">
+        {weeks.map((week) => (
+          <div key={fmtDate(week.monday)} className="flex shrink-0 flex-col gap-[2px]" title={`${fmtDate(week.monday)} 周`}>
+            {week.days.map((day) => {
+              if (day.future) {
+                // 未来（本周今天之后）：浅底占位——最新一周列不空（用户拍板）
+                return <div key={fmtDate(day.date)} className="h-[18px] w-[18px] rounded-[4px] border border-line/40 bg-muted/15" />;
+              }
+              const bg = levelBg(day.tokens);
+              return (
+                <div
+                  key={fmtDate(day.date)}
+                  className={`h-[18px] w-[18px] rounded-[4px] border transition-transform duration-150 hover:scale-110 ${
+                    bg ? "border-line/70" : "border-line/60 bg-muted/40"
+                  }`}
+                  style={bg ? { background: bg } : undefined}
+                  title={`${fmtDate(day.date)}：${fmtTokens(day.tokens)} tokens`}
+                />
+              );
+            })}
+          </div>
+        ))}
+      </div>
     </div>
   );
 }

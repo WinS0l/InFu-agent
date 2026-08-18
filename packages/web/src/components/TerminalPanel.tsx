@@ -385,11 +385,11 @@ export default function TerminalPanel() {
   );
 }
 
-/** 终端开关按钮（v3：输入框右上方、右边界对齐；往下贴近输入框但不重合；仅对话界面显示） */
+/** 终端开关按钮（v3：输入框右上方；v3.3 补 13：移入聊天 header 右上角——去掉 absolute 由调用处布局） */
 export function TerminalToggleButton({ open, onClick }: { open: boolean; onClick: () => void }) {
   return (
     <button
-      className={`absolute -top-8 right-2 z-20 flex h-6 cursor-pointer items-center gap-1.5 rounded-[14px] border px-2.5 text-xs transition-colors ${
+      className={`flex h-6 cursor-pointer items-center gap-1.5 rounded-[14px] border px-2.5 text-xs transition-colors ${
         open
           ? "border-info/50 bg-info-soft text-info"
           : "border-line bg-elevated/90 text-text hover:bg-hover"

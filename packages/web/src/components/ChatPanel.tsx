@@ -8,7 +8,7 @@ import {
 import { Streamdown } from "streamdown";
 import type { PhaseId } from "@infu/shared";
 import { useStore, type ChatMsg } from "../store";
-import { sendChat, mergeWorktree, rewindSession, fetchProjects, fetchConfig, updateConfig, fetchPlugins, setApprovalBypass, type ApprovalMode, type ChatFileInput, type PluginInfo } from "../api";
+import { sendChat, mergeWorktree, discardWorktree, rewindSession, fetchProjects, fetchConfig, updateConfig, fetchPlugins, setApprovalBypass, type ApprovalMode, type ChatFileInput, type PluginInfo } from "../api";
 import Timeline from "./Timeline";
 import ReasoningBlock from "./ReasoningBlock";
 import QueueDock from "./QueueDock";
@@ -704,6 +704,22 @@ export default function ChatPanel() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [worktree, root]);
 
+  // v3.3 补 17：丢弃任务工作树（不合并直接清理——恢复 v3.6 误删入口，后端端点一直在）
+  const doDiscard = useCallback(async () => {
+    if (!worktree) return;
+    setWtBusy(true);
+    try {
+      const r = await discardWorktree(root, worktree.name);
+      clearWorktree();
+      showRollbackToast(r.message || "已丢弃任务改动");
+    } catch (e) {
+      showRollbackToast(`丢弃失败: ${(e as Error).message}`);
+    } finally {
+      setWtBusy(false);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [worktree, root]);
+
   const rootName = root.split(/[\\/]/).filter(Boolean).pop() ?? "";
   /** 路径规范化（工作区菜单对比用） */
   const norm = (p: string) => p.replace(/[\\/]+$/, "").toLowerCase();
@@ -1168,6 +1184,7 @@ export default function ChatPanel() {
                   onAskRewind={askRewind}
                   onStartEdit={startEdit}
                   onMerge={doMerge}
+                  onDiscard={doDiscard}
                 />
               );
             })}
@@ -1279,7 +1296,7 @@ export default function ChatPanel() {
  */
 const MessageItem = memo(function MessageItem({
   m, pending, turnEnd, lastEditIdx, isLastUser, isWorktreeTarget, running, rollbackActive,
-  worktreeName, mergeBusy, onAskRewind, onStartEdit, onMerge,
+  worktreeName, mergeBusy, onDiscard, onAskRewind, onStartEdit, onMerge,
 }: {
   m: ChatMsg;
   pending: boolean;
@@ -1291,6 +1308,7 @@ const MessageItem = memo(function MessageItem({
   rollbackActive: boolean;
   worktreeName: string | null;
   mergeBusy: boolean;
+  onDiscard: () => void;
   onAskRewind: (seq: number) => void;
   onStartEdit: (seq: number, text: string) => void;
   onMerge: () => void;
@@ -1484,17 +1502,28 @@ const MessageItem = memo(function MessageItem({
             text={m.review ?? m.text}
             className="flex h-7 w-7 cursor-pointer items-center justify-center rounded-full p-1.5 text-sub transition-colors hover:bg-hover hover:text-text"
           />
-          {/* v2.14 批 11：工作树按钮——只出现在「最近一次修改文件的 AI 消息」旁，复制按钮同款，点击直接并入 */}
+          {/* v2.14 批 11：工作树按钮——只出现在「最近一次修改文件的 AI 消息」旁，复制按钮同款，点击直接并入；
+              v3.3 补 17：恢复「丢弃」按钮（v3.6 误删入口，M3 手动合并/丢弃语义补全） */}
           {worktreeName != null && isWorktreeTarget && (
-            <button
-              className="relative flex h-7 w-7 cursor-pointer items-center justify-center rounded-full p-1.5 text-sub transition-colors hover:bg-hover hover:text-info disabled:opacity-50"
-              onClick={onMerge}
-              disabled={mergeBusy}
-              title={`并入主分支（工作树 ${worktreeName}：把任务改动合并回主代码）`}
-            >
-              {mergeBusy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <GitBranch className="h-3.5 w-3.5" />}
-              {!mergeBusy && <span className="absolute right-1.5 top-1.5 h-1.5 w-1.5 animate-pulse rounded-full bg-success" />}
-            </button>
+            <>
+              <button
+                className="relative flex h-7 w-7 cursor-pointer items-center justify-center rounded-full p-1.5 text-sub transition-colors hover:bg-hover hover:text-info disabled:opacity-50"
+                onClick={onMerge}
+                disabled={mergeBusy}
+                title={`并入主分支（工作树 ${worktreeName}：把任务改动合并回主代码）`}
+              >
+                {mergeBusy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <GitBranch className="h-3.5 w-3.5" />}
+                {!mergeBusy && <span className="absolute right-1.5 top-1.5 h-1.5 w-1.5 animate-pulse rounded-full bg-success" />}
+              </button>
+              <button
+                className="flex h-7 w-7 cursor-pointer items-center justify-center rounded-full p-1.5 text-sub transition-colors hover:bg-hover hover:text-danger disabled:opacity-50"
+                onClick={onDiscard}
+                disabled={mergeBusy}
+                title={`丢弃任务改动（工作树 ${worktreeName}：放弃全部改动，不合并）`}
+              >
+                <X className="h-3.5 w-3.5" />
+              </button>
+            </>
           )}
           <span className="time-hover whitespace-nowrap text-[14px] leading-6 text-caption [font-variant-numeric:tabular-nums]">
             {fmtClock(m.ts)}

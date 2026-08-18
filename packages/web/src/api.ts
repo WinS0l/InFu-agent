@@ -592,6 +592,19 @@ export async function mergeWorktree(root: string, name: string) {
   return data;
 }
 
+/** v3.3 补 17：丢弃任务工作树（不合并直接清理——v3.6 死代码清理时误删的前端入口；
+ *  后端 /api/worktree/:name/discard 一直在） */
+export async function discardWorktree(root: string, name: string) {
+  const res = await apiFetch(`/api/worktree/${encodeURIComponent(name)}/discard`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ root }),
+  });
+  const data = await res.json();
+  if (!res.ok || data.ok === false) throw new Error(data.message || "丢弃失败");
+  return data;
+}
+
 /** 计划确认（v2.3 计划卡片：提交 = {plan 编辑后文本, feedback 用户回复}；取消 = cancelled） */
 export async function postPlanDecision(id: string, body: { plan?: string; feedback?: string } | { cancelled: true }) {
   const res = await apiFetch(`/api/plan/${encodeURIComponent(id)}`, {

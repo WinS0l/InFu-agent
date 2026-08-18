@@ -52,6 +52,21 @@ export default function ApprovalModal() {
     if (next && mine.length > 0) resolveAllApprovals(true);
   };
 
+  /** v3.3 补 18：全部允许 = 处理当前队列 + 同步开启本会话全权放行——
+   *  用户拍板「点完全部允许后不许再出现审批弹窗」（原实现只清当前队列，
+   *  Agent 后续新审批照常弹出；开启 bypass 后服务端直接放行不再 emit 弹窗） */
+  const approveAll = async () => {
+    if (approvalSid && !bypassActive) {
+      try {
+        await setApprovalBypass(approvalSid, true);
+        setBypassFor(approvalSid, true);
+      } catch (e) {
+        addError(`全权放行开关失败：${(e as Error).message ?? String(e)}`);
+      }
+    }
+    resolveAllApprovals(true);
+  };
+
   return (
     <Modal
       onClose={() => {}}
@@ -79,7 +94,7 @@ export default function ApprovalModal() {
             拒绝
           </CapsuleButton>
           {queued > 0 && (
-            <CapsuleButton variant="primary" size="md" onClick={() => resolveAllApprovals(true)}>
+            <CapsuleButton variant="primary" size="md" onClick={() => void approveAll()}>
               全部允许（{mine.length}）
             </CapsuleButton>
           )}

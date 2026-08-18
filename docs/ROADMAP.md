@@ -25,7 +25,13 @@
 - **A4 归档事件压缩（显式选项默认关）**——`general.compressArchivedEvents`（+compressArchivedAfterDays 默认 30 天）：启动扫描超期归档会话，事件压缩为「摘要 + 最近 200 条」（rebuild 兼容）；默认关保持 DB 无损语义
 - **D3 增量构建**——agent/web/shared tsconfig 加 incremental + tsBuildInfoFile（node_modules/.cache，不入库）
 - **验证**：**44/44 套件全绿 1341 断言 0 失败**（e2e-prod 12 断言新入链；startServer 返回 httpServer 供 E2E close）+ agent/web/desktop tsc + vite build + cargo check 全过；真实 E2E 与 /api/audit 探针实测
-- **未做（产品决策/成本项）**：B5 OCR 兜底、C5 中英文统一（需产品方向决策）、**D1 上下文计数校准（2026-08-18 方向修正）**：主流 Agent 并非靠本地 tokenizer——而是双轨制：① API 每次响应返回的真实 usage（prompt_tokens）作为上下文计数的事实基准，每轮校准；② 本地估算（tiktoken 或启发式）仅用于发送前的预测。InFu 已解析真实 usage 四桶但只用于统计/命中率展示，未用于压缩触发校准——真正差距在此，**零依赖可补**（上一轮 promptTokens 作基准 + 增量估算）；tokenizer 非必需（词表对不上模型仍是近似）。触发时再做，优先 usage 校准路线
+- **后续待办（2026-08-18 用户定稿：仅此 4 项，其余全部收官）**：
+  ① **D1 上下文计数校准**——方向 = 主流双轨制：API 每次响应返回的真实 usage（prompt_tokens）作事实基准每轮校准 + 本地估算仅作发送前预测；InFu 已收 usage 四桶但未用于压缩触发（零依赖可补）；tokenizer 非必需（词表对不上模型仍是近似）。触发：长会话 API 成本/压缩质量成为真实痛点。量级：半小时~半天
+  ② **B5 OCR 截图文字兜底**——无视觉模型时 screen_capture 整链路无效；Windows 自带 OCR 可把截图文字补进上下文。触发：无视觉模型用户的真实需求出现。量级：中
+  ③ **skill 模板库**——导入/导出已做，模板库/社区示例可选。量级：半小时
+  ④ **LSP 跳转/补全**——lsp_diagnostics 已有，完整 LSP（跳转/补全）留后续。量级：中
+- **条件触发项（单独挂起，条件未到不动）**：团队版 v3（第二个真实用户）、microVM 沙箱（多租户/不可信代码）、C5 中英文统一（未定产品方向，不优先）
+- **记录不改**：runRestricted 无 abort 通道（timeout 兜底）、browser_eval low 免审批（设计权衡）、terminal AttachConsole 环境噪声；**永久不做**：远程插件市场、开机自启（设置项默认关）
 - ⚠️ **补 6（2026-08-18 用户询问后实施）**：**B3 桌面 UI 树读取完成**（此前误判高成本——实际 = 系统自带 UIAutomationClient，与 screen_* 同款「主进程 PowerShell 零依赖」模式）。新工具 **screen_tree（第 53 个，low 只读）**：读取前台窗口（或指定 pid 窗口）的控件树——类型/名称/位置矩形/可用状态，交互控件带 [n] 编号 + 物理像素坐标（与截图/点击同坐标系），对齐 Codex get_app_state；Agent 操作桌面应用前先读树（名称直接可读），不再只靠截图猜坐标。实现要点：`[Console]::OutputEncoding=UTF8`（PS5.1 默认 GBK 输出会乱码，本机冒烟实证）；-Command 单行模式语句间必须 `;` 分隔（`')'if(` 拼接是解析错误，冒烟实证）；10s 超时 + 深度/元素数上限 + 8K 截断。**验证**：本机真实冒烟（前台 ZCode 窗口读到 最小化/恢复/关闭 按钮+坐标，中文正常）；vision.test 新增 5 断言（返回/参数透传/不注入视觉队列/超长截断/非桌面拒绝）30/0；全量 44 套件全绿
 - ⚠️ **补 5（2026-08-18 用户提出）**：full 档（全权放行）下断网策略本就放行，🌐 临时联网按钮失去意义 → 隐藏（EgressPill approvalMode==="full" 返回 null，切回非 full 档恢复）。**开发中 E2E 抓到真实崩溃**：early return 放在 hooks 之前 → 切档时「Rendered fewer hooks」→ React 卸载整棵树（隐藏断言假绿）→ 修复为 hooks 之后返回。验证：E2E 新增切档 2 断言（full 隐藏/恢复）18/0；全量 44 套件 1353 断言全绿
 - ⚠️ **补 4（2026-08-18 用户提出）**：欢迎界面（无活动会话）🌐 临时联网也可用——补 3 的门控提示改为「本地待定态」：无会话时选时长仅置本地状态（不发 POST），发送消息时随 `/api/chat` 的 `egressMinutes`（剩余分钟数，store 兜底给排队消费/后台续跑）交给服务端，服务端 `setEgressAllow` 对新会话/续跑会话原子生效（无竞态）；有会话时仍直接 POST 立即生效。验证：win-sandbox-net 新增临时联网会话路径 3 断言（放行/他会话仍拦/审计 egress-allowed-temp）37/0；E2E 新增欢迎界面药丸 4 断言（可见/展开菜单/选时长激活/关闭）16/0；全量 44 套件全绿

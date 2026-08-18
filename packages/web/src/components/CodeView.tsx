@@ -55,10 +55,11 @@ function ChangeBadge({ f }: { f: FsTreeFile }) {
 }
 
 export default function CodeView() {
-  // v3.3 补 19：审查/代码界面目录 = 工作树优先（worktree 模式下 Agent 改动在
-    // .infu/worktrees/<name> 独立工作树里，主项目根 git diff 为空 → 界面全空；
-    // 未开工作树 = 项目根）
-    const root = useStore((s) => s.worktree?.path ?? s.root);
+  // v3.3 补 19/20：审查/代码界面目录 = 工作树模式**开启时**才用 worktree.path
+    // （Agent 改动在 .infu/worktrees/<name>，主项目根 git diff 为空 → 界面全空）；
+    // 注意 worktree 状态是 persist 的（刷新不消失）——模式关闭后残留的旧路径
+    // （可能已合并/丢弃被删）必须忽略，否则界面查无效目录变空（用户反馈）
+    const root = useStore((s) => (s.useWorktree && s.worktree ? s.worktree.path : s.root));
   const codeViewFile = useStore((s) => s.codeViewFile);
   const [files, setFiles] = useState<FsTreeFile[] | null>(null);
   const [collapsed, setCollapsed] = useState<Record<string, boolean>>({});

@@ -20,7 +20,7 @@ import * as fs from "node:fs";
 import { join, dirname } from "node:path";
 import { inflateRawSync } from "node:zlib";
 import path from "node:path";
-import { execFile } from "node:child_process";
+import { execFile, execFileSync } from "node:child_process";
 import { promisify } from "node:util";
 import type { ModelConfig, AgentEvent, RiskLevel, InfuConfig, PhaseId, ProviderConfig, SessionMeta, AttachmentMeta } from "@infu/shared";
 import { loadConfig, saveConfig, resolveFallbackModels, resolveRoleModel, resolveRoleThinking, toRuntimeModel, resolveBaseURL, configPath } from "./providers/registry.js";
@@ -1787,6 +1787,21 @@ const pendingQuestions = new Map<string, { sessionId: string; resolve: (answer: 
   app.get("/api/projects/resolve", (c) => {
     const name = String(c.req.query("name") ?? "").trim();
     return c.json({ candidates: resolveProjectByName(name) });
+  });
+
+  // v3.3 补 23：一键初始化 git 仓库（审查界面非 git 提示按钮；对齐 opencode project git init API）
+  app.post("/api/git-init", async (c) => {
+    const body = await c.req.json().catch(() => ({}));
+    const root = String(body.root ?? "").trim();
+    if (!root || !fs.existsSync(root) || !fs.statSync(root).isDirectory()) {
+      return c.json({ ok: false, message: "root 无效" }, 400);
+    }
+    try {
+      execFileSync("git", ["init"], { cwd: root, stdio: "ignore", windowsHide: true });
+      return c.json({ ok: true, message: "已初始化 git 仓库——代码改动与审查立即可用" });
+    } catch (e) {
+      return c.json({ ok: false, message: `git init 失败：${(e as Error).message.slice(0, 120)}` }, 500);
+    }
   });
 
   // 移除项目（只删注册；会话保留为自由会话，文件夹不删）

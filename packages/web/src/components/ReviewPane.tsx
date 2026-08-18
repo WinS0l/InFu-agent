@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState } from "react";
 import { FileDiff, FlaskConical, GitCompare, Loader2, ArrowLeft } from "lucide-react";
 import { useStore } from "../store";
+import { gitInitProject } from "../api";
+import { GitBranch } from "lucide-react";
 import { fetchReviewFiles, fetchReviewFileDiff, type ReviewFileInfo } from "../api";
 import { CodeBlock } from "./ui";
 
@@ -192,9 +194,35 @@ export default function ReviewPane() {
               )
             ) : files.length === 0 ? (
               <div className="py-1 text-[13px] leading-5 text-caption">
-                {isGit
-                  ? "暂无改动（工作区干净）"
-                  : "该项目不是 git 仓库，无法显示改动 diff——审查依赖 git；可在项目目录执行 git init 后重新使用"}
+                {isGit ? (
+                  "暂无改动（工作区干净）"
+                ) : (
+                  <div className="space-y-1.5">
+                    <div>该项目不是 git 仓库，无法显示改动 diff——审查依赖 git。</div>
+                    <button
+                      className="flex h-7 cursor-pointer items-center gap-1.5 rounded-lg border border-info/50 bg-info-soft px-2.5 text-xs font-medium text-info transition-colors hover:bg-info/20"
+                      onClick={() => {
+                        void (async () => {
+                          try {
+                            const r = await gitInitProject(rawRoot);
+                            useStore.getState().addError(r.message);
+                            setGitRepo(true);
+                            // 重新加载列表
+                            fetchReviewFiles(rawRoot)
+                              .then((f) => setFiles(f.files))
+                              .catch(() => setFiles([]));
+                          } catch (e) {
+                            useStore.getState().addError(`git init 失败：${(e as Error).message}`);
+                          }
+                        })();
+                      }}
+                      title="执行 git init——之后 Agent 的改动可显示 diff 与增删标记"
+                    >
+                      <GitBranch className="h-3.5 w-3.5" />
+                      立即初始化 git 仓库
+                    </button>
+                  </div>
+                )}
               </div>
             ) : (
               <div className="space-y-0.5">

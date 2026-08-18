@@ -959,6 +959,18 @@ export async function fetchReviewFiles(root: string): Promise<{ files: ReviewFil
   return { files: data.files ?? [], git: data.git !== false };
 }
 
+/** v3.3 补 23：一键初始化 git 仓库（审查界面非 git 提示按钮） */
+export async function gitInitProject(root: string): Promise<{ ok: boolean; message: string }> {
+  const res = await apiFetch("/api/git-init", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ root }),
+  });
+  const data = await res.json();
+  if (!res.ok || data.ok === false) throw new Error(data.message || "git init 失败");
+  return data;
+}
+
 /** 单文件 unified diff 文本（未跟踪文件 = 全新增行） */
 export async function fetchReviewFileDiff(root: string, path: string): Promise<string> {
   const res = await apiFetch(`/api/review/file?root=${encodeURIComponent(root)}&path=${encodeURIComponent(path)}`);

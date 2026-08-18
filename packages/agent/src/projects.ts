@@ -13,6 +13,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
+import { execFileSync } from "node:child_process";
 import { cleanupOldBackups } from "./cleanup.js";
 import { deleteIndex } from "./index/index.js";
 import { resolveDataDir } from "./data-dir.js";
@@ -85,7 +86,28 @@ export function createProject(root: string, name?: string): { ok: boolean; proje
   };
   projects.push(project);
   saveProjects(projects);
-  return { ok: true, project, message: `已创建项目「${project.name}」` };
+  // v3.3 补 23（对齐 opencode project git init API）：新建项目自动初始化 git 仓库——
+  // 非 git 目录 git init（失败静默不阻塞创建）；审查/代码界面的改动 diff 立即可用
+  let initNote = "";
+  if (!isGitRepoDir(r)) {
+    try {
+      execFileSync("git", ["init"], { cwd: r, stdio: "ignore", windowsHide: true });
+      initNote = "（已自动初始化 git 仓库——代码改动与审查立即可用）";
+    } catch {
+      /* git 不可用/初始化失败——静默降级（审查功能不可用但不阻塞） */
+    }
+  }
+  return { ok: true, project, message: `已创建项目「${project.name}」${initNote}` };
+}
+
+/** v3.3 补 23：目录是否为 git 仓库（.git 存在 + git 命令可用；worktree 的 .git 是指针文件） */
+export function isGitRepoDir(dir: string): boolean {
+  try {
+    execFileSync("git", ["rev-parse", "--is-inside-work-tree"], { cwd: dir, stdio: "ignore", windowsHide: true });
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 /** 移除项目（只删注册；会话保留为自由会话；v3.5：连带清理孤儿索引文件） */

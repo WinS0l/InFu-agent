@@ -1225,7 +1225,8 @@ export function MemoryPane() {
   const [open, setOpen] = useState<string | null>(null);
   const [autoSediment, setAutoSediment] = useState(true);
   useEffect(() => {
-    fetchMemory().then(setMem).catch((e) => setError((e as Error).message));
+    // v3.3 补 25：按当前项目读取记忆（自由会话 root 空 → 后端回退默认目录）
+    fetchMemory(useStore.getState().root).then(setMem).catch((e) => setError((e as Error).message));
     fetchConfig().then((c) => setAutoSediment(c.memory?.autoSediment !== false)).catch(() => {});
   }, []);
 

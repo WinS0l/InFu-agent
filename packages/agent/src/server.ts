@@ -869,7 +869,9 @@ const pendingQuestions = new Map<string, { sessionId: string; resolve: (answer: 
 
   // ── v2.7 记忆查看（四层记忆：指令 INFU.md / 全局 / 项目 / 历史）──
   app.get("/api/memory", (c) => {
-    const root = opts.defaultRoot || process.cwd();
+    // v3.3 补 25：接受前端传的当前项目 root（原固定 defaultRoot/启动目录——
+    // 项目记忆在 E:\InFu(test) 而界面查启动目录 → 显示空，与索引库面板同款错位）
+    const root = String(c.req.query("root") ?? "").trim() || opts.defaultRoot || process.cwd();
     const global = _listTopics("global", root);
     const project = _listTopics("project", root);
     const instr = _findInstructionFile(root);

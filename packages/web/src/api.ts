@@ -301,8 +301,9 @@ export interface MemoryInfo {
   project: MemoryTopicInfo[];
   instruction: { path: string; content: string } | null;
 }
-export async function fetchMemory(): Promise<MemoryInfo> {
-  const res = await apiFetch(`/api/memory`);
+export async function fetchMemory(root?: string): Promise<MemoryInfo> {
+  // v3.3 补 25：传当前项目 root——项目记忆按会话项目读取（原固定启动目录 → 空）
+  const res = await apiFetch(`/api/memory${root ? `?root=${encodeURIComponent(root)}` : ""}`);
   if (!res.ok) throw new Error(`记忆加载失败: ${res.status}`);
   return res.json();
 }

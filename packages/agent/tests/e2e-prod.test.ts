@@ -1,0 +1,162 @@
+/**
+ * v5.0 生产模式 E2E（A1：页面级测试盲区修复）
+ *
+ * 背景：43 套件全是单元/集成级，没有真实加载生产页面——v4.0 的 CSP 响应头拦截
+ * 内联令牌注入脚本，生产页面重启后全部 API 401「缺少本地令牌」，单元测试完全
+ * 测不出来（用户实证回归）。本套件起**真实服务器**（staticDir=web/dist）+ 真实
+ * 浏览器（playwright chromium）加载生产页面，断言：
+ *  - API 层（无浏览器也跑）：CSP nonce 与注入脚本 nonce 匹配 / 无令牌 401 /
+ *    带令牌 200 / theme-init.js 与 assets 可加载
+ *  - 浏览器层（chromium 可用时跑）：页面零 401 响应（令牌链路端到端）、
+ *    零 CSP 违规（console）、React 真实渲染、主题脚本生效（localStorage 往返）
+ *
+ * 运行：npx tsx tests/e2e-prod.test.ts（纳入 scripts/test-runner.ts 全量链）
+ */
+import { startServer } from "../src/server.js";
+import { setDataDirForTest } from "../src/data-dir.js";
+import { resolveChromiumPath } from "../src/plugin/browser/runtime.js";
+import { mkdtempSync, rmSync, existsSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { fileURLToPath } from "node:url";
+import type { Server } from "node:http";
+
+let passed = 0;
+let failed = 0;
+function check(name: string, cond: boolean, detail = "") {
+  if (cond) { passed++; console.log(`  ✅ ${name}`); }
+  else { failed++; console.log(`  ❌ ${name} ${detail}`); }
+}
+
+// ── 隔离：临时数据目录（服务端 getStore/审计全部落临时目录）──
+const tmpData = mkdtempSync(join(tmpdir(), "infu-e2e-data-"));
+setDataDirForTest(tmpData);
+// 服务端配置 appearance.theme=light——验证「服务端配置 → 前端主题」管线
+// （App 启动 fetchConfig 会以服务端 appearance 覆盖 localStorage 主题，这是产品设计）
+writeFileSync(
+  join(tmpData, "config.json"),
+  JSON.stringify({ version: 1, appearance: { theme: "light" } }),
+  "utf-8"
+);
+
+// ── 静态目录 = web 生产构建（缺失则跳过浏览器层，API 层断言 dist 存在性）──
+const distDir = fileURLToPath(new URL("../../web/dist", import.meta.url));
+const distOk = existsSync(join(distDir, "index.html"));
+if (!distOk) console.log("⚠ web/dist 不存在（先运行 npm run build -w @infu/web）——浏览器层跳过，API 层仅测 401 中间件");
+
+console.log("\n=== v5.0 生产模式 E2E ===\n");
+
+let server: Server | null = null;
+let base = "";
+try {
+  // 真实服务器：staticDir 生产模式（端口 0 = 系统分配，onListening 回传实际端口）
+  const started = await new Promise<Server | null>((resolve) => {
+    const srv = startServer({
+      port: 0,
+      staticDir: distOk ? distDir : undefined,
+      onListening: (port) => {
+        base = `http://127.0.0.1:${port}`;
+        resolve(srv);
+      },
+    });
+  });
+  server = started;
+  if (!base) throw new Error("服务器未就绪");
+
+  // ── API 层（无浏览器依赖）──
+  console.log("▶ API 层：令牌注入 + CSP nonce + 鉴权");
+  {
+    const get = async (path: string, token?: string) => {
+      const res = await fetch(base + path, { headers: token ? { "X-InFu-Token": token } : {} });
+      return { status: res.status, text: await res.text(), csp: res.headers.get("content-security-policy"), xfo: res.headers.get("x-frame-options") };
+    };
+
+    const noToken = await get("/api/projects");
+    check("无令牌 /api/projects → 401（鉴权生效）", noToken.status === 401, String(noToken.status));
+
+    if (distOk) {
+      const home = await get("/");
+      const csp = home.csp ?? "";
+      const nonce = /'nonce-([a-f0-9]+)'/.exec(csp)?.[1] ?? "";
+      const m = /<script nonce="([a-f0-9]+)">window\.__INFU_TOKEN__="([a-f0-9]+)";<\/script>/.exec(home.text);
+      check("CSP 含响应级 nonce", !!nonce, csp.slice(0, 120));
+      check("令牌注入脚本 nonce 与 CSP nonce 匹配", m?.[1] === nonce, `script=${m?.[1]} csp=${nonce}`);
+      check("X-Frame-Options: DENY", home.xfo === "DENY", String(home.xfo));
+      const token = m?.[2] ?? "";
+      const withToken = await get("/api/projects", token);
+      check("带令牌 /api/projects → 200（令牌链路通）", withToken.status === 200, String(withToken.status));
+      const theme = await get("/theme-init.js");
+      check("theme-init.js 外置脚本可加载（'self' 放行）", theme.status === 200, String(theme.status));
+      const asset = await get("/assets/");
+      check("SPA fallback 带 CSP 头", (asset.csp ?? "").includes("frame-ancestors 'none'"), String(asset.status));
+    } else {
+      check("web/dist 缺失（跳过页面层断言）", true);
+    }
+  }
+
+  // ── 浏览器层（chromium 可用时跑：真实加载生产页面）──
+  const chromePath = resolveChromiumPath();
+  if (distOk && chromePath) {
+    console.log("\n▶ 浏览器层：真实加载生产页面");
+    const { chromium } = await import("playwright-core");
+    const browser = await chromium.launch({ executablePath: chromePath, headless: true });
+    try {
+      const page = await browser.newPage();
+      // 收集：401 响应（令牌链路断裂 = CSP 回归重现）+ CSP 违规 console + 请求失败
+      const unauthorized: string[] = [];
+      const cspViolations: string[] = [];
+      page.on("response", (r) => { if (r.status() === 401) unauthorized.push(r.url().slice(0, 80)); });
+      page.on("console", (msg) => {
+        const t = msg.text();
+        if (t.includes("Refused to execute inline script") || t.includes("Content Security Policy")) cspViolations.push(t.slice(0, 100));
+      });
+      page.on("requestfailed", (r) => cspViolations.push(`requestfailed: ${r.url().slice(0, 80)}`));
+
+      // 主题两阶段断言：
+      // ① theme-init.js（外置 head 同步脚本）在 CSP 下真实执行——阻断 bundle 后页面
+      //    无 React，dataset.theme 完全由 theme-init 决定（localStorage 注入 light）
+      // ② 服务端配置 appearance.theme=light → 应用挂载后主题为 light（config 管线）
+      // 注：zustand persist 水合校验 version 字段，写完整格式 {"state","version":0}
+      const initThemePage = await browser.newPage();
+      await initThemePage.addInitScript(() => {
+        try { localStorage.setItem("infu-chat", JSON.stringify({ state: { theme: "light" }, version: 0 })); } catch { /* 忽略 */ }
+      });
+      await initThemePage.route("**/assets/*.js", (route) => route.abort());
+      await initThemePage.goto(base + "/", { waitUntil: "domcontentloaded", timeout: 30000 });
+      await initThemePage.waitForTimeout(300);
+      const themeInitVal = await initThemePage.evaluate(() => document.documentElement.dataset.theme);
+      check("theme-init.js 在 CSP 下执行（bundle 阻断仍生效）", themeInitVal === "light", String(themeInitVal));
+      await initThemePage.close();
+
+      await page.addInitScript(() => {
+        try { localStorage.setItem("infu-chat", JSON.stringify({ state: { theme: "light" }, version: 0 })); } catch { /* 忽略 */ }
+      });
+      await page.goto(base + "/", { waitUntil: "networkidle", timeout: 30000 });
+      // React 真实渲染（#root 有内容）
+      await page.waitForSelector("#root > *", { timeout: 15000 }).catch(() => {});
+      const rootHtml = await page.evaluate(() => (document.getElementById("root")?.innerHTML ?? "").slice(0, 200));
+      check("React 应用真实渲染", rootHtml.length > 50, rootHtml.slice(0, 120));
+      // 令牌链路端到端：页面自身所有 API 调用零 401（CSP 回归的直接判据）
+      await page.waitForTimeout(1500); // 等启动期 fetchSessions/fetchProjects 完成
+      check("页面 API 调用零 401（令牌链路端到端）", unauthorized.length === 0, unauthorized.join(", "));
+      check("零 CSP 违规 / 零请求失败", cspViolations.length === 0, cspViolations.join(" | "));
+      // 服务端配置 → 主题管线（fetchConfig 应用 appearance.theme=light）
+      await page.waitForTimeout(800);
+      const theme = await page.evaluate(() => document.documentElement.dataset.theme);
+      check("服务端配置主题生效（config→store→dataset.theme）", theme === "light", String(theme));
+      await page.evaluate(() => localStorage.removeItem("infu-chat"));
+    } finally {
+      await browser.close().catch(() => {});
+    }
+  } else {
+    console.log(distOk ? "⚠ chromium 不可用——浏览器层跳过" : "⚠ web/dist 缺失——浏览器层跳过");
+  }
+} finally {
+  if (server) {
+    await new Promise<void>((r) => server!.close(() => r()));
+  }
+  try { rmSync(tmpData, { recursive: true, force: true }); } catch { /* 忽略 */ }
+}
+
+console.log(`\n=== 结果：${passed} 通过 / ${failed} 失败 ===`);
+if (failed > 0) process.exit(1);

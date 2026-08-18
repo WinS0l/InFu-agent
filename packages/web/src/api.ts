@@ -282,6 +282,9 @@ export interface SettingsConfig {
     showTodos?: boolean;
     autoArchive?: boolean;
     archiveRetentionDays?: number;
+    quickModelId?: string;
+    compressArchivedEvents?: boolean;
+    compressArchivedAfterDays?: number;
   };
   appearance: { fontSize?: "xs" | "sm" | "base"; streamCursor?: boolean; theme?: "light" | "dark" | "system" };
   browser?: { headless?: boolean; executablePath?: string };
@@ -638,6 +641,29 @@ export async function setApprovalBypass(sessionId: string, enabled: boolean) {
   });
   const data = await res.json();
   if (!res.ok || data.ok === false) throw new Error(data.message || "切换全权放行失败");
+  return data;
+}
+
+/** v5.0（C1）：会话级临时联网开关（默认断网策略的轻量出口——npm install 等高频外传命令
+ *  不再每次被拦；到期自动失效，命令审计照常） */
+export async function egressAllow(sessionId: string, minutes = 10) {
+  const res = await apiFetch("/api/egress/allow", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ sessionId, minutes }),
+  });
+  const data = await res.json();
+  if (!res.ok || data.ok === false) throw new Error(data.message || "开启临时联网失败");
+  return data;
+}
+export async function egressDisallow(sessionId: string) {
+  const res = await apiFetch("/api/egress/allow", {
+    method: "DELETE",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ sessionId }),
+  });
+  const data = await res.json();
+  if (!res.ok || data.ok === false) throw new Error(data.message || "关闭临时联网失败");
   return data;
 }
 

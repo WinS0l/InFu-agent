@@ -11,7 +11,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import {
-  Plus, Trash2, Loader2, RefreshCw, ChevronDown, ChevronRight, Check, Blocks, Pencil,
+  Plus, Trash2, Loader2, RefreshCw, ChevronDown, ChevronRight, Check, Blocks, Pencil, Save,
   Coins, MessageSquare, MessagesSquare, CalendarCheck, Flame, Sparkles, FolderOpen,
 } from "lucide-react";
 import {
@@ -1642,6 +1642,21 @@ export function DataDirPane() {
   const [manual, setManual] = useState("");
   const [confirming, setConfirming] = useState(false);
   const [pending, setPending] = useState("");
+  // v5.0（C4）：一键备份
+  const [backupBusy, setBackupBusy] = useState(false);
+  const [backupResult, setBackupResult] = useState<{ path: string; size: number } | null>(null);
+
+  const runBackup = async () => {
+    setBackupBusy(true); setError("");
+    try {
+      const r = await apiFetch("/api/backup");
+      const res = (await r.json()) as { ok: boolean; path?: string; size?: number; message?: string };
+      if (!r.ok || !res.ok) { setError(res.message || "备份失败"); return; }
+      setBackupResult({ path: res.path ?? "", size: res.size ?? 0 });
+      setNotice(`备份完成：${res.path}`);
+    } catch (e) { setError((e as Error).message); }
+    finally { setBackupBusy(false); }
+  };
 
   const load = () => {
     apiFetch("/api/data-dir")
@@ -1699,6 +1714,23 @@ export function DataDirPane() {
         </div>
         <div className="mt-2 break-all font-mono text-[11px] text-text">{info?.dir ?? "加载中…"}</div>
         <div className="mt-1 text-[10px] text-sub/60">默认：{info?.default ?? "—"}</div>
+
+        <div className="mt-3 flex flex-wrap items-center gap-2">
+          {/* v5.0（C4）：一键备份（一致性快照：会话库 VACUUM INTO + 配置/记忆/技能等复制） */}
+          <button
+            className="flex h-8 cursor-pointer items-center gap-1 rounded-md border border-success/50 bg-success/10 px-3 text-xs text-success transition-colors hover:bg-success/20 disabled:opacity-50"
+            onClick={runBackup}
+            disabled={backupBusy}
+          >
+            {backupBusy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Save className="h-3.5 w-3.5" />}
+            立即备份
+          </button>
+          {backupResult && (
+            <span className="min-w-0 truncate font-mono text-[10px] text-sub" title={backupResult.path}>
+              {backupResult.path}（{(backupResult.size / 1024 / 1024).toFixed(1)} MB）
+            </span>
+          )}
+        </div>
 
         <button
           className="mt-3 flex h-8 cursor-pointer items-center gap-1 rounded-md border border-accent/50 bg-accent/10 px-3 text-xs text-accent transition-colors hover:bg-accent/20 disabled:opacity-50"
@@ -1978,6 +2010,92 @@ export function SchedulePane() {
           ))}
         </div>
       )}
+    </div>
+  );
+}
+
+// ── v5.0 命令审计（数据与统计 → 命令审计）：commands.log 解析展示（对齐「审计是产品特性」）──
+interface AuditEntry {
+  ts: string;
+  ok: boolean;
+  cwd: string;
+  command: string;
+  detail: string;
+  sandbox: string;
+}
+
+export function AuditPane() {
+  const [entries, setEntries] = useState<AuditEntry[]>([]);
+  const [error, setError] = useState("");
+  const [q, setQ] = useState("");
+  const [onlyErr, setOnlyErr] = useState(false);
+  const [truncated, setTruncated] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const seqRef = useRef(0);
+
+  const load = (query = q, errOnly = onlyErr) => {
+    const seq = ++seqRef.current;
+    setBusy(true);
+    const params = new URLSearchParams({ limit: "200", q: query });
+    if (errOnly) params.set("err", "1");
+    apiFetch(`/api/audit?${params.toString()}`)
+      .then((r) => r.json())
+      .then((d: { ok?: boolean; entries?: AuditEntry[]; truncated?: boolean }) => {
+        if (seq !== seqRef.current) return; // 过期响应丢弃（与 StatsPane 同款守卫）
+        setEntries(d.entries ?? []);
+        setTruncated(d.truncated === true);
+      })
+      .catch((e) => { if (seq === seqRef.current) setError((e as Error).message); })
+      .finally(() => { if (seq === seqRef.current) setBusy(false); });
+  };
+  useEffect(() => { load("", false); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, []);
+
+  return (
+    <div>
+      <SectionTitle
+        title="命令审计"
+        desc="所有命令执行（run_command / run_test / 持久 shell / 终端）的审计日志（~/.infu/logs/commands.log，5MB×3 轮转）——按时间倒序，含结果 / 工作目录 / 沙箱档位。"
+      />
+      <PaneError error={error} />
+      <div className="mb-2 flex items-center gap-2">
+        <input
+          className="h-8 w-56 rounded-lg border border-line bg-elevated px-2.5 text-xs text-text outline-none placeholder:text-caption focus:border-info/60"
+          placeholder="搜索命令/详情…"
+          value={q}
+          onChange={(e) => { setQ(e.target.value); load(e.target.value, onlyErr); }}
+        />
+        <button
+          className={`h-8 shrink-0 cursor-pointer rounded-lg border px-3 text-xs transition-colors ${onlyErr ? "border-danger/50 bg-danger/10 text-danger" : "border-line bg-muted/30 text-sub hover:bg-hover"}`}
+          onClick={() => { setOnlyErr(!onlyErr); load(q, !onlyErr); }}
+        >
+          {onlyErr ? "仅失败 ✓" : "仅失败"}
+        </button>
+        <button
+          className="h-8 shrink-0 cursor-pointer rounded-lg border border-line bg-muted/30 px-3 text-xs text-sub transition-colors hover:bg-hover"
+          onClick={() => load(q, onlyErr)}
+        >
+          刷新
+        </button>
+        {busy && <Loader2 className="h-3.5 w-3.5 animate-spin text-sub" />}
+      </div>
+      {truncated && <div className="mb-2 text-[11px] text-warn">已达展示上限（200 条）——可用搜索收窄范围</div>}
+      <div className="max-h-[420px] space-y-1 overflow-y-auto rounded-lg border border-line bg-muted/20 p-2">
+        {entries.length === 0 && <div className="py-6 text-center text-xs text-caption">{q || onlyErr ? "无匹配审计记录" : "暂无命令审计（还没有命令被执行）"}</div>}
+        {entries.map((e, i) => (
+          <div key={i} className={`rounded-md border px-2.5 py-1.5 ${e.ok ? "border-line/60 bg-elevated/40" : "border-danger/30 bg-danger/5"}`}>
+            <div className="flex items-center gap-2">
+              <span className={`shrink-0 rounded px-1 py-px text-[10px] font-medium ${e.ok ? "bg-success/10 text-success" : "bg-danger/10 text-danger"}`}>
+                {e.ok ? "OK" : "ERR"}
+              </span>
+              <span className="shrink-0 font-mono text-[10px] text-caption">{e.ts}</span>
+              {e.sandbox && <span className="shrink-0 rounded bg-muted/40 px-1 py-px text-[10px] text-sub">{e.sandbox}</span>}
+              <span className="ml-auto truncate font-mono text-[10px] text-caption" title={e.cwd}>{e.cwd}</span>
+            </div>
+            <div className="mt-1 break-all font-mono text-[11px] text-text">{e.command}</div>
+            {e.detail && <div className="mt-0.5 truncate text-[10px] text-sub" title={e.detail}>{e.detail}</div>}
+          </div>
+        ))}
+      </div>
     </div>
   );
 }

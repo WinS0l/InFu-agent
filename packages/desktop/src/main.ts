@@ -30,6 +30,7 @@ import { execFileSync } from "node:child_process";
 import { startServer } from "@infu/agent/dist/server.js";
 import { loadConfig } from "@infu/agent/dist/providers/registry.js";
 import { resolveDataDir } from "@infu/agent/dist/data-dir.js";
+import { getStore } from "@infu/agent/dist/db/store.js";
 // v3.6：IPv6 解包 / IPv4 简写归一化判定下沉 @infu/shared（与 agent SSRF 共用同一实现，
 // 修复 ::ffff:7f00:1 / ::7f00:1 / 0:0:0:0:0:0:0:1 等 loopback 变体绕过导航守卫）
 import { isLoopbackHostText } from "@infu/shared";
@@ -899,20 +900,60 @@ function createTray() {
   const iconSvg = `<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16"><rect width="16" height="16" rx="4" fill="#22C55E"/></svg>`;
   tray = new Tray(nativeImage.createFromDataURL(`data:image/svg+xml;base64,${Buffer.from(iconSvg).toString("base64")}`));
   tray.setToolTip("InFu");
-  tray.setContextMenu(Menu.buildFromTemplate([
-    { label: "显示主窗口", click: () => {
-      if (!mainWindow) return;
-      mainWindow.show();
-      mainWindow.focus();
-    } },
-    { type: "separator" },
-    { label: "退出", click: () => app.quit() },
-  ]));
+  refreshTrayMenu();
+  tray.on("click", () => refreshTrayMenu());
+  tray.on("right-click", () => refreshTrayMenu());
   tray.on("double-click", () => {
     mainWindow?.show();
     mainWindow?.focus();
   });
 }
+
+/** v5.0（C3）：托盘菜单动态重建——最近会话 / 运行中任务（数据来自同进程 agent 会话库） */
+function refreshTrayMenu() {
+  if (!tray) return;
+  const show = () => {
+    if (!mainWindow) return;
+    mainWindow.show();
+    mainWindow.focus();
+  };
+  const openSession = (id: string) => {
+    show();
+    mainWindow?.webContents.send("session:open", id);
+  };
+  const items: Electron.MenuItemConstructorOptions[] = [
+    { label: "显示主窗口", click: show },
+    { type: "separator" },
+  ];
+  try {
+    const sessions = getStore().listSessions(10, false);
+    const running = sessions.filter((s) => s.status === "running");
+    if (running.length > 0) {
+      items.push({ label: `运行中任务（${running.length}）`, enabled: false });
+      for (const s of running) {
+        items.push({ label: `▶ ${s.title.slice(0, 20)}`, click: () => openSession(s.id) });
+      }
+      items.push({ type: "separator" });
+    }
+    items.push({ label: "最近会话", enabled: sessions.length === 0 });
+    for (const s of sessions.slice(0, 5)) {
+      items.push({ label: `${s.status === "running" ? "▶ " : ""}${s.title.slice(0, 24)}`, click: () => openSession(s.id) });
+    }
+    if (sessions.length === 0) items.push({ label: "（暂无会话）", enabled: false });
+  } catch {
+    items.push({ label: "（会话库未就绪）", enabled: false });
+  }
+  items.push({ type: "separator" });
+  items.push({ label: "退出", click: () => app.quit() });
+  tray.setContextMenu(Menu.buildFromTemplate(items));
+}
+
+// 托盘打开会话 → 渲染进程（前端 onOpenSession 处理：加载会话 + 切换视图）
+ipcMain.on("session:open", (_e, id: string) => {
+  const sid = String(id ?? "");
+  if (!sid || !mainWindow || mainWindow.webContents.isDestroyed()) return;
+  mainWindow.webContents.send("session:open", sid);
+});
 
 // ── 生命周期 ──
 app.whenReady().then(() => {

@@ -65,4 +65,10 @@ contextBridge.exposeInMainWorld("infuDesktop", {
     ipcRenderer.on("browser-view:viewport-changed", listener);
     return () => ipcRenderer.removeListener("browser-view:viewport-changed", listener);
   },
+  // v5.0（C3）：托盘「最近会话/运行中任务」→ 打开对应会话
+  onOpenSession: (cb) => {
+    const listener = (_e, id) => cb(id);
+    ipcRenderer.on("session:open", listener);
+    return () => ipcRenderer.removeListener("session:open", listener);
+  },
 });

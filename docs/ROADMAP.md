@@ -11,6 +11,24 @@
 
 ## 高优先级（未完成前，每个阶段都要知道）
 
+### ✅ v5.0 产品增强批（2026-08-18，审计建议清单全量落地——A1-A5/B1/B2/B4/C1-C4/A4/D3）
+- **A1 页面级 E2E 套件（补测试盲区）**——新 `tests/e2e-prod.test.ts`：真实服务器（staticDir=web/dist）+ playwright chromium 加载生产页面——API 层断言 CSP nonce 与注入脚本匹配 / 无令牌 401 / 带令牌 200 / 主题脚本与资源可加载；浏览器层断言页面零 401（CSP 回归的直接判据——v4.0 补 1 那类回归从此被自动拦截）/ 零 CSP 违规 / React 真实渲染 / theme-init.js 在 CSP 下执行（阻断 bundle 两阶段）/ 服务端配置主题管线。12 断言，入 npm test（43→44 套件）；startServer 补返回 httpServer（可 close）
+- **A2 命令审计 UI**——GET /api/audit（commands.log 尾段解析：时间/结果/cwd/命令/详情/沙箱档位，倒序 + 搜索 + 仅失败过滤）+ 设置「数据与统计 → 命令审计」Tab（AuditPane，过期响应守卫）
+- **A3 后台会话待处理徽标**——侧栏会话行按 approvals/askBySession/plansBySession 计待处理数，琥珀色数字徽标（多会话并行时后台任务的审批/提问/计划不再无处可寻，切过去即弹出）
+- **A5 bundle 懒加载**——SettingsModal/CodeView/TerminalPanel React.lazy + Suspense：首包 2.31MB→1.22MB（gzip 699→355KB，-48%）
+- **B1 TDD 收敛闭环 + B2 交付前自检**——DEFAULT_SYSTEM_PROMPT 14/15 条：修复类任务先复现→修复→验证循环（3 轮无进展必须换策略）；改动代码且有测试框架时交付前 run_test 验证
+- **B4 快速回复模型路由**——`general.quickModelId`（可选）：寒暄/极短非任务消息（<60 字且无任务意图词）自动用快模型；设置「常规」Tab 模型选择
+- **C1 会话级临时联网**——新 `egress-allow.ts`（Map<sid, 到期>，过期自动清理）：run_command/run_test 断网拦截前检查，放行审计 `egress-allowed-temp`；`POST/DELETE/GET /api/egress/allow`（校验会话存在）；composer 🌐 药丸（点击开 10 分钟/再点关，倒计时）；会话结束/删除清理
+- **C2 显式 root 自动注册项目**——「打开文件夹即项目」：/api/chat 显式 root 存在且未注册且 ≠ defaultRoot 时自动 createProject + 消息提示（defaultRoot 只读容器语义保持不变）
+- **C3 托盘增强**——托盘菜单动态重建：运行中任务 + 最近会话（数据来自同进程会话库）→ 点击 IPC `session:open` → 前端加载会话切换视图
+- **C4 数据一键备份**——GET /api/backup：会话库 VACUUM INTO 一致性快照（WAL 安全）+ 配置/记忆/技能/代理/插件/附件复制到 `<数据目录>/backups/infu-backup-<ts>/`；设置「数据存储」立即备份按钮
+- **A4 归档事件压缩（显式选项默认关）**——`general.compressArchivedEvents`（+compressArchivedAfterDays 默认 30 天）：启动扫描超期归档会话，事件压缩为「摘要 + 最近 200 条」（rebuild 兼容）；默认关保持 DB 无损语义
+- **D3 增量构建**——agent/web/shared tsconfig 加 incremental + tsBuildInfoFile（node_modules/.cache，不入库）
+- **验证**：**44/44 套件全绿 1341 断言 0 失败**（e2e-prod 12 断言新入链；startServer 返回 httpServer 供 E2E close）+ agent/web/desktop tsc + vite build + cargo check 全过；真实 E2E 与 /api/audit 探针实测
+- **未做（产品决策/成本项）**：B3 computer-use UI 树读取（高成本已拆分）、B5 OCR 兜底、C5 中英文统一（需产品方向决策）、D1 tokenizer 精估（破坏零依赖哲学）
+
+
+
 ### ✅ v4.0 全库审计修复批（2026-08-18，深度代码审计 7.3/10 后逐项修复 + 优化）
 - **① 安全**——H1 read_files 批量通道补 isProtectedPath（task-tools.ts readOneFile——此前 root=home 会话可用批量工具整批读出 SSH 私钥/凭据，单文件通道 v3.9 已修、批量漏掉）；H3 Rust Job 句柄清除继承标志（job.rs `SetHandleInformation(HANDLE_FLAG_INHERIT, 0)`——原 bInheritHandle=1 使子进程及后代继承句柄，KILL_ON_JOB_CLOSE「崩溃不留孤儿」永不触发，`start /b` 分离进程可永久存活）；H4 浏览器导航 SSRF 门禁（browser_navigate/browser_tab_new 复用 isPrivateHostText——169.254 云元数据/内网/本机 IP 直写拒绝，localhost/127.0.0.1 显式白名单，与 webfetch 防护对齐）；M15 命令白名单移除 `type*`（Windows 下 type=读文件命令，可免审批读任意盘内文件）+ home 凭据文件入写保护（~/.npmrc/.git-credentials/.netrc）；M6 缓解：`/api/approvals/bypass` 校验会话存在 + 开启动作落库审计事件（新 shared 事件 `approval-bypass`）+ 前端读取令牌后立即从 window 全局删除；安全响应头（静态托管 X-Frame-Options: DENY + CSP frame-ancestors 'none' + nosniff + no-referrer）；桌面主窗口补 will-navigate/will-redirect 守卫（此前仅 guest 有三闸，主窗口持令牌+桥裸奔）+ browser-view:open-external 过滤回环地址
 - **② 逻辑/数据完整性**——M1 持久 shell 超时修复（管道 stdin 下 `\x03` 不是中断信号，命令继续运行且残留输出混入下次调用 → 超时销毁会话重建 + 文案如实 + stderr 环形裁剪补漏）；M2 mcp/plugin CLI 本地 saveConfig 删除统一走 registry（原子写 + 0600）；M3 断网策略参数位绕过修复（`git -C <dir> push`/`npm --prefix /x install`/`pip -r x install` 选项前缀容忍）；M4 file_ops rm 目录递归升级 high+requireExplicit（与 run_command rm -rf 同门槛）；M5 session_trace 历史凭据脱敏（复用 SENSITIVE_OUT 模式）；M7 memory_write global/replace 提升 medium（跨会话持久注入面）；M11 数据目录迁移互迁目标先整体改名备份再复制（不再破坏性覆盖合并）；M10 终端会话退出注册表清理 + writeInput 防竞态；L5 rewind/appendEvent 包事务；L2 git_diff 放行 Windows 反斜杠路径（cmd 双引号内反斜杠无转义语义）+ 删死代码转义；project_scan 补越界拦截；lsp 死三元；SENSITIVE_OUT 补 ghp_/xoxb/AIza/ya29/JWT 令牌前缀

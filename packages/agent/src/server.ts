@@ -29,6 +29,7 @@ import { autoNameSession } from "./session-naming.js";
 import { parseInfuConfig, approvalPolicySchema, sandboxConfigSchema, generalConfigSchema, appearanceConfigSchema, browserConfigSchema, memoryConfigSchema } from "@infu/shared";
 import { TOOLS, clearObservedFiles } from "./tools/index.js";
 import { clearApprovalMemory, clearSessionBypass, setSessionBypass, isSessionBypassed } from "./approval/cache.js";
+import { setEgressAllow, clearEgressAllow, isEgressAllowed, egressAllowRemaining } from "./egress-allow.js";
 import { isPathInside } from "./tools/util.js";
 import { DEFAULT_SYSTEM_PROMPT } from "./agent/loop.js";
 import { runOrchestratedTask, type OrchestratedRunOptions } from "./agent/orchestrator.js";
@@ -42,7 +43,7 @@ import { clearTodos } from "./tools/task-tools.js";
 import { listTopics as _listTopics, readMemory as _readMemory, globalMemoryDir as _globalMemoryDir, projectMemoryDir as _projectMemoryDir } from "./memory/store.js";
 import { findInstructionFile as _findInstructionFile } from "./memory/infu.js";
 import { buildInfuPrompt, buildMemoryPrompt, findInstructionFile, parseScopeRules, sedimentTask } from "./memory/index.js";
-import { listProjects, createProject, removeProject, resolveProjectByName, ensureGitIgnore } from "./projects.js";
+import { listProjects, createProject, removeProject, resolveProjectByName, ensureGitIgnore, findProjectByRoot } from "./projects.js";
 import { listAgents, buildAgentsPrompt, writeAgentFile, deleteAgentFile } from "./agent/agents.js";
 import { abortBackgroundAgentsByDepth } from "./agent/subagent.js";
 import { abortJobsByDepth } from "./tools/jobs.js";
@@ -52,7 +53,7 @@ import { getStore, resetStore } from "./db/store.js";
 import { rebuildMessages } from "./db/rebuild.js";
 import type { ChatMessageLike } from "./providers/chat.js";
 import { resolveApprovalPolicy, shouldAutoApprove } from "./approval/policy.js";
-import { dockerAvailable, maybeRotateLog, isProtectedPath } from "./sandbox/index.js";
+import { dockerAvailable, maybeRotateLog, isProtectedPath, commandLogPath } from "./sandbox/index.js";
 import { winRestrictedAvailable } from "./sandbox/win-restricted.js";
 import {
   createTerminalSession, getTerminalSession, subscribeOutput, writeInput, resizeSession,
@@ -603,6 +604,80 @@ const pendingQuestions = new Map<string, { sessionId: string; resolve: (answer: 
     // v3.5：迁移成功 → 重连数据库（旧连接指向旧目录，不重连会继续写旧库）
     if (result.ok) resetStore();
     return c.json(result, result.ok ? 200 : 400);
+  });
+
+  // ── v5.0 命令审计查询（设置「数据与统计 → 命令审计」；commands.log 尾段解析展示）──
+  // commands.log 行格式：[ISO] OK|ERR | cwd=<dir> | <command> | <detail> [ | sandbox=<tag>]
+  app.get("/api/audit", (c) => {
+    const limit = Math.min(parseInt(String(c.req.query("limit") ?? "100"), 10) || 100, 500);
+    const q = String(c.req.query("q") ?? "").trim().toLowerCase();
+    const onlyErr = c.req.query("err") === "1";
+    const lines: Array<{ ts: string; ok: boolean; cwd: string; command: string; detail: string; sandbox: string }> = [];
+    try {
+      const file = commandLogPath();
+      if (!existsSync(file)) return c.json({ ok: true, entries: [], truncated: false });
+      // 只读尾段（最多 1MB——日志 5MB×3 轮转，尾部是最近内容）
+      const st = statSync(file);
+      const offset = Math.max(0, st.size - 1024 * 1024);
+      const fd = fs.openSync(file, "r");
+      let buf: Buffer;
+      try {
+        const len = st.size - offset;
+        buf = Buffer.alloc(len);
+        fs.readSync(fd, buf, 0, len, offset);
+      } finally {
+        fs.closeSync(fd);
+      }
+      const text = buf.toString("utf-8");
+      for (const line of text.split(/\r?\n/).reverse()) {
+        const m = /^\[(.*?)\] (OK|ERR) \| cwd=(.*?) \| (.*?) \| (.*?)( \| sandbox=(.*))?$/.exec(line);
+        if (!m) continue;
+        const entry = {
+          ts: m[1],
+          ok: m[2] === "OK",
+          cwd: m[3],
+          command: m[4],
+          detail: m[5],
+          sandbox: m[7] ?? "",
+        };
+        if (onlyErr && entry.ok) continue;
+        if (q && !entry.command.toLowerCase().includes(q) && !entry.detail.toLowerCase().includes(q)) continue;
+        lines.push(entry);
+        if (lines.length >= limit) break;
+      }
+    } catch { /* 读取失败返回空 */ }
+    return c.json({ ok: true, entries: lines, truncated: lines.length >= limit });
+  });
+
+  // ── v5.0（C4）数据一键备份：一致性快照到 <数据目录>/backups/infu-backup-<ts>/ ──
+  // 会话库走 VACUUM INTO（WAL 一致性快照），配置/记忆/技能/代理/插件/定时任务直接复制
+  app.get("/api/backup", (c) => {
+    const dataDir = resolveDataDir();
+    const backupsDir = join(dataDir, "backups");
+    try {
+      mkdirSync(backupsDir, { recursive: true });
+      const ts = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
+      const target = join(backupsDir, `infu-backup-${ts}`);
+      mkdirSync(target, { recursive: true });
+      const copyIfExists = (name: string) => {
+        const src = join(dataDir, name);
+        if (existsSync(src)) fs.cpSync(src, join(target, name), { recursive: true });
+      };
+      for (const name of ["config.json", "projects.json", "schedules.json", "memory", "skills", "agents", "plugins", "attachments"]) {
+        copyIfExists(name);
+      }
+      getStore().backupTo(join(target, "infu.db"));
+      // 备份大小统计（递归）
+      const walkSize = (d: string): number =>
+        readdirSync(d, { withFileTypes: true }).reduce(
+          (n, e) => n + (e.isDirectory() ? walkSize(join(d, e.name)) : statSync(join(d, e.name)).size),
+          0
+        );
+      const size = walkSize(target);
+      return c.json({ ok: true, path: target, size, ts });
+    } catch (e) {
+      return c.json({ ok: false, message: `备份失败：${(e as Error).message}` }, 500);
+    }
   });
 
   // ── v2.10 批 7 附件文本提取（docx 零依赖：zip 条目 + XML 去标签）──
@@ -1242,6 +1317,25 @@ const pendingQuestions = new Map<string, { sessionId: string; resolve: (answer: 
         return;
       }
 
+      // v5.0（C2）：显式 root 自动注册项目——「打开文件夹即项目」心智：用户显式选择了
+      // 一个存在的目录作为会话根但尚未注册项目时，自动注册（免去手动「创建项目」一步）；
+      // defaultRoot（自由会话只读容器）不自动注册（注册会解锁写权限，语义必须保持）
+      if (persistRoot && !findProjectByRoot(root)) {
+        const cfg = loadConfig();
+        if (root !== cfg?.general?.defaultRoot) {
+          const reg = createProject(root);
+          if (reg.ok) {
+            try {
+              store.appendEvent(sessionId, { type: "text", text: `（已自动注册为项目：${root}——侧栏项目区可见，代码/审查界面立即可用）` });
+            } catch { /* 忽略 */ }
+            await stream.writeSSE({
+              event: "agent",
+              data: JSON.stringify({ type: "text", text: `（已自动注册为项目：${root}——侧栏项目区可见，代码/审查界面立即可用）` }),
+            }).catch(() => {});
+          }
+        }
+      }
+
       const config = loadConfig();
       const models = config?.models ?? [];
       if (!models.length) {
@@ -1264,6 +1358,15 @@ const pendingQuestions = new Map<string, { sessionId: string; resolve: (answer: 
         };
         const explicit = modelId ? pick(modelId) : undefined;
         if (explicit) return explicit;
+        // v5.0（B4）：快速回复模型路由——寒暄/极短非任务消息（无任务意图词）自动用
+        // general.quickModelId（省钱提速，用户无感）；任务类消息走默认模型
+        const quick = config?.general?.quickModelId ? pick(config.general.quickModelId) : undefined;
+        if (quick && withKey(quick)) {
+          const text = prompt.trim();
+          if (text.length < 60 && !/实现|修复|重构|创建|新建|添加|增加|修改|优化|完成|解决|分析|检查|测试|开发|集成|部署|迁移|升级|调整|支持|调研|评审|审查|构建|初始化|报错|异常|问题|改成|编写|做一个|写一个/.test(text)) {
+            return quick;
+          }
+        }
         const def = pick(config?.defaultModelId);
         if (withKey(def)) return def as ModelConfig;
         if (def) return def;
@@ -1476,6 +1579,7 @@ const pendingQuestions = new Map<string, { sessionId: string; resolve: (answer: 
           try { clearTodos(sessionId); } catch { /* 忽略 */ }
           try { clearPluginSkillDirs(); } catch { /* 忽略 */ }
           try { clearSessionBypass(sessionId); } catch { /* 忽略 */ }
+          try { clearEgressAllow(sessionId); } catch { /* 忽略 */ }
           // v3.4 审计修复：任务结束清理挂起队列——用户不点按钮（确认框/提问/计划卡片）
           // 且任务正常结束时，pendingApprovals/pendingQuestions/pendingPlans 的 Promise
           // 永久悬挂（内存泄漏 + 拦截后续同名 id 响应）
@@ -1589,6 +1693,29 @@ const pendingQuestions = new Map<string, { sessionId: string; resolve: (answer: 
       store.appendEvent(sid, { type: "approval-bypass", enabled, at: Date.now() });
     } catch { /* 审计落库失败不影响开关 */ }
     return c.json({ ok: true, bypass: isSessionBypassed(sid) });
+  });
+
+  // v5.0（C1）：会话级临时联网开关（默认断网策略的轻量出口——npm install 等高频
+  // 外传命令不再每次被拦；到期自动失效，命令审计照常落库）
+  app.post("/api/egress/allow", async (c) => {
+    const body = await c.req.json().catch(() => ({}));
+    const sid = typeof body.sessionId === "string" && body.sessionId ? body.sessionId : null;
+    if (!sid) return c.json({ ok: false, message: "缺少 sessionId" }, 400);
+    if (!getStore().getSession(sid)) return c.json({ ok: false, message: "会话不存在" }, 404);
+    const minutes = Number(body.minutes) || 10;
+    setEgressAllow(sid, minutes);
+    return c.json({ ok: true, remainingSec: egressAllowRemaining(sid) });
+  });
+  app.delete("/api/egress/allow", async (c) => {
+    const body = await c.req.json().catch(() => ({}));
+    const sid = typeof body.sessionId === "string" && body.sessionId ? body.sessionId : null;
+    if (!sid) return c.json({ ok: false, message: "缺少 sessionId" }, 400);
+    clearEgressAllow(sid);
+    return c.json({ ok: true });
+  });
+  app.get("/api/egress/allow", (c) => {
+    const sid = String(c.req.query("sessionId") ?? "");
+    return c.json({ ok: true, allowed: isEgressAllowed(sid), remainingSec: egressAllowRemaining(sid) });
   });
 
   // 审批决策入口（Web UI 调用）
@@ -1723,6 +1850,7 @@ const pendingQuestions = new Map<string, { sessionId: string; resolve: (answer: 
     clearObservedFiles(id);
     clearApprovalMemory(id);
     clearSessionBypass(id);
+    try { clearEgressAllow(id); } catch { /* 忽略 */ }
     // v3.6：todo 清单随会话删除清理
     try { clearTodos(id); } catch { /* 忽略 */ }
     // v3.0 批 12：会话删除 → 清理该会话的 computer use 截图（.infu/screenshots/screen-<sid8>-*.png）
@@ -2343,6 +2471,7 @@ export function startServer(opts: ServerOptions = {}) {
   const host = opts.host ?? "127.0.0.1";
   const basePort = opts.port ?? 4317;
   const app = createApp(opts);
+  let httpServer: ReturnType<typeof createServer> | null = null;
   // v3.1：启动时清理上次残留的 running 会话（服务重启后旧任务已死，防续跑被误拦）
   try {
     getStore().resetStaleRunning();
@@ -2363,12 +2492,31 @@ export function startServer(opts: ServerOptions = {}) {
         }
       }
     }
+    // v5.0（A4）：归档事件压缩（显式选项，默认关）——超期归档会话的事件压缩为
+    // 「摘要 + 最近 200 条」，控制会话库长期膨胀；开启即接受「继续被压缩会话时
+    // 早期历史为摘要」的语义（rebuild 兼容）
+    if (g?.compressArchivedEvents === true) {
+      const days = Math.max(7, Math.min(365, g.compressArchivedAfterDays ?? 30));
+      const cutoff = Date.now() - days * 24 * 3600 * 1000;
+      const store = getStore();
+      let compressed = 0;
+      for (const s of store.listSessions(1000, true)) {
+        if (!s.updatedAt || s.updatedAt >= cutoff) continue;
+        try {
+          const r = store.compressSessionEvents(s.id, 200);
+          if (r) compressed++;
+        } catch { /* 单个失败跳过 */ }
+      }
+      if (compressed > 0) console.log(`[infu-agent] 归档事件压缩：${compressed} 个会话已压缩（general.compressArchivedEvents）`);
+    }
   } catch {
-    /* 归档失败不影响启动 */
+    /* 归档/压缩失败不影响启动 */
   }
 
   const tryListen = (port: number, attemptsLeft: number) => {
     const server = createServer((incoming, outgoing) => void handleNodeRequest(app, incoming, outgoing));
+    // v5.0：记录 server 供调用方关闭（E2E 测试用；startServer 返回 httpServer）
+    httpServer = server;
     server.listen(port, host, () => {
       const address = server.address();
       const listeningPort = typeof address === "object" && address ? address.port : port;
@@ -2402,6 +2550,9 @@ export function startServer(opts: ServerOptions = {}) {
   } catch (e) {
     console.log(`[infu-agent] 定时任务调度器启动跳过: ${(e as Error).message}`);
   }
+
+  // v5.0：返回 HTTP server（调用方 close() 用——E2E 测试/桌面宿主可精确控制生命周期）
+  return httpServer;
 }
 
 // 直接运行时入口：tsx src/server.ts / node dist/server.js

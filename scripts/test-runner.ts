@@ -49,6 +49,7 @@ const SUITES: string[] = [
   "tools-opt.test.ts",
   "builtin-skills.test.ts",
   "browser.test.ts",
+  "e2e-prod.test.ts",
   "subagent-control.test.ts",
   "jobs.test.ts",
   "v212.test.ts",

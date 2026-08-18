@@ -24,6 +24,7 @@ import { startBackgroundJob, listJobs, getJob, getJobOutput, killJob, auditJobSt
 import { readMemory, writeMemory, validateTopic, checkPathScope } from "../memory/index.js";
 import { loadConfig } from "../providers/registry.js";
 import { currentApprovalPolicy, isCommandAllowed, hasShellCombinators } from "../approval/policy.js";
+import { isEgressAllowed } from "../egress-allow.js";
 import {
   clip, MAX_OUTPUT, MAX_FILE_READ, runShell, execLocal, sandboxTag, walkFiles, guard, isPathInside,
   isReadOnlySessionRoot, sessionRootReadOnlyBlock,
@@ -381,9 +382,15 @@ export const TOOLS: Record<string, ToolDef> = {
       // 断网策略（M6 软控制）：外传命令必须 network=true 且审批放行，否则拦截（默认断网语义）
       const egress = detectEgress(command);
       if (egress && !wantNetwork) {
-        const msg = egressBlockedMessage(egress);
-        auditCommand(ctx.root, command, false, msg, "egress-blocked");
-        return `${msg}\n（受限沙箱·断网策略）`;
+        // v5.0（C1）：会话级临时联网开关——用户开启后本会话 egress 命令直接放行
+        // （审计标记 egress-allowed-temp），到期自动失效；未开启走原拦截路径
+        if (isEgressAllowed(ctx.sessionId ?? "")) {
+          auditCommand(ctx.root, command, true, "会话级临时联网放行", "egress-allowed-temp");
+        } else {
+          const msg = egressBlockedMessage(egress);
+          auditCommand(ctx.root, command, false, msg, "egress-blocked");
+          return `${msg}\n（受限沙箱·断网策略）`;
+        }
       }
 
       let netAllowed = false;
@@ -987,10 +994,13 @@ export const TOOLS: Record<string, ToolDef> = {
       }
       // 断网策略：测试默认断网，外传命令拦截（run_test 无 network 参数，需去掉外传工具或改用 run_command）
       // v3.9：full 档（最大审批权限）放行——审计照常（egress-allowed-full 标记）
+      // v5.0（C1）：会话级临时联网开关同效（egress-allowed-temp）
       const egress = detectEgress(cmd);
       if (egress) {
         if (currentApprovalPolicy().mode === "full") {
           auditCommand(abs, cmd, true, "full 档全自主：断网策略放行", "egress-allowed-full");
+        } else if (isEgressAllowed(ctx.sessionId ?? "")) {
+          auditCommand(abs, cmd, true, "会话级临时联网放行", "egress-allowed-temp");
         } else {
           const msg = egressBlockedMessage(egress);
           auditCommand(abs, cmd, false, msg, "egress-blocked");

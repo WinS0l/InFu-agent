@@ -1,15 +1,18 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState, lazy, Suspense } from "react";
 import { FolderOpen, PanelRightClose, PanelRightOpen } from "lucide-react";
 import { useStore } from "./store";
 import { fetchModels, fetchSessions, fetchSessionEvents, maybeMigrateV1, fetchConfig, fetchProjects } from "./api";
 import Sidebar from "./components/Sidebar";
 import ChatPanel from "./components/ChatPanel";
-import CodeView from "./components/CodeView";
 import RightRail from "./components/RightRail";
 import ApprovalModal from "./components/ApprovalModal";
 import AskModal from "./components/AskModal";
-import SettingsModal from "./components/SettingsModal";
 import { TerminalToggleButton } from "./components/TerminalPanel";
+// v5.0（A5）：重组件懒加载（settings 弹窗 = SettingsPanes 1961 行 + ModelPane + 弹窗本身，
+// 首包约 500KB；CodeView 仅代码模式渲染）——首屏 bundle 显著减负
+const CodeView = lazy(() => import("./components/CodeView"));
+const SettingsModal = lazy(() => import("./components/SettingsModal"));
+const SuspenseFallback = () => <div className="flex h-full items-center justify-center text-xs text-caption">加载中…</div>;
 
 /**
  * v3 UI 打磨：三栏骨架——
@@ -107,6 +110,25 @@ export default function App() {
     } catch {
       /* 模型加载失败静默（5 秒重试；输入区模型选择器与设置页可查） */
     }
+  }, []);
+
+  useEffect(() => {
+    // v5.0（C3）：托盘「最近会话/运行中任务」→ 打开对应会话（桌面端）
+    if (!window.infuDesktop?.onOpenSession) return;
+    return window.infuDesktop.onOpenSession((id) => {
+      if (!id) return;
+      fetchSessionEvents(id)
+        .then(({ events }) => {
+          const st = useStore.getState();
+          st.loadSession(events, id, true);
+          st.setActiveSessionId(id);
+          useStore.setState({ messages: useStore.getState().sessionCache[id] ?? [] });
+          fetchSessions().catch(() => {});
+        })
+        .catch(() => {
+          useStore.getState().addError("会话加载失败（托盘打开）");
+        });
+    });
   }, []);
 
   useEffect(() => {
@@ -336,7 +358,9 @@ export default function App() {
               background: "var(--bg-base)",
             }}
           >
-            <CodeView />
+            <Suspense fallback={<SuspenseFallback />}>
+              <CodeView />
+            </Suspense>
           </div>
         )}
         {/* 右详情栏（v2.9 浏览器式：顶部 tab 条 + 内容区 + 空态初始面板；折叠后保留 56px rail；
@@ -395,7 +419,11 @@ export default function App() {
       <ApprovalModal />
       {/* v2.6 收尾：Agent 执行中提问（ask_user 工具） */}
       <AskModal />
-      {settingsOpen && <SettingsModal onClose={() => setSettingsOpen(false)} initialTab={settingsTab} />}
+      {settingsOpen && (
+        <Suspense fallback={null}>
+          <SettingsModal onClose={() => setSettingsOpen(false)} initialTab={settingsTab} />
+        </Suspense>
+      )}
     </div>
   );
 }

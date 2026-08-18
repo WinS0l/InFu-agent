@@ -121,6 +121,56 @@ export class SessionStore {
     this.db.close();
   }
 
+  /**
+   * v5.0（C4）：一键备份——VACUUM INTO 把当前库的一致性快照写入目标路径
+   * （WAL 下直接复制文件会丢未 checkpoint 数据；VACUUM INTO 是 SQLite 官方备份语义）
+   */
+  backupTo(targetPath: string): void {
+    this.db.exec(`VACUUM INTO '${targetPath.replace(/'/g, "''")}'`);
+  }
+
+  /**
+   * v5.0（A4）：归档会话事件压缩（显式选项，默认关）——保留最近 keep 条事件，
+   * 前置一条摘要事件（取自最后一次 done/文本，截断 2000 字）；rebuild 兼容
+   * （摘要成为最早的 assistant 文本）。返回压缩前后事件数；事件不足不压缩。
+   */
+  compressSessionEvents(id: string, keep = 200): { before: number; after: number } | null {
+    const events = this.getEvents(id);
+    if (events.length <= keep + 50) return null;
+    // 摘要源：最后一次 done 文本 > 最后一次 text > 最后一条 user-message
+    let summary = "";
+    for (let i = events.length - 1; i >= 0 && !summary; i--) {
+      const ev = events[i].event as AgentEvent;
+      if (ev.type === "done" && ev.text?.trim()) summary = ev.text.trim();
+      else if (ev.type === "text" && (ev as { text?: string }).text?.trim()) summary = (ev as { text?: string }).text!.trim();
+      else if (ev.type === "user-message" && (ev as { text?: string }).text?.trim()) summary = (ev as { text?: string }).text!.trim();
+    }
+    const kept = events.slice(-keep);
+    this.db.exec("BEGIN");
+    try {
+      this.db.prepare(`DELETE FROM events WHERE session_id = ?`).run(id);
+      const now = Date.now();
+      const summaryEvent: AgentEvent = {
+        type: "text",
+        text: `【历史已压缩（v5.0 归档压缩）】此会话早于最近 ${keep} 条事件的历史已折叠为摘要：
+${summary.slice(0, 2000)}`,
+      };
+      this.db
+        .prepare(`INSERT INTO events (session_id, seq, ts, event_json) VALUES (?, 0, ?, ?)`)
+        .run(id, now, JSON.stringify(summaryEvent));
+      for (let i = 0; i < kept.length; i++) {
+        this.db
+          .prepare(`INSERT INTO events (session_id, seq, ts, event_json) VALUES (?, ?, ?, ?)`)
+          .run(id, i + 1, kept[i].ts, JSON.stringify(kept[i].event));
+      }
+      this.db.exec("COMMIT");
+    } catch (e) {
+      try { this.db.exec("ROLLBACK"); } catch { /* 忽略 */ }
+      throw e;
+    }
+    return { before: events.length, after: keep + 1 };
+  }
+
   /** 新建会话（status=running，事件流从 0 开始） */
   createSession(opts: { title: string; root: string; modelId?: string; mode?: string }): string {
     const id = randomUUID();

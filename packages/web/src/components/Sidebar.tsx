@@ -116,10 +116,16 @@ function SessionRow({ s, projectName, onOpen, onRename, onPin, onArchive, busy }
   const [title, setTitle] = useState(s.title);
   const [menuOpen, setMenuOpen] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
-  const { activeSessionId, runningIds } = useStore();
+  const { activeSessionId, runningIds, approvals, askBySession, plansBySession } = useStore();
   const active = s.id === activeSessionId;
   // v3.1：多会话并行——运行态按会话集合判断（后台任务完成/进行中侧栏可随时切换）
   const isRunning = runningIds.includes(s.id);
+  // v5.0（A3）：后台会话待处理徽标——该会话有挂起的审批/提问/计划时亮起
+  // （多会话并行时后台任务的决策请求不再无处可寻；切到该会话即弹出对应卡片）
+  const pendingCount =
+    approvals.filter((a) => a.sessionId === s.id).length +
+    (askBySession[s.id] ? 1 : 0) +
+    (plansBySession[s.id] ? 1 : 0);
 
   useEffect(() => {
     if (editing) {
@@ -163,6 +169,15 @@ function SessionRow({ s, projectName, onOpen, onRename, onPin, onArchive, busy }
             <span className="relative flex h-2 w-2 shrink-0">
               <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-success opacity-60" />
               <span className="relative inline-flex h-2 w-2 rounded-full bg-success" />
+            </span>
+          )}
+          {/* v5.0（A3）：待处理徽标（审批/提问/计划挂起——后台会话的决策入口提示） */}
+          {pendingCount > 0 && (
+            <span
+              className="flex h-3.5 min-w-3.5 shrink-0 items-center justify-center rounded-full bg-warn/20 px-1 text-[9px] font-semibold text-warn"
+              title={`${pendingCount} 项待处理（审批/提问/计划）——切换到本会话处理`}
+            >
+              {pendingCount}
             </span>
           )}
           <span className={`min-w-0 flex-1 truncate text-[13px] leading-5 ${active ? "font-medium" : ""}`}>{s.title}</span>

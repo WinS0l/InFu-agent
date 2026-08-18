@@ -17,12 +17,12 @@ import {
   X, Check, Palette, Cpu, SlidersHorizontal, Loader2, ChevronDown, Terminal,
   Blocks, Database, BarChart3, BrainCircuit, Bot, Globe, Plug, Trash2, Plus,
   Moon, Sun, MonitorCog, FolderSearch, BookOpen, Workflow, Folder,
-  Clock, ShieldAlert, Scale, ShieldCheck, AlertTriangle,
+  Clock, ShieldAlert, Scale, ShieldCheck, AlertTriangle, ScrollText,
 } from "lucide-react";
 import type { RiskLevel } from "@infu/shared";
 import { useStore, type SettingsTab } from "../store";
 import { fetchConfig, updateConfig, apiFetch, type ApprovalMode, type SettingsConfig, type ToolRiskOverrideInput } from "../api";
-import { McpPane, PluginsPane, SkillsPane, AgentsPane, HooksPane, BrowserPane, MemoryPane, StatsPane, IndexPane, SchedulePane, DataDirPane } from "./SettingsPanes";
+import { McpPane, PluginsPane, SkillsPane, AgentsPane, HooksPane, BrowserPane, MemoryPane, StatsPane, IndexPane, SchedulePane, DataDirPane, AuditPane } from "./SettingsPanes";
 import ModelPane from "./ModelPane";
 import { Toggle, CapsuleButton } from "./ui";
 
@@ -92,6 +92,7 @@ const NAV_GROUPS: Array<{ label: string; items: Array<{ id: SettingsTab; label: 
     items: [
       { id: "datadir", label: "数据存储", icon: Folder },
       { id: "index", label: "索引库", icon: Database },
+      { id: "audit", label: "命令审计", icon: ScrollText },
       { id: "stats", label: "使用统计", icon: BarChart3 },
     ],
   },
@@ -392,6 +393,26 @@ export default function SettingsModal({ onClose, initialTab = "general" }: Props
                   </div>
                   <div className="text-xs text-sub">终端面板位于聊天输入框右上「终端」按钮；也可在面板内临时切换</div>
                 </div>
+                {/* v5.0（B4）：快速回复模型——寒暄/极短非任务消息自动用快模型（省钱提速，用户无感） */}
+                <div className="space-y-2">
+                  <Label text="快速回复模型（可选）" hint="寒暄与极短的非任务消息（如「你好」「在吗」）自动用该模型回复，不消耗旗舰模型额度；任务类消息仍走默认模型。留空 = 不启用" />
+                  <div className="flex flex-wrap items-center gap-1.5">
+                    {models.slice(0, 12).map((m) => (
+                      <button
+                        key={m.id}
+                        className={`h-8 cursor-pointer rounded-lg border px-3 text-xs transition-colors ${
+                          (general.quickModelId ?? "") === m.id
+                            ? "border-info/60 bg-info/10 text-info"
+                            : "border-line bg-elevated text-sub hover:text-text"
+                        }`}
+                        onClick={() => patch({ general: { ...general, quickModelId: (general.quickModelId ?? "") === m.id ? undefined : m.id } })}
+                      >
+                        {m.name ?? m.id}
+                      </button>
+                    ))}
+                    {models.length === 0 && <div className="text-xs text-caption">暂无模型（先到「模型设置」配置）</div>}
+                  </div>
+                </div>
                 {/* v3.0 批 12：开机自启（默认关闭，用户主动开启；仅桌面版生效） */}
                 <div className="space-y-2">
                   <Label text="开机自启" hint="登录 Windows 后自动启动 InFu（默认关闭，需手动开启）" />
@@ -411,6 +432,7 @@ export default function SettingsModal({ onClose, initialTab = "general" }: Props
                     { key: "showThinking" as const, label: "显示思考过程", desc: "对话流中显示模型思考折叠行（点击即时生效）" },
                     { key: "showTodos" as const, label: "显示待办列表", desc: "对话输入框上方显示任务清单面板（点击即时生效）" },
                     { key: "autoArchive" as const, label: "自动归档旧会话", desc: "超过保留期的会话自动移入归档（不删除；侧栏「归档」可恢复）" },
+                    { key: "compressArchivedEvents" as const, label: "归档事件压缩", desc: "归档超 30 天的会话事件压缩为「摘要 + 最近 200 条」，控制会话库长期膨胀（默认关——开启后继续被压缩会话时早期历史为摘要）" },
                   ].map(({ key, label, desc }) => (
                     <div key={key} className="flex items-center justify-between gap-3 rounded-xl border border-line bg-elevated px-3 py-2.5">
                       <div className="min-w-0">
@@ -555,6 +577,7 @@ export default function SettingsModal({ onClose, initialTab = "general" }: Props
             {tab === "memory" && <MemoryPane />}
             {tab === "stats" && <StatsPane />}
             {tab === "datadir" && <DataDirPane />}
+            {tab === "audit" && <AuditPane />}
             {tab === "index" && <IndexPane />}
             {tab === "schedule" && <SchedulePane />}
 

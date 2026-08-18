@@ -47,6 +47,8 @@ export interface InfuDesktopBridge {
   onBrowserSelect(cb: (id: string) => void): () => void;
   onBrowserState(cb: (s: BrowserViewState) => void): () => void;
   onViewportChanged(cb: (opts: { width?: number; height?: number; fit?: boolean }) => void): () => void;
+  /** v5.0（C3）：托盘「最近会话/运行中任务」→ 打开对应会话 */
+  onOpenSession(cb: (id: string) => void): () => void;
 }
 
 /** Electron <webview> 元素（webviewTag 启用后可用；Electron WebviewTag 的渲染进程 API 子集） */

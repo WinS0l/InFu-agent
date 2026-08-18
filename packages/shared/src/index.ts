@@ -253,6 +253,13 @@ export interface GeneralConfig {
   autoArchive?: boolean;
   /** 归档保留时长（天，v3.5）：任务最后更新早于该时长才进入自动归档候选（缺省 7） */
   archiveRetentionDays?: number;
+  /** 快速回复模型（v5.0）：寒暄/极短非任务消息自动用该模型（省钱提速；缺省不启用） */
+  quickModelId?: string;
+  /** 归档事件压缩（v5.0，A4）：归档超 N 天的会话事件压缩为「摘要 + 最近 200 条」，
+   *  控制会话库长期膨胀（缺省 false——默认保持 DB 无损语义，显式开启） */
+  compressArchivedEvents?: boolean;
+  /** 归档压缩等待天数（v5.0）：归档会话最后更新早于该天数才压缩（缺省 30） */
+  compressArchivedAfterDays?: number;
 }
 
 /** 外观设置（v2.4：Web 界面偏好，随配置持久化） */
@@ -727,6 +734,11 @@ export const generalConfigSchema = z
     autoCommit: z.boolean().optional(),
     autoArchive: z.boolean().optional(),
     archiveRetentionDays: z.number().int().min(1).max(365).optional(),
+    // v5.0（B4）：快速回复模型（可选）——寒暄/极短非任务消息自动用快模型，省钱提速
+    quickModelId: z.string().optional(),
+    // v5.0（A4）：归档事件压缩（显式选项，默认关——保持 DB 无损语义）
+    compressArchivedEvents: z.boolean().optional(),
+    compressArchivedAfterDays: z.number().int().min(7).max(365).optional(),
   })
   .passthrough();
 

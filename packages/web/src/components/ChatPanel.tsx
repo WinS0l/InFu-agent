@@ -1,14 +1,14 @@
-import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState, lazy, Suspense } from "react";
 import {
   Send, Square, GitBranch, Loader2,
   RotateCcw, AlertTriangle, Files, Folder, FolderOpen, ChevronDown, Check,
-  BrainCircuit, ShieldCheck, ShieldAlert, Scale, Cpu, Paperclip, FileText, X, Pencil, Image as ImageIcon, WifiOff, Zap,
+  BrainCircuit, ShieldCheck, ShieldAlert, Scale, Cpu, Paperclip, FileText, X, Pencil, Image as ImageIcon, WifiOff, Zap, Globe,
   CheckCircle2, XCircle, OctagonX, Skull,
 } from "lucide-react";
 import { Streamdown } from "streamdown";
 import type { PhaseId } from "@infu/shared";
 import { useStore, type ChatMsg } from "../store";
-import { sendChat, mergeWorktree, discardWorktree, rewindSession, fetchProjects, fetchConfig, updateConfig, fetchPlugins, setApprovalBypass, type ApprovalMode, type ChatFileInput, type PluginInfo } from "../api";
+import { sendChat, mergeWorktree, discardWorktree, rewindSession, fetchProjects, fetchConfig, updateConfig, fetchPlugins, setApprovalBypass, type ApprovalMode, type ChatFileInput, type PluginInfo, egressAllow, egressDisallow } from "../api";
 import Timeline from "./Timeline";
 import ReasoningBlock from "./ReasoningBlock";
 import QueueDock from "./QueueDock";
@@ -17,7 +17,7 @@ import TodoPanel from "./TodoPanel";
 import { useCleanMarkdownBoxes } from "./markdown-clean";
 import AttachmentRail, { AttachmentLine, ATTACH_LIMITS, type AttachmentDraft } from "./AttachmentRail";
 import PlanCard from "./PlanCard";
-import TerminalPanel from "./TerminalPanel";
+const TerminalPanel = lazy(() => import("./TerminalPanel"));
 import { CopyButton } from "./ui";
 
 /** 运行耗时（turn 尾操作行「· 运行 15s」；不足 60s 秒、以上 分:秒） */
@@ -247,9 +247,67 @@ function useContextEstimate() {
   return { estTokens, window, pct };
 }
 
+/**
+ * v5.0（C1）：会话级临时联网药丸——点击开启 10 分钟临时联网（本会话 egress 命令放行），
+ * 再点关闭；到期自动失效。断网策略是硬闸，此开关是用户的轻量出口（npm install 等
+ * 高频外传命令不再每次被拦），命令审计照常落库（egress-allowed-temp）。
+ */
+function EgressPill() {
+  const { egressUntil, setEgressUntil, activeSessionId } = useStore();
+  const [, forceTick] = useState(0);
+  const remaining = egressUntil ? Math.max(0, Math.round((egressUntil - Date.now()) / 1000)) : 0;
+  // 倒计时刷新（仅开启时）
+  useEffect(() => {
+    if (!egressUntil || remaining <= 0) return;
+    const t = setInterval(() => forceTick((n) => n + 1), 30000);
+    return () => clearInterval(t);
+  }, [egressUntil, remaining]);
+  // 到期自动清除本地状态
+  useEffect(() => {
+    if (egressUntil && remaining <= 0) setEgressUntil(null);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [remaining]);
+
+  const toggle = async () => {
+    const sid = activeSessionId ?? "";
+    if (!sid) return;
+    try {
+      if (egressUntil && remaining > 0) {
+        await egressDisallow(sid);
+        setEgressUntil(null);
+      } else {
+        await egressAllow(sid, 10);
+        setEgressUntil(Date.now() + 10 * 60000);
+      }
+    } catch (e) {
+      useStore.getState().addError(`临时联网操作失败：${(e as Error).message}`);
+    }
+  };
+
+  const active = !!egressUntil && remaining > 0;
+  const label = active ? `联网中 ${Math.ceil(remaining / 60)} 分` : "临时联网";
+  return (
+    <button
+      className={`flex h-7 shrink-0 cursor-pointer items-center gap-1 rounded-lg border px-2 text-[12px] font-medium transition-colors ${
+        active
+          ? "border-success/50 bg-success/10 text-success"
+          : "border-line text-sub hover:bg-hover hover:text-text"
+      }`}
+      onClick={() => void toggle()}
+      title={
+        active
+          ? `本会话临时联网（还剩 ${Math.ceil(remaining / 60)} 分钟）——npm install 等外传命令放行，命令审计照常。点击关闭`
+          : "临时允许本会话联网 10 分钟（npm install 等外传命令不再被断网策略拦截；到期自动失效；命令审计照常）"
+      }
+    >
+      <Globe className="h-3 w-3" />
+      <span className="hidden min-[400px]:inline">{label}</span>
+    </button>
+  );
+}
+
 /** Context 用量环（28px 圆环 + 点击 breakdown；主流 composer 同款） */
-function ContextMeter() {
-  const { estTokens, window, pct } = useContextEstimate();
+function ContextMeter() {  const { estTokens, window, pct } = useContextEstimate();
   const [open, setOpen] = useState(false);
   const R = 12;
   const C = 2 * Math.PI * R;
@@ -985,6 +1043,9 @@ export default function ChatPanel() {
           )}
         </span>
         <span className="ml-auto flex min-w-0 items-center gap-2">
+          {/* v5.0（C1）：会话级临时联网开关（断网策略轻量出口——npm install 等高频外传命令
+              不再每次被拦；到期自动失效；命令审计照常） */}
+          <EgressPill />
           {/* 上下文用量环（v3：模型选择左侧；窄视口隐藏防溢出） */}
           <span className="hidden min-[560px]:block">
             <ContextMeter />
@@ -1297,7 +1358,11 @@ export default function ChatPanel() {
       )}
 
       {/* v3 终端（仅对话模式；代码模式隐藏） */}
-      {terminalOpen && viewMode === "chat" && <TerminalPanel />}
+      {terminalOpen && viewMode === "chat" && (
+        <Suspense fallback={null}>
+          <TerminalPanel />
+        </Suspense>
+      )}
 
       {/* v2.14 批 9：回滚完成提示（3 秒自动消失；主题样式悬浮条） */}
       {rollbackToast && (

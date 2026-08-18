@@ -68,6 +68,13 @@ function check(name: string, cond: boolean, detail = "") {
   check("私网 10.x 拦截", (await isPrivateTarget("http://10.0.0.5/")).ok === false);
   check("链路本地拦截（云元数据）", (await isPrivateTarget("http://169.254.169.254/latest/meta-data")).ok === false);
   check("IPv6 回环拦截", (await isPrivateTarget("http://[::1]:8080/")).ok === false);
+  // v3.6 回归：IPv6 变体（十六进制 IPv4-mapped / IPv4-compatible / 完整形式回环）——
+  // 原实现只认 ::ffff: 点分形式，以下全漏判放行（web.ts isPrivateIp 与桌面 isLoopbackTarget 同源修复）
+  check("IPv6 hex IPv4-mapped 回环拦截（::ffff:7f00:1）", (await isPrivateTarget("http://[::ffff:7f00:1]:4317/")).ok === false);
+  check("IPv6 简写 IPv4-compatible 回环拦截（::7f00:1）", (await isPrivateTarget("http://[::7f00:1]:4317/")).ok === false);
+  check("IPv6 完整形式回环拦截（0:0:0:0:0:0:0:1）", (await isPrivateTarget("http://[0:0:0:0:0:0:0:1]:4317/")).ok === false);
+  check("IPv6 点分 IPv4-mapped 拦截（::ffff:127.0.0.1）", (await isPrivateTarget("http://[::ffff:127.0.0.1]:8080/")).ok === false);
+  check("IPv6 公网 hex mapped 放行（::ffff:8.8.8.8）", (await isPrivateTarget("http://[::ffff:8.8.8.8]/")).ok === true);
   check("公网 IP 放行", (await isPrivateTarget("http://8.8.8.8/")).ok === true);
   check("非 http 协议拒绝", (await isPrivateTarget("ftp://example.com/x")).ok === false);
   if (oldEnv !== undefined) process.env.INFU_ALLOW_PRIVATE_URL = oldEnv;

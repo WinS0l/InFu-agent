@@ -589,6 +589,9 @@ export function startBackgroundSubagent(spec: SubagentSpec, ctx: DelegationConte
         if (n <= 0) activeBySession.delete(sid);
         else activeBySession.set(sid, n);
       }
+      // v3.6 审计修复：移除父级 signal 上的中止传播监听器（原实现 once 注册后永不移除——
+      // 同一父任务内多次启动后台子 Agent 会累积监听器，长会话内存/事件面膨胀）
+      parentSignal?.removeEventListener("abort", onParentAbort);
       // v3.4 审计修复（M6）：剪掉最老已完成条目防注册表无限膨胀
       trimBackgroundAgents(ctx.sessionId);
     }

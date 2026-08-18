@@ -16,10 +16,17 @@ import { join, resolve } from "node:path";
 import type { InfuConfig, SkillMeta } from "@infu/shared";
 import { resolveDataDir } from "../data-dir.js";
 
-/** 插件自带技能目录（v2.7：loadPlugins 注册，listSkills/use_skill 统一读取；全局配置级，模块级即可） */
+/** 插件自带技能目录（v2.7：loadPlugins 注册，listSkills/use_skill 统一读取；模块级，
+ *  每次任务加载时重置为本次任务的插件技能目录）
+ *  v3.6：任务结束 clearPluginSkillDirs 清理——并行会话间技能目录串扰收敛
+ *  （后加载会话覆盖先加载会话的目录；单任务内一致，任务间不残留） */
 let pluginSkillDirs: string[] = [];
 export function registerPluginSkillDirs(dirs: string[]): void {
   pluginSkillDirs = dirs.filter((d) => typeof d === "string" && d);
+}
+/** v3.6：任务结束清理（server/cli/scheduler-runner finally 挂接，与 clearObservedFiles 同模式） */
+export function clearPluginSkillDirs(): void {
+  pluginSkillDirs = [];
 }
 
 export interface SkillFrontmatter {

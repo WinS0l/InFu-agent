@@ -11,6 +11,17 @@
 
 ## 高优先级（未完成前，每个阶段都要知道）
 
+### ✅ v3.6 全库审计修复批（2026-08-18，第三方独立审计 7.3/10 后逐项修复）
+- **① 安全（IPv6 变体绕过根治）**：新增 `@infu/shared/net.ts`（IPv6 完整解包 parseIpv6Groups + IPv4 简写归一化 normalizeV4 + 内嵌 IPv4 提取 ipv6EmbeddedV4 + 回环/私有判定）——`isPrivateIp`（web.ts SSRF）与 `isLoopbackTarget`（desktop 导航守卫）共用同一实现，修复 `::ffff:7f00:1` / `::7f00:1` / `0:0:0:0:0:0:0:1` 等变体绕过（此前全漏判放行，恶意网页可直达带 token 的 InFu 服务自我提权）；`browser-view:navigate` 与地址栏导航统一走 `sanitizeBrowserUrl`（原 navUrl 仅 scheme 检查且 loadURL 不触发 will-navigate 守卫）；`deleteAgentFile` 补名称正则（原 `../foo` 路径穿越删除）；附件 rawPaths 引用过滤受保护路径（防任意文件读取面）；sanitizeEnv 补 `_PWD`/PROXY 键名
+- **② 数据完整性**：`appendEvent` 改单语句 `INSERT...RETURNING` 原子分配 seq（原 MAX(seq)+1 分离查询并发主键冲突）；mcp/plugin register 的 `readConfig` 损坏时抛错拒绝注册（原返回空配置随后 saveConfig 冲掉用户全部模型/凭据）；memory replace 模式原子写；desktop-window.json 原子写
+- **③ 生命周期/可靠性**：runAgent finally 按委派深度清理后台子 Agent/job（子智能体/定时任务内部启动的后台任务不再孤儿残留）；scheduler-runner finally 补全清理；persistent-shell 输出 512KB 环形裁剪（原无上限刷屏 OOM）；fetchText 流式读取防 OOM（原 arrayBuffer 整体缓冲后查 1MB）；dockerAvailable 定时器 unref（CLI 退出不再被拖 60s）；subagent 父 signal 监听器 finally 移除；chat.ts sleep 监听器移除 + 死代码清理（createModel/throw lastError）
+- **④ 跨会话串扰**：todoStores 按「会话+root」键控 + clearTodos 会话结束清理；pluginSkillDirs 任务结束清理
+- **⑤ 测试基建**：9 套件数据目录全面重定向（approval-policy/approval-cache/web-tools/mcp/plugin/settings-api/providers-api/projects/win-sandbox-net——原备份/恢复真实 ~/.infu 崩溃即污染，approval-policy 曾把用户档位写成 full）；4 处恒真断言修复（projects 空名占位/subagent `||ro.length>0`/compress 查错下标/web-tools 成败皆过）；web-tools 修复 INFU_ALLOW_PRIVATE_URL 不恢复；memory.test IIFE 竞态改 await；**新增 net.test.ts（IPv6 变体矩阵 43 项）+ server-api.test.ts（bypass 路由顺序回归/会话删除联动清理/本地令牌 401）**，npm test 40→42 套件
+- **⑥ 前端**：finishTool 从后往前全消息匹配（原只匹配末条——并行/中间文本时工具行卡「运行中」）；审批/提问决策失败不再静默（重新入队 + addError）；TerminalPanel 自动建会话失败退避（原无限重试风暴）；routeSubagentEvent 不可变更新（按线程订阅组件正确重渲染）；CodeView 竞态守卫 + 失败提示；死代码清理（browserOpenTick 链/setUsage/fetchTemplates+templateId 链/discardWorktree/StateDot/DisclosureRow/createModel）
+- **⑦ 桌面/杂项**：powerSaveBlocker stopped/error 也解除（原用户中止后防休眠永不解除）；Rust token.rs 中间令牌句柄泄漏修复 + process.rs 管道 EOF 死锁修复（join → channel recv_timeout 30s + 读端强制关闭防 double-close）；README 全面同步（v3.5 状态/52 工具/桌面端/安全纵深）
+- **验证**：agent/web/desktop tsc 全过 + cargo check 通过；测试运行受本环境沙箱 EPERM 限制（tsx 依赖 esbuild 服务进程），逻辑经静态推演 + 变体矩阵逐例验证
+- **已知限制（记录不改）**：runRestricted 无 abort 通道（受限进程同步等待，Rust N-API 结构性改动风险高——用户停止后受限命令跑满 timeout，由 timeout 兜底）；browser_eval low 免审批（浏览器自动化设计权衡，保持）
+
 ### ✅ 沙箱中期升级：Windows restricted tokens + job objects（借鉴 OpenAI Codex）【M5 完成 2026-08-12】
 - **目标**：将 L1 软沙箱升级为硬沙箱——Agent 命令以受限令牌/作业对象运行，写不了系统目录、读不了敏感文件（OS 级强制，而非仅应用层检查）
 - **实现**：Rust N-API 原生模块 `packages/sandbox-rs/`（CreateRestrictedToken 四标志 + CreateProcessWithTokenW/AsUserW 回退 + Job Object 资源上限/杀整树），win32 自动启用，透明降级阶梯 full→reduced→basic→job-only

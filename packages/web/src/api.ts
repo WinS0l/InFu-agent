@@ -1,4 +1,4 @@
-import type { AgentEvent, RiskLevel, SessionMeta, StoredEvent, TaskTemplate } from "@infu/shared";
+import type { AgentEvent, RiskLevel, SessionMeta, StoredEvent } from "@infu/shared";
 import { useStore } from "./store";
 
 /**
@@ -452,13 +452,6 @@ export async function terminalKill(id: string) {
   await apiFetch(`/api/terminal/${encodeURIComponent(id)}`, { method: "DELETE" });
 }
 
-/** 模板任务列表（小白引导） */
-export async function fetchTemplates(): Promise<TaskTemplate[]> {
-  const res = await apiFetch("/api/templates");
-  if (!res.ok) throw new Error(`模板加载失败: ${res.status}`);
-  return res.json();
-}
-
 /** SSE 事件分发（v3.1：按连接会话路由——并行多会话时事件写各自缓存，不串扰） */
 function handleEvent(ev: AgentEvent, connSid: string | null) {
   const st = useStore.getState();
@@ -596,17 +589,6 @@ export async function mergeWorktree(root: string, name: string) {
   });
   const data = await res.json();
   if (!res.ok || data.ok === false) throw new Error(data.message || "合并失败");
-  return data;
-}
-
-export async function discardWorktree(root: string, name: string) {
-  const res = await apiFetch(`/api/worktree/${encodeURIComponent(name)}/discard`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ root }),
-  });
-  const data = await res.json();
-  if (!res.ok || data.ok === false) throw new Error(data.message || "丢弃失败");
   return data;
 }
 
@@ -804,8 +786,6 @@ export async function sendChat(
         modelId: st.modelId,
         // v2 思考级别（4 档，按模型实际级别数自动映射）
         thinkingLevel: st.thinkingLevel,
-        // v2.2 动态步数启发式参考（模板任务）
-        templateId: st.templateId ?? undefined,
         // v2.1：绑定目标会话（null = 服务端新建并回传 session 事件）
         sessionId: opts?.sessionId ?? st.activeSessionId ?? undefined,
         // v3.1 附件：元数据（kind/name/size）+ 文件内容（base64，服务端暂存 ~/.infu/attachments/）+ 图片（dataURL 视觉）

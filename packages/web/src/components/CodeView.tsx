@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { ChevronRight, FileText, Folder, FolderOpen, Loader2, Search } from "lucide-react";
 import hljs from "highlight.js";
 import { useStore } from "../store";
@@ -62,12 +62,15 @@ export default function CodeView() {
   const [sel, setSel] = useState<string | null>(null);
   const [content, setContent] = useState<{ content: string; binary?: boolean; size?: number; truncated?: boolean } | null>(null);
   const [loading, setLoading] = useState(false);
+  // v3.6：文件加载竞态守卫序号（快速连点文件时旧响应作废）
+  const fileSeqRef = useRef(0);
 
   useEffect(() => {
     setFiles(null);
     setSel(null);
     setContent(null);
     if (!root) return;
+    // v3.6：加载失败提示（原未处理 rejection——文件树失败静默）
     fetchFsTree(root).then((f) => {
       setFiles(f);
       // 默认展开含改动文件的顶层目录（其余折叠）
@@ -79,6 +82,9 @@ export default function CodeView() {
         }
       }
       setCollapsed(Object.fromEntries([...changed].map((k) => [k, false])));
+    }).catch((e) => {
+      setFiles([]);
+      setContent({ content: `文件树加载失败：${(e as Error).message}` });
     });
   }, [root]);
 
@@ -120,9 +126,18 @@ export default function CodeView() {
   const pickFile = async (path: string) => {
     setSel(path);
     setLoading(true);
-    const d = await fetchFsFile(root, path);
-    setContent(d);
-    setLoading(false);
+    // v3.6 审计修复：竞态守卫 + 失败提示——快速连点文件时旧响应不得覆盖新选中
+    // （对齐 ReviewPane 的 diffSeq 守卫）；加载失败不再卡死「加载中…」
+    const req = ++fileSeqRef.current;
+    try {
+      const d = await fetchFsFile(root, path);
+      if (req !== fileSeqRef.current) return; // 过期响应丢弃
+      setContent(d);
+    } catch (e) {
+      if (req === fileSeqRef.current) setContent({ content: `加载失败：${(e as Error).message}` });
+    } finally {
+      if (req === fileSeqRef.current) setLoading(false);
+    }
   };
 
   return (

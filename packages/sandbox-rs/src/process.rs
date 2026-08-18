@@ -338,16 +338,24 @@ pub fn run_restricted_process(
     outcome.job_assigned = crate::job::assign(job.handle, pi.hProcess);
     unsafe { ResumeThread(pi.hThread) };
 
-    // 读线程（管道写满前开始读，防死锁）
-    let out_buf: Vec<u8> = Vec::new();
-    let err_buf: Vec<u8> = Vec::new();
-    let t_out = std::thread::spawn({
+    // 读线程（管道写满前开始读，防死锁）；结果经 channel 回传（v3.6：不用 join——
+    // 子进程 spawn 出继承管道写句柄的后台进程（如 `start /b`）时读线程永不 EOF，
+    // 裸 join 永久阻塞 → N-API promise 永不 resolve（spawn_blocking 线程泄漏））
+    let (tx_out, rx_out) = std::sync::mpsc::channel::<Vec<u8>>();
+    let (tx_err, rx_err) = std::sync::mpsc::channel::<Vec<u8>>();
+    let _t_out = std::thread::spawn({
         let h = ReadHandle(out_pipe.read);
-        move || read_pipe(h, out_buf)
+        move || {
+            let buf = read_pipe(h, Vec::new());
+            let _ = tx_out.send(buf);
+        }
     });
-    let t_err = std::thread::spawn({
+    let _t_err = std::thread::spawn({
         let h = ReadHandle(err_pipe.read);
-        move || read_pipe(h, err_buf)
+        move || {
+            let buf = read_pipe(h, Vec::new());
+            let _ = tx_err.send(buf);
+        }
     });
 
     // 等待完成 / 超时杀整树
@@ -367,13 +375,26 @@ pub fn run_restricted_process(
         }
     }
 
-    // 关闭写端 → 读线程 EOF → 汇合
+    // 关闭写端 → 读线程 EOF
     unsafe {
         CloseHandle(out_pipe.write);
         CloseHandle(err_pipe.write);
     }
-    let out_buf = t_out.join().unwrap_or_default();
-    let err_buf = t_err.join().unwrap_or_default();
+    // v3.6：汇合带超时——读线程未在 30s 内结束（后台进程继承管道写句柄）→ 强制关闭
+    // 读端中断阻塞中的 ReadFile 并放弃该通道结果（防 N-API 调用永久挂起；线程本身随
+    // 管道关闭/进程退出自然结束，不阻塞调用方）。返回是否已关闭读端（收尾防 double-close）
+    let recv_bounded = |rx: std::sync::mpsc::Receiver<Vec<u8>>, read_h: HANDLE| -> (Vec<u8>, bool) {
+        match rx.recv_timeout(std::time::Duration::from_secs(30)) {
+            Ok(b) => (b, false),
+            Err(_) => {
+                unsafe { CloseHandle(read_h) }; // 中断阻塞中的 ReadFile
+                (Vec::new(), true)
+            }
+        }
+    };
+    let (out_buf, out_closed) = recv_bounded(rx_out, out_pipe.read);
+    let (err_buf, err_closed) = recv_bounded(rx_err, err_pipe.read);
+    // 读线程句柄已随 recv_bounded 的 CloseHandle / 正常 EOF 释放；线程本身 detached
 
     outcome.stdout = decode_output(&out_buf);
     outcome.stderr = decode_output(&err_buf);
@@ -382,8 +403,8 @@ pub fn run_restricted_process(
     unsafe {
         CloseHandle(pi.hProcess);
         CloseHandle(pi.hThread);
-        CloseHandle(out_pipe.read);
-        CloseHandle(err_pipe.read);
+        if !out_closed { CloseHandle(out_pipe.read); }
+        if !err_closed { CloseHandle(err_pipe.read); }
         CloseHandle(nul_stdin);
     }
     delete_file(&cmd_file);

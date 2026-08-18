@@ -169,8 +169,12 @@ export function listAgents(root: string): AgentFileDef[] {
   return [...out.values()].sort((a, b) => a.name.localeCompare(b.name));
 }
 
-/** 删除用户级/项目级 agent 文件（内置不可删）；返回是否删除成功 */
+/** 删除用户级/项目级 agent 文件（内置不可删）；返回是否删除成功
+ *  v3.6 审计修复：删除路径补名称校验（与 writeAgentFile 同款正则）——
+ *  原实现无校验，`name="../foo"` → join(dir, "../foo.md") 可越出 agents 目录
+ *  删除任意 .md 文件（DELETE /api/agents/:name 直达） */
 export function deleteAgentFile(name: string, root: string, level: "user" | "project"): boolean {
+  if (!/^[a-z0-9][a-z0-9-]{0,63}$/i.test(name)) return false;
   if (BUILTIN_AGENTS.some((a) => a.name === name)) return false;
   const dir = level === "user" ? join(resolveDataDir(), "agents") : join(root, ".infu", "agents");
   const p = join(dir, `${name}.md`);

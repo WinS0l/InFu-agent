@@ -16,6 +16,10 @@ interface ShellSession {
 
 const sessions = new Map<string, ShellSession>();
 
+/** v3.6 审计修复：单次调用输出上限（环形裁剪）——原 out += text 无上限，
+ *  刷屏命令（type 大文件 / for 循环输出）在超时前可吃满内存（对比 jobs.ts 的 512KB） */
+const SHELL_OUTPUT_LIMIT = 512 * 1024;
+
 function shellCmd(): { file: string; args: string[] } {
   return process.platform === "win32"
     ? { file: "cmd.exe", args: ["/Q"] }
@@ -74,7 +78,8 @@ export function execPersistent(sessionId: string, root: string, command: string,
 
     const onData = (chunk: Buffer) => {
       const text = chunk.toString("utf-8");
-      out += text;
+      // v3.6：环形裁剪（marker 恒在输出尾部——命令执行后 echo，裁剪保留尾部不受影响）
+      out = (out + text).slice(-SHELL_OUTPUT_LIMIT);
       if (out.includes(marker)) {
         // 去掉标记行与尾部提示符残留
         const idx = out.lastIndexOf(marker);

@@ -11,6 +11,13 @@ import { getStore } from "./db/store.js";
 import { closeShellSession } from "./tools/persistent-shell.js";
 import { clearObservedFiles } from "./tools/index.js";
 import { clearApprovalMemory, clearSessionBypass } from "./approval/cache.js";
+// v3.6：定时任务结束清理 todo 清单 / 插件技能目录（与 server/cli finally 对齐）
+import { clearTodos } from "./tools/task-tools.js";
+import { clearPluginSkillDirs } from "./plugin/skills.js";
+// v3.6 审计修复：定时任务结束清理本会话后台子 Agent/job（此前缺失——
+// 定时任务启动的后台任务永久残留至进程退出，持续消耗模型配额）
+import { abortBackgroundAgentsByDepth } from "./agent/subagent.js";
+import { abortJobsByDepth } from "./tools/jobs.js";
 import type { ScheduleEntry } from "./schedule.js";
 
 /** 无人值守审批：等价 CLI -y（low/medium 批准；requireExplicit 拒绝） */
@@ -59,5 +66,12 @@ export async function runScheduledTask(entry: ScheduleEntry): Promise<{ ok: bool
     try { clearObservedFiles(sessionId); } catch { /* 忽略 */ }
     try { clearApprovalMemory(sessionId); } catch { /* 忽略 */ }
     try { clearSessionBypass(sessionId); } catch { /* 忽略 */ }
+    // v3.6：todo 清单 / 插件技能目录清理（防多轮定时执行累积）
+    try { clearTodos(sessionId); } catch { /* 忽略 */ }
+    try { clearPluginSkillDirs(); } catch { /* 忽略 */ }
+    // v3.6 审计修复：定时任务结束中止会话内全部后台子 Agent/job（runAgent finally
+    // 只清本层深度；此处 depth<0 清全部——定时任务启动的后台任务不再残留孤儿进程）
+    try { abortBackgroundAgentsByDepth(sessionId, -1); } catch { /* 忽略 */ }
+    try { abortJobsByDepth(sessionId, -1); } catch { /* 忽略 */ }
   }
 }

@@ -6,10 +6,11 @@ import {
   approvalMemoryKey, approvalRemembered, approvalRemember,
   clearApprovalMemory, resetApprovalMemory, setSessionBypass, isSessionBypassed, clearSessionBypass,
 } from "../src/approval/cache.js";
-import { configPath, saveConfig } from "../src/providers/registry.js";
-import { existsSync, copyFileSync, rmSync } from "node:fs";
-import { homedir } from "node:os";
+import { saveConfig } from "../src/providers/registry.js";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { setDataDirForTest } from "../src/data-dir.js";
 import type { ToolContext, RiskLevel } from "@infu/shared";
 
 const SID = "test-session";
@@ -23,12 +24,11 @@ console.log("=== v3.1 审批记忆（approval/cache.ts）===");
 resetApprovalMemory();
 
 // v3.5 审计修复：guard 读当前 config 档位——此前测试隐式依赖用户真实配置
-// （用户设置 confirm 档时「low 在 smart 档自动放行」断言就挂）；改为文件级
-// 固定 smart 档（备份/恢复），guard 行为确定可测
-const CONFIG_FILE = configPath();
-const CONFIG_HAD = existsSync(CONFIG_FILE);
-const CONFIG_BACKUP = join(homedir(), ".infu", "config.json.approval-cache-test-backup");
-if (CONFIG_HAD) copyFileSync(CONFIG_FILE, CONFIG_BACKUP);
+// （用户设置 confirm 档时「low 在 smart 档自动放行」断言就挂）；固定 smart 档后
+// guard 行为确定可测。
+// v3.6：数据目录重定向到临时目录（原备份/恢复真实 ~/.infu/config.json 崩溃即污染用户数据）
+const tmpData = mkdtempSync(join(tmpdir(), "infu-test-"));
+setDataDirForTest(tmpData);
 saveConfig({ models: [], approvalPolicy: { mode: "smart" } });
 
 // ── 键生成 ──
@@ -151,13 +151,8 @@ ok("清理后不命中", !approvalRemembered(SID, k));
   clearSessionBypass(SID);
 }
 
-// 恢复用户真实配置（v3.5 审计修复：文件级固定 smart 档的配套还原）
-if (CONFIG_HAD) {
-  copyFileSync(CONFIG_BACKUP, CONFIG_FILE);
-  rmSync(CONFIG_BACKUP, { force: true });
-} else {
-  rmSync(CONFIG_FILE, { force: true });
-}
+// 清理临时数据目录（v3.6：只删测试自己的临时目录，绝不动用户 ~/.infu）
+try { rmSync(tmpData, { recursive: true, force: true }); } catch { /* 忽略 */ }
 
 console.log(`\n=== 结果：${pass} 通过 / ${fail} 失败 ===`);
 if (fail > 0) process.exit(1);

@@ -168,16 +168,24 @@ export class SessionStore {
     return row ? rowToMeta(row) : null;
   }
 
-  /** 追加事件（返回 seq），同步更新 updated_at */
+  /**
+   * 追加事件（返回 seq），同步更新 updated_at。
+   * v3.6 审计修复：原实现「SELECT MAX(seq)+1」与 INSERT 分离——多进程（server + CLI
+   * 同会话）在 WAL 下并发时两个进程可算出相同 next → PRIMARY KEY(session_id, seq)
+   * 冲突抛 SQLITE_CONSTRAINT；改 INSERT ... SELECT + RETURNING **单语句原子分配 seq**
+   * （SQLite 语句级原子性，并发安全），并直接返回实际插入的 seq。
+   */
   appendEvent(sessionId: string, event: AgentEvent): number {
-    const seqRow = this.db
-      .prepare(`SELECT COALESCE(MAX(seq), -1) + 1 AS next FROM events WHERE session_id = ?`)
-      .get(sessionId) as { next: number };
-    this.db
-      .prepare(`INSERT INTO events (session_id, seq, ts, event_json) VALUES (?, ?, ?, ?)`)
-      .run(sessionId, seqRow.next, Date.now(), JSON.stringify(event));
-    this.db.prepare(`UPDATE sessions SET updated_at = ? WHERE id = ?`).run(Date.now(), sessionId);
-    return seqRow.next;
+    const now = Date.now();
+    const row = this.db
+      .prepare(
+        `INSERT INTO events (session_id, seq, ts, event_json)
+         SELECT ?, COALESCE(MAX(seq), -1) + 1, ?, ? FROM events WHERE session_id = ?
+         RETURNING seq`
+      )
+      .get(sessionId, now, JSON.stringify(event), sessionId) as { seq: number } | undefined;
+    this.db.prepare(`UPDATE sessions SET updated_at = ? WHERE id = ?`).run(now, sessionId);
+    return row ? Number(row.seq) : 0;
   }
 
   /** 会话全量事件（seq 升序） */

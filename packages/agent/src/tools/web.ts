@@ -22,6 +22,7 @@
  */
 import { z } from "zod";
 import type { ToolDef } from "@infu/shared";
+import { isPrivateHostText } from "@infu/shared";
 import { guard, clip } from "./util.js";
 import { lookup } from "node:dns/promises";
 
@@ -32,81 +33,22 @@ const BROWSER_UA =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
 
 /**
- * v3.1 审计修复：IPv4 简写归一化——`127.1`（=127.0.0.1）、`2130706433`（32 位十进制）、
- * `0x7f000001`（十六进制）、`127.0.1` 等系统解析器可解析的形式，原 isPrivateTarget 的
- * `/^[\d.]+$/` 分支把它们当 IP 直传 isPrivateIp → 段数 ≠4 走 IPv6 分支 → 判为公网放行。
- * 规则（RFC 相关简写）：单段 = 32 位、两段 = 8+24、三段 = 8+8+16、四段 = 8×4。
+ * v3.6 审计修复：IPv4 简写归一化 / IPv6 解包判定已下沉到 @infu/shared（net.ts）
+ * ——桌面端导航守卫与 agent SSRF 共用同一实现，且由 agent 测试套件统一覆盖。
+ * 本文件不再持有本地实现，isPrivateTarget 直接复用 isPrivateHostText：
+ *  - IPv4 简写（127.1 / 2130706433 / 0x7f000001 / 127.0.1）→ normalizeV4 归一化
+ *  - IPv6 十六进制 IPv4-mapped（::ffff:7f00:1）、IPv4-compatible（::7f00:1）、
+ *    完整形式回环（0:0:0:0:0:0:0:1）→ parseIpv6Groups 完整解包后判定
+ *  - 前导零八进制 / hex 段（0177.0.0.1 / 0x7f.0.0.1）→ fail-closed 拦截
  */
-export function normalizeV4Shorthand(host: string): number[] | null {
-  const parts = host.split(".");
-  if (parts.length > 4) return null;
-  const vals: number[] = [];
-  for (const p of parts) {
-    if (!/^\d{1,10}$/.test(p)) return null;
-    // v3.4 审计修复（M8）：前导零八进制变体 fail-closed——`0177.0.0.1` 的 parseInt 按
-    // 十进制解析为 177（判公网放行），而系统 inet_addr 按**八进制**解析为 127.0.0.1
-    // → webfetch 打到本机（本机服务/云元数据 SSRF）。前导零（长度>1）一律保守拦截。
-    if (p.length > 1 && p.startsWith("0")) return null;
-    const n = Number(p);
-    if (!Number.isSafeInteger(n) || n < 0) return null;
-    vals.push(n);
-  }
-  if (vals.length === 1) {
-    const n = vals[0];
-    if (n > 0xffffffff) return null;
-    return [(n >>> 24) & 0xff, (n >>> 16) & 0xff, (n >>> 8) & 0xff, n & 0xff];
-  }
-  if (vals.length === 2) {
-    const [a, b] = vals;
-    if (a > 255 || b > 0xffffff) return null;
-    return [a, (b >>> 16) & 0xff, (b >>> 8) & 0xff, b & 0xff];
-  }
-  if (vals.length === 3) {
-    const [a, b, c] = vals;
-    if (a > 255 || b > 255 || c > 0xffff) return null;
-    return [a, b, (c >>> 8) & 0xff, c & 0xff];
-  }
-  const [a, b, c, d] = vals;
-  if (a > 255 || b > 255 || c > 255 || d > 255) return null;
-  return [a, b, c, d];
-}
 
 /** 由 4 段归一化数值判断是否私有（含 0.x / 回环 / 10/8 / 172.16/12 / 192.168/16 / 链路本地 / CGNAT / 组播保留） */
-function isPrivateV4Parts(parts: number[]): boolean {
-  const [a, b] = parts;
-  if (a === 0 || a === 127 || a === 10) return true;
-  if (a === 172 && b >= 16 && b <= 31) return true;
-  if (a === 192 && b === 168) return true;
-  if (a === 169 && b === 254) return true;
-  if (a === 100 && b >= 64 && b <= 127) return true;
-  if (a >= 224) return true;
-  return false;
-}
 
-/** v2.13：SSRF 防护——IP 是否私有/内网（回环/私网/链路本地/CGNAT/组播/文档段） */
-function isPrivateIp(ip: string): boolean {
-  const raw = ip.trim();
-  // IPv6 规范化去括号
-  const norm = raw.startsWith("[") && raw.endsWith("]") ? raw.slice(1, -1) : raw;
-  // IPv4-mapped（::ffff:127.0.0.1 等）与 IPv4-compatible（::127.0.0.1）——提取尾部 v4 段复查
-  const mapped = /^::(?:ffff:)?(\d+\.\d+\.\d+\.\d+)$/i.exec(norm);
-  if (mapped) {
-    const parts = mapped[1].split(".").map(Number);
-    return isPrivateV4Parts(parts);
-  }
-  if (!norm.includes(":")) {
-    // IPv4：支持简写归一化（127.1 / 2130706433 / 0x7f000001 等）
-    const parts = normalizeV4Shorthand(norm);
-    if (parts) return isPrivateV4Parts(parts);
-    // 非纯数字（含十六进制段 0x7f.0.0.1 / 八进制 0177.0.0.1）→ 保守拦截（fail-closed）
-    if (/^[0-9a-fx.]+$/i.test(norm) && /\./.test(norm)) return true;
-    return false;
-  }
-  // IPv6：未指定/回环 ::1/链路本地 fe80::/10/ULA fc00::/7/组播 ff00::/8
-  return /^::$/.test(norm) || /^::1$/.test(norm) || /^fe80:/i.test(norm) || /^f[cd][0-9a-f]{2}:/i.test(norm) || /^ff[0-9a-f]{2}:/i.test(norm);
-}
-
-/** v2.13：URL 目标是否可访问（SSRF 防护——webfetch 为 low 自动放行，内网探测必须拦截；导出供测试） */
+/**
+ * v2.13：URL 目标是否可访问（SSRF 防护——webfetch 为 low 自动放行，内网探测必须拦截；导出供测试）
+ * v3.6：内部判定改用 @infu/shared isPrivateHostText（IPv4 简写归一化 + IPv6 完整解包，
+ *       修复 ::ffff:7f00:1 / ::7f00:1 / 0:0:0:0:0:0:0:1 等变体绕过）；域名仍逐 IP 复查。
+ */
 export async function isPrivateTarget(url: string): Promise<{ ok: boolean; reason: string }> {
   // 测试专用豁免（本地 HTTP mock 场景；默认不设）
   if (process.env.INFU_ALLOW_PRIVATE_URL === "1") return { ok: true, reason: "" };
@@ -117,21 +59,22 @@ export async function isPrivateTarget(url: string): Promise<{ ok: boolean; reaso
     return { ok: false, reason: "URL 无效" };
   }
   if (u.protocol !== "http:" && u.protocol !== "https:") return { ok: false, reason: "仅支持 http/https URL" };
-  // v3.1 审计修复：hostname 去 IPv6 括号；IPv4 简写（127.1/2130706433 等）本地归一化直接判定，
-  // 不再依赖系统解析器（各平台 getaddrinfo 对简写支持不一致，且直传 isPrivateIp 曾漏检）
   const host = u.hostname;
   const bare = host.startsWith("[") && host.endsWith("]") ? host.slice(1, -1) : host;
+  // 本机判定（IPv4 简写 / IPv6 解包 / hex-octal fail-closed）——不依赖系统解析器，
+  // 避免「简写形式 getaddrinfo 行为不一致」与「lookup 直传 IP 字面量绕过」两类漏检
+  const direct = isPrivateHostText(bare);
+  if (direct) {
+    if (direct.private) return { ok: false, reason: `拒绝访问内网/本机地址（SSRF 防护）：${host}` };
+    return { ok: true, reason: "" };
+  }
+  // 域名：解析全部地址逐 IP 复查
   try {
-    let ips: string[];
-    if (!bare.includes(":") && normalizeV4Shorthand(bare)) {
-      ips = [bare];
-    } else {
-      // lookup 需 { all: true } 才返回地址数组（否则单对象）
-      ips = /^[\d.]+$/.test(bare) ? [bare] : (await lookup(bare, { all: true })).map((r) => r.address);
-    }
+    const ips = (await lookup(bare, { all: true })).map((r) => r.address);
     if (!ips.length) return { ok: false, reason: `无法解析主机名 ${host}` };
     for (const ip of ips) {
-      if (isPrivateIp(ip)) return { ok: false, reason: `拒绝访问内网/本机地址（SSRF 防护）：${host}` };
+      const p = isPrivateHostText(ip);
+      if (p?.private) return { ok: false, reason: `拒绝访问内网/本机地址（SSRF 防护）：${host}` };
     }
     return { ok: true, reason: "" };
   } catch {
@@ -217,8 +160,23 @@ export async function fetchText(
         continue;
       }
       if (!resp.ok) return { ok: false, text: "", error: `HTTP ${resp.status} ${resp.statusText}` };
-      const buf = await resp.arrayBuffer();
-      if (buf.byteLength > MAX_BODY) return { ok: false, text: "", error: `响应过大（>${MAX_BODY >> 10}KB），已放弃抓取` };
+      if (!resp.body) return { ok: false, text: "", error: "响应无内容" };
+      // v3.6 审计修复：流式读取防 OOM——原 arrayBuffer() 先整体缓冲再检查 1MB，
+      // 异常大响应（如 10GB）直接撑爆内存；改为边读边累计，超限立即中止
+      const reader = resp.body.getReader();
+      const chunks: Uint8Array[] = [];
+      let size = 0;
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        size += value.byteLength;
+        if (size > MAX_BODY) {
+          await reader.cancel().catch(() => {});
+          return { ok: false, text: "", error: `响应过大（>${MAX_BODY >> 10}KB），已放弃抓取` };
+        }
+        chunks.push(value);
+      }
+      const buf = Buffer.concat(chunks.map((c) => Buffer.from(c)));
       // 编码探测：Content-Type header 优先，其次 HTML <meta charset>；非 UTF-8 按声明解码（GBK 中文页）
       const ct = resp.headers.get("content-type") ?? "";
       let charset = /charset=([\w-]+)/i.exec(ct)?.[1] ?? null;

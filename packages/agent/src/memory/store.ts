@@ -14,7 +14,6 @@
 import fs from "node:fs";
 import path from "node:path";
 import { resolveDataDir } from "../data-dir.js";
-
 export type MemoryScope = "project" | "global";
 
 /** 主题名白名单（防路径穿越与非法字符；同时约束长度） */
@@ -175,7 +174,11 @@ export function writeMemory(
   const p = path.join(dir, `${topic.trim()}.md`);
   try {
     if (mode === "replace" || !fs.existsSync(p)) {
-      fs.writeFileSync(p, content.trim() + "\n", "utf-8");
+      // v3.6 审计修复：replace/新建改原子写（tmp + rename）——与 projects/config 同款，
+      // 防并发写截断半写内容（长会话并行沉淀/多进程写入同一记忆文件）
+      const tmp = `${p}.tmp-${process.pid}`;
+      fs.writeFileSync(tmp, content.trim() + "\n", "utf-8");
+      fs.renameSync(tmp, p);
     } else {
       const now = new Date();
       const stamp = `${now.toISOString().slice(0, 10)} ${now.toTimeString().slice(0, 5)}`;

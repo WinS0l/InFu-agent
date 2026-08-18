@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
-import { Check, ChevronRight, Copy, X } from "lucide-react";
+import { Check, Copy, X } from "lucide-react";
 
 /* ═══ v3 UI 打磨：共享原语（对齐 deepseek-主流 的 Button/Modal/Toggle/StateDot/DisclosureRow/CodeBlock）═══ */
 
@@ -184,69 +184,8 @@ export function Toggle({
   );
 }
 
-/** 状态点（主流：实心核 + 0.1 透明度光晕；ongoing 可脉冲） */
-const DOT_STYLE: Record<string, string> = {
-  success: "bg-success",
-  error: "bg-danger",
-  warn: "bg-warn",
-  ongoing: "bg-ongoing",
-  stop: "bg-sub",
-};
-export function StateDot({ status, pulse }: { status: keyof typeof DOT_STYLE; pulse?: boolean }) {
-  return (
-    <span className="relative flex h-4 w-4 shrink-0 items-center justify-center">
-      <span className={`absolute inset-0 rounded-full opacity-10 ${DOT_STYLE[status] ?? DOT_STYLE.stop}`} />
-      <span className={`h-2 w-2 rounded-full ${DOT_STYLE[status] ?? DOT_STYLE.stop} ${pulse ? "animate-pulse" : ""}`} />
-    </span>
-  );
-}
-
-/**
- * 折叠行（主流 DisclosureRow）：24px 高——图标 + 标题 + 2×2 点分隔 + 省略摘要 + 展开箭头。
- * 运行中自动扫光（glare-sweep）；展开内容按 22px 缩进。思考/工具/上下文行共用。
- */
-export function DisclosureRow({
-  icon,
-  title,
-  summary,
-  running,
-  open,
-  onToggle,
-  children,
-  indent = 0,
-}: {
-  icon?: ReactNode;
-  title: string;
-  summary?: string;
-  running?: boolean;
-  open: boolean;
-  onToggle: () => void;
-  children?: ReactNode;
-  indent?: number;
-}) {
-  return (
-    <div className={running ? "glare-sweep rounded-md" : ""}>
-      <button
-        className="flex h-6 w-full cursor-pointer items-center gap-1.5 rounded-md text-left transition-colors hover:bg-hover"
-        style={{ paddingLeft: indent * 22, paddingRight: 4 }}
-        onClick={onToggle}
-      >
-        <ChevronRight
-          className={`h-3.5 w-3.5 shrink-0 text-sub transition-transform ${open ? "rotate-90" : ""}`}
-        />
-        {icon && <span className="flex h-4 w-4 shrink-0 items-center justify-center text-sub">{icon}</span>}
-        <span className="shrink-0 text-sm font-medium leading-6 text-text">{title}</span>
-        {summary && (
-          <>
-            <span className="dot-sep mx-0.5 shrink-0" />
-            <span className="min-w-0 flex-1 truncate text-sm leading-6 text-sub">{summary}</span>
-          </>
-        )}
-      </button>
-      {open && <div className="ml-[22px]">{children}</div>}
-    </div>
-  );
-}
+/** v3.6：StateDot / DisclosureRow 已删除（v3.3 起零调用死代码——事件行渲染改由
+ *  ChatPanel 内部实现，共享原语只保留 Button/Modal/Toggle/CodeBlock） */
 
 /** 代码/输出卡片（主流 CodeBlock：r12 无边框 + 粘性标签头 + 等宽滚动体） */export function CodeBlock({
   label,

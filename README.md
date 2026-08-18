@@ -2,33 +2,35 @@
 
 软件工程智能体平台 — 让 AI 从"代码补全工具"升级为能理解项目、规划任务并执行工程工作的开发伙伴。
 
-> 状态：M1 开发中（Agent 核心已可用，Web UI 开发中）
-> 相关文档：[技术选型方案](docs/TECHNICAL-SELECTION.md)
+> 状态：v3.5（Agent 核心 + Web UI + Windows 桌面端 + 嵌入式浏览器均可用；40 套测试套件全绿）
+> 相关文档：[技术选型方案](docs/TECHNICAL-SELECTION.md)、[路线图](docs/ROADMAP.md)
 
-## 核心能力（一期 MVP）
+## 核心能力
 
-- **AI 对话中心**：自然语言任务输入，流式输出
-- **项目分析**：`project_scan` 自动识别技术栈（Node/Python/Go/Rust/Java…）与项目结构
-- **文件修改引擎**：读/写/精确编辑（带路径越界防护与审批钩子）
-- **Terminal 执行**：shell 命令运行（高风险命令强制审批）
-- **测试运行**：自动检测测试框架（npm test / pytest / go test / cargo test）
-- **Diff 查看**：Git 工作区/暂存区 diff
-- **Git 工作流**：status / diff
-- **分层编排（M4 + v2.3）**：Planner（只读规划 + **计划确认三态**：用户自由回复 → AI 判断 执行/修订/中止，如"先不做"立即停止）→ Executor（执行）→ Reviewer（只读审查），Web 顶栏/CLI 可一键关闭回退单 Agent；**回滚按钮在用户消息上**（撤销该条指令及其后的内容，微信撤回式）
-- **模板任务引导（M4）**：一键初始化项目 / 修复测试失败 / 分析项目 / 添加功能（Web 空态欢迎面板 + CLI `--template`）
-- **任意大模型接入**：OpenAI / Anthropic / Google / DeepSeek / 智谱 GLM / 通义千问 / Ollama / 任意 OpenAI 兼容网关
+- **AI 对话中心**：自然语言任务输入，流式输出（思考过程/工具调用/审批请求实时可见）
+- **52 个内置工具**：文件读写（read-before-edit 三层门禁）、shell 命令（沙箱分派）、Git、测试、搜索、语义检索、LSP 诊断、记忆、子智能体委派（并行/后台）、异步任务编排、计算机操作（桌面截图/点击/输入）等
+- **任意大模型接入**：DeepSeek / OpenAI / Anthropic / Google / 智谱 GLM / 通义千问 / Ollama / 任意 OpenAI 兼容网关；备用模型降级链 + 上下文自动压缩
+- **分层编排（可关）**：Planner（只读规划 + 计划确认三态）→ Executor → Reviewer（只读审查）
+- **Windows 桌面端（Electron）**：嵌入式真浏览器（Agent 可驱动网页操作）、computer-use 桌面控制、系统通知/托盘、开机自启（可选）
+- **会话持久化**：SQLite 全量事件流 + 消息级重建续跑 + 回滚 + 自动归档；使用统计（活跃热力图/Token 趋势）
+- **扩展生态**：MCP 服务器、JS 插件（工具/钩子/技能）、SKILL.md 技能、定时任务、模板任务引导
+- **安全纵深**：审批档位（auto/smart/confirm/full）+ 沙箱分级（软/L1.5 受限令牌/Docker）+ 断网默认 + SSRF 防护 + 本地令牌鉴权
 
 ## 项目结构
 
 ```
 packages/
-├── shared/   # 共享类型（ModelConfig / AgentEvent / ToolDef…）
-└── agent/    # Agent 服务层
-    ├── src/providers/  # 模型接入 Registry（任意模型）
-    ├── src/tools/      # 10 个基础工具
-    ├── src/agent/      # Agent 循环（工具调用 + 审批）
-    ├── src/server.ts   # Hono HTTP + SSE 服务
-    └── src/cli.ts      # 命令行入口
+├── shared/      # 共享类型 + 网络地址判定工具（ModelConfig / AgentEvent / ToolDef…）
+├── agent/       # Agent 服务层
+│   ├── src/providers/  # 模型配置注册表 + OpenAI 兼容流式客户端
+│   ├── src/tools/      # 52 个工具（文件/Git/命令/网络/记忆/子智能体/computer-use）
+│   ├── src/agent/      # Agent 循环（工具调用 + 审批 + 上下文压缩）+ 分层编排
+│   ├── src/sandbox/    # 沙箱（软/L1.5 受限令牌/Docker/断网策略）
+│   ├── src/server.ts   # Hono HTTP + SSE 服务（本地令牌鉴权）
+│   └── src/cli.ts      # 命令行入口
+├── web/         # React 19 + Vite 前端（对话/审批/设置/统计/终端）
+├── desktop/     # Electron 桌面壳（宿主后端 + 嵌入式真浏览器 + CDP 桥）
+└── sandbox-rs/  # Rust N-API 原生模块（Windows 受限令牌 + Job Object 硬沙箱）
 ```
 
 ## 快速开始
@@ -39,6 +41,14 @@ packages/
 1. 首次运行自动安装依赖
 2. 自动打开**交互式配置向导**（选择模型供应商 → 填入 API Key）
 3. 启动 Agent 服务
+
+### 桌面端（Electron，嵌入式真浏览器 + computer-use）
+
+```bash
+npm run dev:desktop -w @infu/web   # 开发：前端 vite 专用端口 5199
+npm run start -w @infu/desktop     # 启动桌面应用（开发模式）
+npm run pack -w @infu/desktop      # 打包 NSIS 安装程序（详见 docs/DESKTOP.md）
+```
 
 ### 命令行方式
 
@@ -129,13 +139,17 @@ npm run start -w @infu/agent
 
 ## 安全设计
 
-- **路径越界防护**：所有文件操作限制在项目根目录内
-- **审批钩子**：写文件/编辑/执行命令前请求用户确认（Web UI 挂接；CLI 可用 `-y` 自动批准），支持队列化处理
-- **高风险命令检测**：`rm -rf` / `format` 等强制审批
-- **沙箱（L1 软沙箱，默认）**：环境变量消毒（API Key 不进命令环境）、敏感路径写保护（~/.ssh、~/.infu 等）、命令审计（~/.infu/logs/commands.log）
-- **沙箱（L1.5 Windows 硬沙箱）**：Windows 下命令以受限令牌 + Job Object 执行（Rust 原生，借鉴 OpenAI Codex）——写系统目录/提权被 OS 级拒绝、资源上限、超时杀进程树；透明降级（full→reduced→basic→仅Job），`INFU_SANDBOX_RESTRICTED=0` 禁用
-- **沙箱（L2 Docker）**：检测到 Docker 自动启用——默认断网、项目只读挂载、资源限制（2g/2c/256pids）、非 root、任务后销毁、凭据不进容器；`INFU_SANDBOX=soft|docker|off` 可切换
-- **交付报告**：任务结束自动生成结构化报告（改动清单/测试结果/命令执行/失败项/风险提示）
+- **审批档位**：auto（低中自动）/ smart（低自动，默认）/ confirm（全人工）/ full（完全信任，红线也放行）——工具级覆盖 + 命令白名单 + 会话级「已批准记忆」
+- **路径越界防护**：所有文件操作限制在项目根目录内（词法 + realpath 双检防符号链接逃逸）；敏感路径写保护（~/.ssh、~/.infu、~/.aws 等）
+- **read-before-edit**：写文件/编辑前必须已读取（未读/截断视图/文件被外部修改均拒绝），写后刷新指纹
+- **高风险命令检测**：`rm -rf` / `Remove-Item` / `format` / `dd if=` 等多分支变体强制 requireExplicit 审批；命令白名单命中仍过组合符与高危双检
+- **沙箱（L1 软沙箱，默认）**：环境变量消毒（API Key 不进命令环境）、敏感路径写保护、命令审计（~/.infu/logs/commands.log，5MB×3 轮转）
+- **沙箱（L1.5 Windows 硬沙箱）**：Windows 下命令以受限令牌 + Job Object 执行（Rust 原生，借鉴 OpenAI Codex）——写系统目录/提权被 OS 级拒绝、资源上限、超时杀进程树
+- **沙箱（L2 Docker）**：检测到 Docker 自动启用——默认断网、项目只读挂载、资源限制、非 root、任务后销毁、凭据不进容器
+- **断网默认**：命令/工具默认断网执行，外传命令（curl/wget/ssh/python 网络调用等）需 `network=true` 人工审批
+- **SSRF 防护**：webfetch 拒绝内网/回环/云元数据（IPv4 简写与 IPv6 变体完整归一化），重定向逐跳复查
+- **本地令牌鉴权**：托管前端时随机 token 注入 index.html，`/api/*` 校验 X-InFu-Token；CORS + Origin/Host 白名单防 CSRF/DNS rebinding
+- **凭据保护**：Key 只存 `~/.infu/config.json`（0600）或环境变量；命令输出/记忆写入前敏感凭据检测；MCP/终端子进程环境消毒
 - **Key 不入库**：API Key 存 `~/.infu/config.json`（或环境变量），.gitignore 已排除
 
 详细设计见 [docs/SANDBOX.md](docs/SANDBOX.md)。
@@ -144,8 +158,10 @@ npm run start -w @infu/agent
 
 | 里程碑 | 内容 | 状态 |
 |---|---|---|
-| M1 | monorepo + 模型接入 + 10 工具 + Agent 循环 + CLI + 服务层 | ✅ 完成（真实模型验证） |
+| M1 | monorepo + 模型接入 + 10 工具 + Agent 循环 + CLI + 服务层 | ✅ 完成 |
 | M2 | Web 三栏 UI（对话/工具过程/Diff）+ SSE 流式 + 停止/审批队列 | ✅ 完成 |
 | M3 | 沙箱（L1 软沙箱 + L2 Docker）+ 交付报告 + 模型管理 UI | ✅ 完成 |
-| M4 | 模板任务引导（小白一键开跑）+ Planner/Reviewer 分层编排 | ✅ 完成 |
-| M5 | Windows 硬沙箱（restricted tokens + job objects，Rust 原生）+ `/best-of-n` 并行尝试（CLI） | ✅ 完成 |
+| M4 | 模板任务引导 + Planner/Reviewer 分层编排 | ✅ 完成 |
+| M5 | Windows 硬沙箱（restricted tokens + job objects，Rust 原生） | ✅ 完成 |
+| M6 | 网络出站控制（命令级断网策略 + 联网审批） | ✅ 完成 |
+| v2-v3.5 | 会话持久化/子智能体/MCP/插件/技能/记忆/定时任务/桌面端/computer-use/异步编排（见 docs/ROADMAP.md） | ✅ 完成 |

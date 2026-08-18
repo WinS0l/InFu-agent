@@ -32,7 +32,8 @@ import { resolveApprovalPolicy, shouldAutoApprove } from "./approval/policy.js";
 import { loadMcpTools, withMcpTools } from "./mcp/index.js";
 import { mcpCli } from "./mcp/cli.js";
 import { loadPlugins, withPlugins } from "./plugin/index.js";
-import { listSkills, buildSkillsPrompt } from "./plugin/skills.js";
+import { listSkills, buildSkillsPrompt, clearPluginSkillDirs } from "./plugin/skills.js";
+import { clearTodos } from "./tools/task-tools.js";
 import { listAgents, buildAgentsPrompt } from "./agent/agents.js";
 import { buildInfuPrompt, buildMemoryPrompt, findInstructionFile, parseScopeRules, sedimentTask } from "./memory/index.js";
 import { autoNameSession } from "./session-naming.js";
@@ -710,6 +711,9 @@ async function main() {
         try { clearObservedFiles(sessionId); } catch { /* 忽略 */ }
         try { clearApprovalMemory(sessionId); } catch { /* 忽略 */ }
         try { clearSessionBypass(sessionId); } catch { /* 忽略 */ }
+        // v3.6：todo 清单 / 插件技能目录会话级清理
+        try { clearTodos(sessionId); } catch { /* 忽略 */ }
+        try { clearPluginSkillDirs(); } catch { /* 忽略 */ }
       }
     });
 }

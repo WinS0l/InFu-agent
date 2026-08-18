@@ -8,13 +8,14 @@
  *  - 拒绝写 providers/models/apiKey 等非白名单节（防提权）
  *  - 校验失败 400（非法档位/非法节值）
  *  - strip：未知字段不落盘
- *  - 落盘验证：读回 config.json 断言（备份/恢复用户配置）
+ *  - 落盘验证：读回 config.json 断言（数据目录重定向隔离）
  */
 import { createApp } from "../src/server.js";
 import { configPath, loadConfig, saveConfig } from "../src/providers/registry.js";
-import { readFileSync, existsSync, copyFileSync, rmSync, mkdirSync } from "node:fs";
-import { homedir } from "node:os";
+import { readFileSync, rmSync, mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { setDataDirForTest } from "../src/data-dir.js";
 
 let passed = 0;
 let failed = 0;
@@ -25,12 +26,11 @@ function check(name: string, cond: boolean, detail = "") {
 
 console.log("\n=== 设置 API 自测（v2.4）===\n");
 
-// 备份/恢复用户配置（与 mcp.test.ts 同模式）；测试期间从干净配置开始
+// v3.6：数据目录重定向到临时目录（原备份/恢复真实 ~/.infu/config.json 崩溃即污染用户数据）
+const tmpData = mkdtempSync(join(tmpdir(), "infu-test-"));
+setDataDirForTest(tmpData);
+// 测试期间从干净配置开始（configPath 跟随重定向目录）
 const CONFIG = configPath();
-const had = existsSync(CONFIG);
-const backup = join(homedir(), ".infu", "config.json.settings-test-backup");
-if (had) copyFileSync(CONFIG, backup);
-else mkdirSync(join(homedir(), ".infu"), { recursive: true });
 saveConfig({ models: [] });
 
 const app = createApp();
@@ -204,14 +204,11 @@ try {
     check("index status 含 built 布尔", typeof idx.built === "boolean", JSON.stringify(idx));
   }
 } finally {
-  // 恢复用户配置
-  if (had) {
-    copyFileSync(backup, CONFIG);
-    rmSync(backup);
-  } else {
-    rmSync(CONFIG, { force: true });
-  }
+  // v3.6：无需恢复——config 已重定向到临时数据目录，随 tmpData 一并清理
 }
+
+// 清理临时数据目录（v3.6：只删测试自己的临时目录，绝不动用户 ~/.infu）
+try { rmSync(tmpData, { recursive: true, force: true }); } catch { /* 忽略 */ }
 
 console.log(`\n=== 结果：${passed} 通过 / ${failed} 失败 ===`);
 if (failed > 0) process.exit(1);

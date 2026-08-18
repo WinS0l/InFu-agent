@@ -126,6 +126,8 @@ pub struct RestrictedToken {
 }
 
 /// 构建受限令牌（逐级降级）。全部失败返回 Err（调用方回退 job-only）
+/// v3.6 审计修复：中间令牌句柄不再泄漏——create_restricted 的句柄在 duplicate_primary
+/// 成功/失败两条路径上都 CloseHandle（此前每次 run_restricted 泄漏 1 个令牌句柄）
 pub fn build_restricted(base: HANDLE) -> Result<RestrictedToken, String> {
     let attempts: &[(u32, &'static str)] = &[
         (DISABLE_MAX_PRIVILEGE | LUA_TOKEN, "full"),
@@ -133,12 +135,23 @@ pub fn build_restricted(base: HANDLE) -> Result<RestrictedToken, String> {
     ];
     let mut last: Option<String> = None;
     for (flags, level) in attempts {
-        match create_restricted(base, *flags) {
-            Ok(t) => {
-                enable_change_notify(t);
-                return duplicate_primary(t).map(|handle| RestrictedToken { handle, level });
+        let restricted = match create_restricted(base, *flags) {
+            Ok(t) => t,
+            Err(e) => {
+                last = Some(e);
+                continue;
             }
-            Err(e) => last = Some(e),
+        };
+        enable_change_notify(restricted);
+        match duplicate_primary(restricted) {
+            Ok(handle) => {
+                close(restricted); // v3.6：成功路径同样释放中间句柄
+                return Ok(RestrictedToken { handle, level });
+            }
+            Err(e) => {
+                close(restricted); // v3.6：失败路径释放后尝试下一级
+                last = Some(e);
+            }
         }
     }
     Err(last.unwrap_or_else(|| "CreateRestrictedToken 全等级失败".to_string()))

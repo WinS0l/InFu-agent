@@ -99,22 +99,24 @@ export interface StreamChatOptions {
   debug?: boolean;
 }
 
-/** 睡眠（可被 signal 中止——重试退避期间停止按钮立即生效） */
+/** 睡眠（可被 signal 中止——重试退避期间停止按钮立即生效）
+ *  v3.6：正常完成时移除 abort 监听器（原 once 注册后 resolve 路径不移除——多次退避
+ *  在 signal 上累积监听器，长任务事件面膨胀） */
 function sleep(ms: number, signal?: AbortSignal): Promise<void> {
   return new Promise((resolve, reject) => {
     if (signal?.aborted) {
       reject(new ModelApiError("任务已停止（用户中止）", { retryable: false }));
       return;
     }
-    const t = setTimeout(resolve, ms);
-    signal?.addEventListener(
-      "abort",
-      () => {
-        clearTimeout(t);
-        reject(new ModelApiError("任务已停止（用户中止）", { retryable: false }));
-      },
-      { once: true }
-    );
+    const onAbort = () => {
+      clearTimeout(t);
+      reject(new ModelApiError("任务已停止（用户中止）", { retryable: false }));
+    };
+    const t = setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    signal?.addEventListener("abort", onAbort, { once: true });
   });
 }
 
@@ -338,7 +340,6 @@ export async function* streamChat(opts: StreamChatOptions): AsyncGenerator<ChatD
   const baseDelayMs = retryPolicy?.baseDelayMs ?? 1000;
 
   let started = false; // 已产出过 delta → 失败不再重试（内容无法撤回）
-  let lastError: unknown = null;
 
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     try {
@@ -359,7 +360,6 @@ export async function* streamChat(opts: StreamChatOptions): AsyncGenerator<ChatD
       return; // 正常完成
     } catch (e) {
       if (signal?.aborted) throw e; // 用户中止：立即透出
-      lastError = e;
       if (started) throw e; // 已产出内容后断流：不重试
       const err = e as ModelApiError;
       if (!(err instanceof ModelApiError) || !err.retryable || attempt >= maxAttempts) throw e;
@@ -374,7 +374,6 @@ export async function* streamChat(opts: StreamChatOptions): AsyncGenerator<ChatD
       await sleep(delay, signal);
     }
   }
-  throw lastError;
 }
 
 /** 把 ToolDef 转成 OpenAI tools 格式（zod → JSON Schema） */

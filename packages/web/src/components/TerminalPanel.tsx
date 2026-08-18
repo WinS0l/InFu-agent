@@ -91,6 +91,8 @@ export default function TerminalPanel() {
   const escBufRef = useRef("");
   const blockedRef = useRef(false);
   const queueRef = useRef<Promise<unknown>>(Promise.resolve());
+  // v3.6：首开自动建会话失败退避计数（服务端不可用时不再无上限重试风暴）
+  const retryCountRef = useRef(0);
 
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [shell, setShell] = useState("");
@@ -189,7 +191,8 @@ export default function TerminalPanel() {
   };
 
   /** 新建会话（kill 旧会话 + 重建） */
-  const newSession = async () => {
+  const newSession = async (manual = false) => {
+    if (manual) retryCountRef.current = 0;
     const old = sessionIdRef.current;
     if (old) {
       enqueue(async () => terminalKill(old).catch(() => {}));
@@ -199,13 +202,16 @@ export default function TerminalPanel() {
     setNote("");
     try {
       const s = await terminalStart(root || undefined, chosenShell || undefined);
+      retryCountRef.current = 0;
       sessionIdRef.current = s.id;
       setSessionId(s.id);
       setShell(s.shell);
       termRef.current?.write(`\x1b[2J\x1b[H`);
       connectStream(s.id);
     } catch (e) {
-      setNote(`终端创建失败：${(e as Error).message}`);
+      // v3.6：失败计数（自动重试上限 3 次；手动点击不受限）
+      retryCountRef.current++;
+      setNote(`终端创建失败：${(e as Error).message}${retryCountRef.current >= 3 ? "（已停止自动重试，请点击刷新按钮手动重试）" : ""}`);
     } finally {
       setConnecting(false);
     }
@@ -307,9 +313,9 @@ export default function TerminalPanel() {
     if (t) t.options.theme = xtermTheme(resolvedDark);
   }, [theme]);
 
-  // 首开自动建会话
+  // 首开自动建会话（v3.6：失败退避——服务端不可用时最多自动重试 3 次，不再无限重试风暴）
   useEffect(() => {
-    if (!sessionId && !connecting) newSession();
+    if (!sessionId && !connecting && retryCountRef.current < 3) void newSession();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessionId, connecting]);
 
@@ -344,7 +350,7 @@ export default function TerminalPanel() {
         <div className="ml-auto flex items-center gap-1.5">
           <button
             className="flex h-7 cursor-pointer items-center gap-1 rounded-[14px] border border-line px-2.5 text-xs text-sub transition-colors hover:bg-hover hover:text-text"
-            onClick={newSession}
+            onClick={() => newSession(true)}
             disabled={connecting}
             title="新建终端会话（旧会话将被终止）"
           >

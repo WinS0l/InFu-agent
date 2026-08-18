@@ -595,7 +595,6 @@ export default function ChatPanel() {
       }
     }
     setInput("");
-    useStore.getState().setTemplateId(null); // 普通输入：清模板标记
     // 发送 = 回到底部（即使之前上滑浏览过；恢复跟随）
     atBottomRef.current = true;
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });

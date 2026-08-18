@@ -311,7 +311,9 @@ console.log("\n▶ delegate_task 审批（只读免审批 / 写能力一次授�
     } as any
   );
   check("只读委派（explore）免审批", approvalCalls === 0, `approvals=${approvalCalls}`);
-  check("只读委派正常执行", ro.includes("子智能体") || ro.includes("完成") || ro.length > 0, ro.slice(0, 40));
+  // v3.6 恒真断言修复：原 `|| ro.length > 0` 使任何非空返回都通过；子循环成功返回
+  // 格式固定为 `<agent名>（N 步 / M 次工具）：…`（delegateTasks 组装）——按真实格式断言
+  check("只读委派正常执行", ro.startsWith("explore") && ro.includes("次工具"), ro.slice(0, 60));
   check("explore 委派 subagent-start 带 readOnly=true（前端绿色徽标依据）", events2.some((e) => e.type === "subagent-start" && "readOnly" in e && e.readOnly === true), JSON.stringify(events2.find((e) => e.type === "subagent-start")));
   // 写能力委派（缺省全工具）：subagent-start 不带 readOnly（前端显示 [high]）
   const events3: AgentEvent[] = [];

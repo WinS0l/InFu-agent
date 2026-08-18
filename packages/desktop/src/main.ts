@@ -25,11 +25,14 @@ import { app, BrowserWindow, Tray, Menu, ipcMain, screen, nativeImage, nativeThe
 import type { WebContents } from "electron";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync, renameSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { startServer } from "@infu/agent/dist/server.js";
 import { loadConfig } from "@infu/agent/dist/providers/registry.js";
 import { resolveDataDir } from "@infu/agent/dist/data-dir.js";
+// v3.6：IPv6 解包 / IPv4 简写归一化判定下沉 @infu/shared（与 agent SSRF 共用同一实现，
+// 修复 ::ffff:7f00:1 / ::7f00:1 / 0:0:0:0:0:0:0:1 等 loopback 变体绕过导航守卫）
+import { isLoopbackHostText } from "@infu/shared";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const IS_DEV = process.env.INFU_DESKTOP_DEV === "1";
@@ -98,7 +101,12 @@ function saveWindowState(win: BrowserWindow) {
   try {
     const b = win.getBounds();
     mkdirSync(resolveDataDir(), { recursive: true });
-    writeFileSync(windowStatePath(), JSON.stringify({ ...b, maximized: win.isMaximized() }));
+    // v3.6 审计修复：原子写（tmp + rename）——原直接 writeFileSync 截断半写，
+    // 断电/崩溃会留下损坏的窗口状态文件（loadWindowState 容错返回默认，但可避免）
+    const p = windowStatePath();
+    const tmp = `${p}.tmp-${process.pid}`;
+    writeFileSync(tmp, JSON.stringify({ ...b, maximized: win.isMaximized() }));
+    renameSync(tmp, p);
   } catch { /* 忽略 */ }
 }
 
@@ -373,24 +381,12 @@ function registerBrowserWebContents(wc: WebContents) {
  * 读取注入的 window.__INFU_TOKEN__ 并调用 /api/approvals/bypass 自我提权放行全部
  * 审批（confirm 档保证被打破）。localhost / 127.x / ::1 / IPv4 简写 / 非标准数字段
  * （hex/octal）一律拒绝导航（fail-closed）。
+ * v3.6 审计修复：判定改用 @infu/shared isLoopbackHostText——IPv6 文本完整解包
+ * （原正则只认 ::ffff: 点分形式，`::ffff:7f00:1`、`::7f00:1`、`0:0:0:0:0:0:0:1`
+ * 等变体全漏判放行，恶意网页可直达带 token 的 InFu 服务自我提权）。
  */
 function isLoopbackTarget(u: URL): boolean {
-  const h = u.hostname.replace(/^\[|\]$/g, "").toLowerCase();
-  if (h === "localhost" || h.endsWith(".localhost") || h === "::1") return true;
-  // IPv4-mapped（::ffff:127.0.0.1）→ 提取尾部 v4 复查
-  const mapped = /^::(?:ffff:)?(\d+(?:\.\d+){0,3})$/i.exec(h);
-  const v4 = mapped ? mapped[1] : h;
-  if (/^[\d.]+$/.test(v4)) {
-    const parts = v4.split(".").map(Number);
-    if (parts.some((p) => !Number.isFinite(p))) return true;
-    const first = parts[0];
-    // 简写归一化（127.1=127.0.0.1、0=0.0.0.0 等）——首段 127/0 即本机语义
-    if (parts.length === 1) return first === 127 || first === 0;
-    return first === 127 || first === 0;
-  }
-  // 非标准数字段（0x7f / 0177 等）→ 保守拦截（fail-closed）
-  if (/^[0-9a-fx.]+$/i.test(v4)) return true;
-  return false;
+  return isLoopbackHostText(u.hostname);
 }
 
 /** 嵌入浏览器 URL 校验（v3.1 审计修复：拒绝 file:// 等非 Web scheme——webview 无沙箱，
@@ -712,14 +708,6 @@ public static class InFuWin {
 };
 
 
-function navUrl(raw: string): string | null {
-  const u = raw.trim();
-  if (/^https?:/i.test(u)) return u;
-  if (u === "about:blank") return u;
-  if (/^[\w-]+(\.[\w-]+)+(\/.*)?$/.test(u)) return `https://${u}`;
-  return null;
-}
-
 // ── IPC（渲染进程 preload 桥）──
 function registerIpc() {
   // 窗口控制（无边框标题栏）
@@ -798,7 +786,9 @@ function registerIpc() {
   ipcMain.on("browser-view:navigate", (_e, raw: string) => {
     const wc = activeWc();
     if (!wc || wc.isDestroyed()) return;
-    const url = navUrl(raw);
+    // v3.6 审计修复：程序化导航统一走 sanitizeBrowserUrl（含 loopback + InFu 服务端口
+    // 拦截）——原 navUrl 仅 scheme 检查，且 wc.loadURL() 不触发 will-navigate 守卫
+    const url = sanitizeBrowserUrl(raw);
     if (url) wc.loadURL(url);
   });
   ipcMain.on("browser-view:back", () => {
@@ -890,13 +880,15 @@ app.whenReady().then(() => {
     host: "127.0.0.1",
     ...(staticDir ? { staticDir } : {}),
     onEvent: (sessionId, ev) => {
-      // v3.5 常规设置：运行中防休眠（user-message 开始 / done·stopped 结束）
+      // v3.5 常规设置：运行中防休眠（user-message 开始 / done·stopped·error 结束）
+      // v3.6：stopped/error 也解除（原只处理 done——用户中止时 loop 只 emit error，
+      // 防休眠永不解除，系统空闲后照常休眠与用户意图相悖）
       if (loadConfig()?.general?.preventSleep === true) {
         if (ev.type === "user-message") {
           if (powerSaveId == null) {
             powerSaveId = powerSaveBlocker.start("prevent-app-suspension");
           }
-        } else if (ev.type === "done") {
+        } else if (ev.type === "done" || ev.type === "error") {
           if (powerSaveId != null) {
             try { powerSaveBlocker.stop(powerSaveId); } catch { /* 忽略 */ }
             powerSaveId = null;

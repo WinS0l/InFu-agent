@@ -8,19 +8,18 @@
  *  - matchOverride：精确 > 前缀* > 未命中；声明顺序首个命中
  *  - isToolDisabled / resolveToolRisk
  *  - globToRegExp / isCommandAllowed：* 通配、大小写、正则元字符转义
- *  - guard 集成（真实工具 + 临时 config 备份/恢复）：auto 不弹窗 / confirm 弹窗 / 禁用拒绝 / 风险覆盖透传
+ *  - guard 集成（真实工具 + 数据目录重定向隔离）：auto 不弹窗 / confirm 弹窗 / 禁用拒绝 / 风险覆盖透传
  */
 import { TOOLS } from "../src/tools/index.js";
 import {
   resolveApprovalPolicy, shouldAutoApprove, matchOverride, isToolDisabled, resolveToolRisk,
   globToRegExp, isCommandAllowed, DEFAULT_POLICY, DEFAULT_COMMAND_ALLOWLIST,
 } from "../src/approval/policy.js";
-import { configPath, saveConfig } from "../src/providers/registry.js";
-import { readFileSync, writeFileSync, existsSync, copyFileSync, rmSync } from "node:fs";
-import { homedir } from "node:os";
-import { join } from "node:path";
-import { mkdtempSync } from "node:fs";
+import { saveConfig } from "../src/providers/registry.js";
+import { existsSync, rmSync, mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { setDataDirForTest } from "../src/data-dir.js";
 import type { AgentEvent, ToolContext } from "@infu/shared";
 
 let passed = 0;
@@ -31,6 +30,10 @@ function check(name: string, cond: boolean, detail = "") {
 }
 
 console.log("\n=== 审批策略自测（v2.4）===\n");
+
+// v3.6：数据目录重定向到临时目录（原备份/恢复真实 ~/.infu/config.json 崩溃即污染用户数据）
+const tmpData = mkdtempSync(join(tmpdir(), "infu-test-"));
+setDataDirForTest(tmpData);
 
 // ── 1. resolveApprovalPolicy 缺省回退 ──
 console.log("▶ resolveApprovalPolicy");
@@ -126,11 +129,7 @@ console.log("▶ 命令白名单（glob 通配）");
 // ── 5. guard 集成（真实工具 + 临时 config）──
 console.log("▶ guard 集成（write_file × 档位）");
 {
-  // 备份/恢复用户配置
-  const CONFIG = configPath();
-  const had = existsSync(CONFIG);
-  const backup = join(homedir(), ".infu", "config.json.approval-test-backup");
-  if (had) copyFileSync(CONFIG, backup);
+  // v3.6：config 已重定向到临时数据目录（saveConfig 只写临时目录，无需备份/恢复）
   const proj = mkdtempSync(join(tmpdir(), "infu-approval-"));
   const approvals: Array<{ desc: string; risk: string }> = [];
   const mkCtx = (): ToolContext => ({
@@ -193,15 +192,12 @@ console.log("▶ guard 集成（write_file × 档位）");
     const fullDisabledOut = await TOOLS.write_file.execute({ path: "f.txt", content: "x" }, mkCtx());
     check("full 档 + 禁用工具：仍拒绝", fullDisabledOut.includes("用户拒绝"), fullDisabledOut);
   } finally {
-    // 恢复用户配置
-    if (had) {
-      copyFileSync(backup, CONFIG);
-      rmSync(backup);
-    } else {
-      rmSync(CONFIG, { force: true });
-    }
+    // v3.6：无需恢复——config 已重定向到临时数据目录，随 tmpData 一并清理
   }
 }
+
+// 清理临时数据目录（v3.6：只删测试自己的临时目录，绝不动用户 ~/.infu）
+try { rmSync(tmpData, { recursive: true, force: true }); } catch { /* 忽略 */ }
 
 console.log(`\n=== 结果：${passed} 通过 / ${failed} 失败 ===`);
 if (failed > 0) process.exit(1);

@@ -132,15 +132,17 @@ export default function BrowserPanel() {
     });
   }, [desktop]);
 
-  // open-request（Agent 建 tab / 面板打开但主进程无 tab）→ 确保浏览器 tab 在侧栏 + 建元素
+  // v3.3 补 16：Agent 开浏览器建 tab——open-request 事件可能在本组件挂载前已发出
+  // （右侧栏折叠时 App 顶层先响应展开），改为消费 store 的 pendingBrowserOpen 状态
+  // （App handler 记录；本组件挂载时/变化时消费建 tab），不再依赖事件时序
+  const pendingBrowserOpen = useStore((s) => s.pendingBrowserOpen);
+  const setPendingBrowserOpen = useStore((s) => s.setPendingBrowserOpen);
   useEffect(() => {
-    if (!desktop) return;
-    return desktop.onOpenRequest((url) => {
-      openRightTab({ id: "browser", kind: "browser", label: "浏览器" });
-      createTab(url ?? undefined);
-    });
+    if (pendingBrowserOpen === null) return;
+    setPendingBrowserOpen(null); // 先清空防重入（React 18 StrictMode 双调用）
+    createTab(pendingBrowserOpen || undefined);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [desktop]);
+  }, [pendingBrowserOpen]);
 
   // select（Agent 切 tab）→ 本地 active 跟随（id = wcId）
   useEffect(() => {
@@ -277,8 +279,11 @@ export default function BrowserPanel() {
             onChange={(e) => setInput(e.target.value)}
             onKeyDown={(e) => {
               if (e.key === "Enter" && input.trim()) {
+                // v3.6 审计修复：地址栏导航改走主进程 IPC（browser-view:navigate）——
+                // 原实现 el.loadURL() 直接渲染侧导航，绕过主进程 sanitizeBrowserUrl
+                // （loopback + InFu 服务端口拦截），且 loadURL 不触发 will-navigate 守卫
                 const url = normalizeUrl(input.trim());
-                if (url) act((el) => void el.loadURL(url));
+                if (url && desktop) desktop.browserNavigate(url);
                 (e.target as HTMLInputElement).blur();
               }
             }}
@@ -414,9 +419,10 @@ export default function BrowserPanel() {
 const START_HTML = `<html><body style="background:#151517;margin:0;height:100vh;display:flex;align-items:center;justify-content:center;font-family:system-ui,-apple-system,sans-serif"><div style="text-align:center"><svg viewBox="0 0 24 24" width="56" height="56" fill="none" stroke="#56575C" stroke-width="1.5"><circle cx="12" cy="12" r="10"/><path d="M2 12h20M12 2c2.5 2.6 3.9 6.2 3.9 10S14.5 19.4 12 22c-2.5-2.6-3.9-6.2-3.9-10S9.5 4.6 12 2z"/></svg><div style="font-size:16px;color:#F9FAFB;font-weight:600;margin-top:16px">浏览器</div><div style="font-size:13px;color:#8E8E93;margin-top:8px">粘贴或输入 URL 以打开网页。</div></div></body></html>`;
 const START_URL = `data:text/html;charset=utf-8,${encodeURIComponent(START_HTML)}`;
 
-/** 地址栏规范化（同主进程 navUrl；v3.1 审计修复：拒绝 file:/// 等非 Web scheme——
- *  嵌入式 webview 带 sandbox=no，file:// 可直读磁盘任意文件 → 非法输入返回空串，
- *  调用方不加载（地址栏 Enter / Agent 导航共用） */
+/** 地址栏规范化（v3.1 审计修复：拒绝 file:/// 等非 Web scheme——嵌入式 webview 带
+ *  sandbox=no，file:// 可直读磁盘任意文件 → 非法输入返回空串，调用方不加载。
+ *  v3.6：导航判定统一在主进程 sanitizeBrowserUrl（含 loopback + InFu 服务端口拦截），
+ *  本函数只做输入预规范化（补 https://、去非 Web scheme），不再承担安全判定 */
 function normalizeUrl(raw: string): string {
   const u = raw.trim();
   if (/^https?:/i.test(u)) return u;

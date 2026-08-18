@@ -2,13 +2,14 @@
  * v2.6.1 项目注册表自测（~/.infu/projects.json：创建/移除/查重/损坏恢复）
  * 运行：npx tsx packages/agent/tests/projects.test.ts
  *
- * 注：注册表文件位于真实 ~/.infu/projects.json——测试备份并在结束时恢复，
- * 避免污染用户环境。
+ * 注：v3.6 起数据目录重定向到临时目录（setDataDirForTest）——注册表只写临时
+ * 目录，不再备份/恢复真实 ~/.infu/projects.json（崩溃即污染用户数据）。
  */
 import { listProjects, createProject, removeProject, findProjectByRoot, normalizeRoot, sameRoot } from "../src/projects.js";
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, renameSync, rmSync, readdirSync } from "node:fs";
-import { tmpdir, homedir } from "node:os";
-import { join } from "node:path";
+import { mkdtempSync, writeFileSync, readFileSync, existsSync, rmSync, readdirSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join, basename } from "node:path";
+import { setDataDirForTest } from "../src/data-dir.js";
 
 let passed = 0;
 let failed = 0;
@@ -19,12 +20,11 @@ function check(name: string, cond: boolean, detail = "") {
 
 console.log("\n=== v2.6.1 项目注册表自测 ===\n");
 
-// 备份用户真实注册表（测试结束恢复）
-const REAL = join(homedir(), ".infu", "projects.json");
-const BACKUP = `${REAL}.bak-${Date.now()}`;
-let hadReal = existsSync(REAL);
-if (hadReal) renameSync(REAL, BACKUP);
-try { rmSync(REAL, { force: true }); } catch { /* ignore */ }
+// v3.6：数据目录重定向到临时目录——注册表（projectsFilePath 跟随 dataDir）
+// 落在临时目录（原备份/恢复真实 ~/.infu/projects.json 崩溃即污染用户数据）
+const tmpData = mkdtempSync(join(tmpdir(), "infu-test-"));
+setDataDirForTest(tmpData);
+const REAL = join(tmpData, "projects.json");
 
 // ── 基础 ──
 console.log("── 基础 ──");
@@ -41,7 +41,13 @@ console.log("\n── 创建 ──");
   const proj1 = mkdtempSync(join(tmpdir(), "infu-proj-"));
   const r1 = createProject(proj1, "测试项目");
   check("创建成功（id 生成）", r1.ok && !!r1.project && r1.project!.id.startsWith("p-"));
-  check("名称缺省用文件夹名", createProject(proj1, "  ")?.ok || true); // 占位
+  // v3.6 恒真断言修复：原 `createProject(proj1, "  ")?.ok || true`（注释"占位"）恒真——
+  // 且 proj1 已注册会因重复创建返回 ok:false，测不到「空名回退文件夹名」；改用独立目录真实断言
+  {
+    const projBlank = mkdtempSync(join(tmpdir(), "infu-proj-blank-"));
+    const rb = createProject(projBlank, "  ");
+    check("名称缺省用文件夹名", rb.ok === true && rb.project?.name === basename(projBlank));
+  }
   check("注册表落盘", existsSync(REAL));
   const raw = JSON.parse(readFileSync(REAL, "utf-8"));
   check("注册表格式 {version, projects}", raw.version === 1 && Array.isArray(raw.projects) && raw.projects.length === 1);
@@ -74,17 +80,15 @@ console.log("\n── 损坏恢复 ──");
 {
   writeFileSync(REAL, "{corrupt json!!!", "utf-8");
   check("损坏文件读取为空列表", listProjects().length === 0);
-  const corruptBackup = readdirSync(join(homedir(), ".infu")).some((f) => f.startsWith("projects.json.corrupt-"));
+  // v3.6：损坏备份位于重定向后的数据目录（原为真实 ~/.infu）
+  const corruptBackup = readdirSync(tmpData).some((f) => f.startsWith("projects.json.corrupt-"));
   check("损坏文件已备份", corruptBackup);
   const ok = createProject(mkdtempSync(join(tmpdir(), "infu-proj3-")), "重建");
   check("损坏后重建可用", ok.ok && listProjects().length === 1);
 }
 
-// ── 恢复用户环境 ──
-try { rmSync(REAL, { force: true }); } catch { /* ignore */ }
-if (hadReal) renameSync(BACKUP, REAL);
-else rmSync(join(homedir(), ".infu", "projects.json"), { force: true });
-console.log("（用户注册表已恢复）");
+// ── 清理临时数据目录（v3.6：只删测试自己的临时目录，绝不动用户 ~/.infu）──
+try { rmSync(tmpData, { recursive: true, force: true }); } catch { /* ignore */ }
 
 console.log(`\n=== 项目注册表自测完成：${passed} 通过，${failed} 失败 ===\n`);
 if (failed > 0) process.exit(1);

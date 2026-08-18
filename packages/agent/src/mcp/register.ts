@@ -10,10 +10,9 @@
  *  - 校验与 CLI（infu mcp add）/ API 完全一致：id 生成/command 或 url 非空/重名拒绝
  */
 
-import { readFileSync, existsSync } from "node:fs";
+import { existsSync } from "node:fs";
 import type { InfuConfig, McpServerConfig, RiskLevel } from "@infu/shared";
-import { parseInfuConfig } from "@infu/shared";
-import { configPath, saveConfig } from "../providers/registry.js";
+import { configPath, saveConfig, loadConfig } from "../providers/registry.js";
 
 export interface RegisterInput {
   name: string;
@@ -47,7 +46,12 @@ export function registerMcpServer(input: RegisterInput): RegisterResult {
       return { ok: false, message: "stdio 类型需要 command（Windows 下 npx 需写 npx.cmd）" };
     }
   }
-  const cfg = readConfig();
+  let cfg: InfuConfig;
+  try {
+    cfg = readConfig();
+  } catch (e) {
+    return { ok: false, message: (e as Error).message };
+  }
   if ((cfg.mcpServers ?? []).some((s) => s.id === id)) {
     return {
       ok: false,
@@ -75,14 +79,20 @@ export function registerMcpServer(input: RegisterInput): RegisterResult {
   };
 }
 
-/** 读取配置（损坏/缺失时返回空配置，不抛错；与 server/cli 的 readConfigRaw 同构） */
+/**
+ * 读取配置。v3.6 审计修复：损坏/格式错误时**抛错拒绝注册**（原实现返回 {models:[]}，
+ * 随后 saveConfig 会把用户全部 models/providers/apiKey 冲掉覆盖——数据丢失风险）。
+ * 复用 registry.loadConfig 的损坏备份逻辑（备份为 .broken-* 后抛错，注册未执行）。
+ * 无配置文件 = 全新环境，返回空配置正常。
+ */
 export function readConfig(): InfuConfig {
   const CONFIG_PATH = configPath();
   if (!existsSync(CONFIG_PATH)) return { models: [] };
-  try {
-    const r = parseInfuConfig(JSON.parse(readFileSync(CONFIG_PATH, "utf-8")));
-    return r.ok ? r.config : { models: [] };
-  } catch {
-    return { models: [] };
+  const cfg = loadConfig();
+  if (!cfg) {
+    throw new Error(
+      "配置文件损坏或格式错误（原文件已备份为 .broken-*），请检查 ~/.infu/config.json 后重试——注册未执行，配置未被改动"
+    );
   }
+  return cfg;
 }

@@ -23,6 +23,10 @@ import {
   COMPRESS_TRIGGER_RATIO,
 } from "./context.js";
 import { currentApprovalPolicy, isToolDisabled, resolveToolRisk } from "../approval/policy.js";
+// v3.6：runAgent 收尾清理本层后台子 Agent/job（子任务随父循环结束；顶层 server/cli
+// finally 清全部 depth<0，此处互补清本级——修复子智能体/定时任务内部启动的后台任务孤儿）
+import { abortBackgroundAgentsByDepth } from "./subagent.js";
+import { abortJobsByDepth } from "../tools/jobs.js";
 
 export interface AgentRunOptions {
   /** 模型配置（provider/model/baseURL/apiKey） */
@@ -361,6 +365,15 @@ export async function runAgent(opts: AgentRunOptions): Promise<RunResult> {
     delegationDepth = 0, scopeRules, askUser, extraReadDirs, sessionId, agentChannel, sandboxMode,
   } = opts;
 
+  /**
+   * v3.3 异步任务编排：后台任务完成通知局部队列（ctx.enqueueTaskNotification 写入；
+   * drainTaskNotifications 每步开始消费为 user XML 消息；随循环结束自然消亡无泄漏）。
+   * v3.6：声明移到 ctx 之前——ctx 的 enqueueTaskNotification 闭包引用本队列，
+   * try/finally 包裹后原声明落入 try 块作用域导致闭包不可见（TS2304）。
+   */
+  type TaskNotificationNote = Parameters<NonNullable<ToolContext["enqueueTaskNotification"]>>[0];
+  const pendingNotes: TaskNotificationNote[] = [];
+
   const ctx: ToolContext = {
     root,
     cwd: root,
@@ -394,15 +407,22 @@ export async function runAgent(opts: AgentRunOptions): Promise<RunResult> {
   };
 
   /**
+   * v3.6：后台子 Agent/job 随本层循环结束清理（finally——覆盖正常/中止/异常全部退出路径）。
+   * 按本层委派深度（delegationDepth）中止：子智能体内部启动的后台任务随子循环结束终止
+   * （此前只有顶层 server/cli finally 清全部，子层与定时任务路径的后台任务会残留孤儿进程
+   * 持续消耗模型配额）。与顶层 depth<0 全清互补，幂等安全。
+   */
+  try {
+
+  /**
    * v3.3 异步任务编排（对齐 ZCode <task-notification> 机制）：
    * 后台任务（delegate_task background / run_command background）完成时，
    * 完成点 emit task-notification 事件（前端通知行 + 落库）+ 通过
    * ctx.enqueueTaskNotification 入队本循环的 pendingNotes——每步开始 drain 为
    * role=user 的 XML 消息注入 messages，模型下一轮请求即看到「任务已完成」通知，
    * 自主决定回收结果 / 继续其他工作。局部队列随循环结束自然消亡（无泄漏）。
+   * （pendingNotes 声明已上移见 ctx 上方——try 块作用域）
    */
-  type TaskNotificationNote = Parameters<NonNullable<ToolContext["enqueueTaskNotification"]>>[0];
-  const pendingNotes: TaskNotificationNote[] = [];
   /** 渲染 <task-notification> XML（与 rebuild 同格式；纯文本 user 消息，不破坏工具配对） */
   const renderTaskNotificationXml = (n: TaskNotificationNote): string =>
     `<task-notification>\n` +
@@ -906,6 +926,10 @@ export async function runAgent(opts: AgentRunOptions): Promise<RunResult> {
     const fallback = `已达到本轮最大执行步数（${maxSteps}）但总结生成失败（${err.message}）。工作进度已保存，可继续发送「继续」让我接着干。`;
     if (!suppressFinal) emit({ type: "done", text: fallback, toolCount, steps: maxSteps, usage });
     return { text: fallback, steps: maxSteps, toolCount, approvals, toolLogs, usage };
+  }
+  } finally {
+    try { abortBackgroundAgentsByDepth(sessionId, delegationDepth); } catch { /* 忽略 */ }
+    try { abortJobsByDepth(sessionId, delegationDepth); } catch { /* 忽略 */ }
   }
 }
 

@@ -32,22 +32,39 @@ export function readOneFile(rel: string, ctx: ToolContext, offset = 0, limit = 2
   return head + "\n```\n" + lines.map((l, i) => `${off + i + 1}\t${l}`).join("\n") + "\n```";
 }
 
-// ── todo_write 内存态任务清单（按项目根隔离；会话内有效）──
+// ── todo_write 内存态任务清单（按会话 + 项目根隔离；会话结束清理）──
 
 export interface TodoItem {
   text: string;
   status: "pending" | "in_progress" | "completed";
 }
 
+/**
+ * v3.6 审计修复：原按 root 键控——并行会话同一 root 互相覆盖清单，且条目随 root
+ * 永久累积（长驻服务内存增长，无清理点）。改按「会话 + root」隔离 + clearTodos
+ * 会话结束清理（server/cli finally 挂接，与 clearObservedFiles 同模式）。
+ */
 const todoStores = new Map<string, TodoItem[]>();
 
-export function getTodos(root: string): TodoItem[] {
-  return todoStores.get(root) ?? [];
+function todoKey(sessionId: string | undefined, root: string): string {
+  return `${sessionId ?? "cli"}\u0000${root}`;
 }
 
-export function setTodos(root: string, items: TodoItem[]): TodoItem[] {
-  todoStores.set(root, items);
+export function getTodos(root: string, sessionId?: string): TodoItem[] {
+  return todoStores.get(todoKey(sessionId, root)) ?? [];
+}
+
+export function setTodos(root: string, items: TodoItem[], sessionId?: string): TodoItem[] {
+  todoStores.set(todoKey(sessionId, root), items);
   return items;
+}
+
+/** v3.6：会话结束清理（防长驻服务内存累积；CLI 无会话 id 用 "cli" 键） */
+export function clearTodos(sessionId?: string): void {
+  const prefix = `${sessionId ?? "cli"}\u0000`;
+  for (const k of todoStores.keys()) {
+    if (k.startsWith(prefix)) todoStores.delete(k);
+  }
 }
 
 function formatTodos(items: TodoItem[]): string {
@@ -142,7 +159,7 @@ export const taskTools: Record<string, ToolDef> = {
         text: typeof t?.text === "string" ? t.text : String(t?.text ?? ""),
         status: (["pending", "in_progress", "completed"].includes(t?.status as string) ? (t?.status as string) : "pending") as TodoItem["status"],
       }));
-      setTodos(ctx.root, items);
+      setTodos(ctx.root, items, ctx.sessionId);
       // v2.10：emit 事件（前端 Todo 面板实时展示 + 落库重放）
       ctx.emit({ type: "todo-write", items });
       return formatTodos(items);

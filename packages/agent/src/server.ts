@@ -37,7 +37,8 @@ import { loadMcpTools } from "./mcp/index.js";
 import { loadPlugins } from "./plugin/index.js";
 import { listBuiltinPlugins, isBuiltinPlugin } from "./plugin/marketplace.js";
 import { registerPlugin } from "./plugin/register.js";
-import { listSkills, buildSkillsPrompt } from "./plugin/skills.js";
+import { listSkills, buildSkillsPrompt, clearPluginSkillDirs } from "./plugin/skills.js";
+import { clearTodos } from "./tools/task-tools.js";
 import { listTopics as _listTopics, readMemory as _readMemory, globalMemoryDir as _globalMemoryDir, projectMemoryDir as _projectMemoryDir } from "./memory/store.js";
 import { findInstructionFile as _findInstructionFile } from "./memory/infu.js";
 import { buildInfuPrompt, buildMemoryPrompt, findInstructionFile, parseScopeRules, sedimentTask } from "./memory/index.js";
@@ -51,7 +52,7 @@ import { getStore, resetStore } from "./db/store.js";
 import { rebuildMessages } from "./db/rebuild.js";
 import type { ChatMessageLike } from "./providers/chat.js";
 import { resolveApprovalPolicy, shouldAutoApprove } from "./approval/policy.js";
-import { dockerAvailable, maybeRotateLog } from "./sandbox/index.js";
+import { dockerAvailable, maybeRotateLog, isProtectedPath } from "./sandbox/index.js";
 import { winRestrictedAvailable } from "./sandbox/win-restricted.js";
 import {
   createTerminalSession, getTerminalSession, subscribeOutput, writeInput, resizeSession,
@@ -1190,8 +1191,12 @@ const pendingQuestions = new Map<string, { sessionId: string; resolve: (answer: 
         return;
       }
       // v3.0 批 12：桌面版路径引用——校验存在后直接引用原路径（不复制）
+      // v3.6 审计修复：受保护路径（~/.ssh、数据目录等）拒绝作为附件引用——原实现仅
+      // statSync 存在性检查，任意绝对路径（含 ~/.ssh/id_rsa）进入 extraReadDirs 并被
+      // 注入 prompt 引导 read_file，构成任意文件读取面（用户显式附加的普通文件仍可用）
       for (const p of rawPaths) {
         try {
+          if (isProtectedPath(p)) continue;
           const st = statSync(p);
           if (st.isDirectory()) {
             attachmentItems.push({ name: p.split(/[\/]/).filter(Boolean).pop() ?? p, path: p, kind: "dir" });
@@ -1454,6 +1459,9 @@ const pendingQuestions = new Map<string, { sessionId: string; resolve: (answer: 
           // 在服务常驻期残留跨任务状态——文件观察记录、已批准记忆、全权放行开关全泄漏到下一任务）
           try { clearObservedFiles(sessionId); } catch { /* 忽略 */ }
           try { clearApprovalMemory(sessionId); } catch { /* 忽略 */ }
+          // v3.6：todo 清单 / 插件技能目录会话级清理（并行会话串扰收敛 + 防内存累积）
+          try { clearTodos(sessionId); } catch { /* 忽略 */ }
+          try { clearPluginSkillDirs(); } catch { /* 忽略 */ }
           try { clearSessionBypass(sessionId); } catch { /* 忽略 */ }
           // v3.4 审计修复：任务结束清理挂起队列——用户不点按钮（确认框/提问/计划卡片）
           // 且任务正常结束时，pendingApprovals/pendingQuestions/pendingPlans 的 Promise
@@ -1685,6 +1693,8 @@ const pendingQuestions = new Map<string, { sessionId: string; resolve: (answer: 
     clearObservedFiles(id);
     clearApprovalMemory(id);
     clearSessionBypass(id);
+    // v3.6：todo 清单随会话删除清理
+    try { clearTodos(id); } catch { /* 忽略 */ }
     // v3.0 批 12：会话删除 → 清理该会话的 computer use 截图（.infu/screenshots/screen-<sid8>-*.png）
     // 项目文件夹整体删除时截图随文件夹消失；这里补「只删会话」场景的孤儿截图
     try {

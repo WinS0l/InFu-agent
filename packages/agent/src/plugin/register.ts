@@ -5,11 +5,10 @@
  * 审批由调用方（plugin_add 工具）负责 high + requireExplicit。
  */
 
-import { readFileSync, existsSync } from "node:fs";
+import { existsSync } from "node:fs";
 import { resolve } from "node:path";
 import type { InfuConfig, PluginConfig } from "@infu/shared";
-import { parseInfuConfig } from "@infu/shared";
-import { configPath, saveConfig } from "../providers/registry.js";
+import { configPath, saveConfig, loadConfig } from "../providers/registry.js";
 
 export interface RegisterPluginInput {
   id: string;
@@ -26,7 +25,12 @@ export function registerPlugin(input: RegisterPluginInput): RegisterPluginResult
   const path = input.path.trim();
   if (!id) return { ok: false, message: "id 不能为空（需含字母/数字）" };
   if (!path) return { ok: false, message: "path 不能为空（插件模块的绝对路径）" };
-  const cfg = readConfig();
+  let cfg: InfuConfig;
+  try {
+    cfg = readConfig();
+  } catch (e) {
+    return { ok: false, message: (e as Error).message };
+  }
   if ((cfg.plugins ?? []).some((p) => p.id === id)) {
     return { ok: false, message: `插件 "${id}" 已存在（如需更新请手动编辑配置，或删除后重新添加）` };
   }
@@ -39,14 +43,19 @@ export function registerPlugin(input: RegisterPluginInput): RegisterPluginResult
   };
 }
 
-/** 读取配置（损坏/缺失返回空配置，不抛错；与 mcp/register.ts 同构） */
+/**
+ * 读取配置。v3.6 审计修复：损坏/格式错误时**抛错拒绝注册**（原实现返回 {models:[]}，
+ * 随后 saveConfig 会把用户全部配置冲掉覆盖——数据丢失风险）。复用 registry.loadConfig
+ * 的损坏备份逻辑（备份为 .broken-* 后抛错，注册未执行）。无配置文件 = 全新环境正常。
+ */
 export function readConfig(): InfuConfig {
   const CONFIG_PATH = configPath();
   if (!existsSync(CONFIG_PATH)) return { models: [] };
-  try {
-    const r = parseInfuConfig(JSON.parse(readFileSync(CONFIG_PATH, "utf-8")));
-    return r.ok ? r.config : { models: [] };
-  } catch {
-    return { models: [] };
+  const cfg = loadConfig();
+  if (!cfg) {
+    throw new Error(
+      "配置文件损坏或格式错误（原文件已备份为 .broken-*），请检查 ~/.infu/config.json 后重试——注册未执行，配置未被改动"
+    );
   }
+  return cfg;
 }

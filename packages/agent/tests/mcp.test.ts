@@ -9,7 +9,7 @@
  *  - mcpToolToDef：审批调用（medium/high 触发 / low 直放）、结果文本化、isError 透传
  *  - loadMcpTools：注入 connectFn 验证合并/重名前缀/失败跳过（不 spawn 真实进程）
  *  - infuConfigSchema：mcpServers 节解析 + 未知字段保留
- *  - API：/api/mcp CRUD + 探测端点（app.request；备份/恢复用户配置）
+ *  - API：/api/mcp CRUD + 探测端点（app.request；数据目录重定向隔离）
  *  - inferResumePhase：阶段级续跑起点推断
  */
 import { createApp } from "../src/server.js";
@@ -23,9 +23,10 @@ import { inferResumePhase } from "../src/agent/resume.js";
 import { parseInfuConfig } from "@infu/shared";
 import type { AgentEvent, McpServerConfig, ToolDef } from "@infu/shared";
 import { z } from "zod";
-import { readFileSync, writeFileSync, existsSync, copyFileSync, rmSync } from "node:fs";
-import { homedir } from "node:os";
+import { readFileSync, writeFileSync, rmSync, mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { setDataDirForTest } from "../src/data-dir.js";
 
 let passed = 0;
 let failed = 0;
@@ -35,6 +36,10 @@ function check(name: string, cond: boolean, detail = "") {
 }
 
 console.log("\n=== MCP 客户端自测 ===\n");
+
+// v3.6：数据目录重定向到临时目录（原备份/恢复真实 ~/.infu/config.json 崩溃即污染用户数据）
+const tmpData = mkdtempSync(join(tmpdir(), "infu-test-"));
+setDataDirForTest(tmpData);
 
 // ── 1. JSON Schema → zod 转换 ──
 console.log("▶ schema 转换器");
@@ -225,10 +230,8 @@ console.log("\n▶ config schema");
 // ── 6. API：/api/mcp CRUD + 探测 ──
 console.log("\n▶ /api/mcp API");
 {
-  const CONFIG = join(homedir(), ".infu", "config.json");
-  const backup = CONFIG + ".mcp-test-backup";
-  const hadConfig = existsSync(CONFIG);
-  if (hadConfig) copyFileSync(CONFIG, backup);
+  // v3.6：config 已重定向到临时数据目录（无需备份/恢复真实 ~/.infu/config.json）
+  const CONFIG = join(tmpData, "config.json");
   const saveTestConfig = (cfg: unknown) => writeFileSync(CONFIG, JSON.stringify(cfg, null, 2), "utf-8");
 
   const app = createApp();
@@ -311,13 +314,7 @@ console.log("\n▶ /api/mcp API");
     j = await r.json();
     check("删除后剩 1 台", j.servers.length === 1);
   } finally {
-    // 恢复用户配置
-    if (hadConfig) {
-      copyFileSync(backup, CONFIG);
-      rmSync(backup);
-    } else {
-      rmSync(CONFIG, { force: true });
-    }
+    // v3.6：无需恢复——config 已重定向到临时数据目录，随 tmpData 一并清理
   }
 }
 
@@ -359,10 +356,8 @@ console.log("\n▶ inferResumePhase");
 // ── 8. mcp_register 自注册（opencode config-hook 模式 → 受控工具 + 审批）──
 console.log("\n▶ mcp_register 自注册");
 {
-  const CONFIG2 = join(homedir(), ".infu", "config.json");
-  const backup2 = CONFIG2 + ".mcp-reg-test-backup";
-  const had2 = existsSync(CONFIG2);
-  if (had2) copyFileSync(CONFIG2, backup2);
+  // v3.6：config 已重定向到临时数据目录（无需备份/恢复真实 ~/.infu/config.json）
+  const CONFIG2 = join(tmpData, "config.json");
   try {
     // id 生成
     check("id 生成（大小写/空格/特殊字符）", mcpIdFromName("My File Server!") === "my-file-server");
@@ -420,14 +415,12 @@ console.log("\n▶ mcp_register 自注册");
     const out2 = await t.execute({ name: "approved", type: "http", url: "https://x/mcp" }, ctxT2);
     check("批准后注册成功", out2.includes("已注册") && JSON.parse(readFileSync(CONFIG2, "utf-8")).mcpServers.some((s: any) => s.id === "approved"));
   } finally {
-    if (had2) {
-      copyFileSync(backup2, CONFIG2);
-      rmSync(backup2);
-    } else {
-      rmSync(CONFIG2, { force: true });
-    }
+    // v3.6：无需恢复——config 已重定向到临时数据目录，随 tmpData 一并清理
   }
 }
+
+// 清理临时数据目录（v3.6：只删测试自己的临时目录，绝不动用户 ~/.infu）
+try { rmSync(tmpData, { recursive: true, force: true }); } catch { /* 忽略 */ }
 
 console.log(`\n=== 结果：${passed} 通过 / ${failed} 失败 ===`);
 process.exit(failed ? 1 : 0);

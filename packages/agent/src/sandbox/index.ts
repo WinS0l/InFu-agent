@@ -26,13 +26,15 @@ export const SANDBOX_MODES: SandboxMode[] = ["auto", "off", "soft", "restricted"
 
 /** 环境变量消毒：剔除敏感凭据（防沙箱/子进程读取宿主密钥）。
  *  v3.4 审计修复：补 URL/URI/DSN/CONNECTION 键名——`DATABASE_URL`/`MONGO_URI`/
- *  `REDIS_URL` 等连接串值内嵌凭据，模型 echo 可读（原正则只拦 KEY/TOKEN 类） */
+ *  `REDIS_URL` 等连接串值内嵌凭据，模型 echo 可读（原正则只拦 KEY/TOKEN 类）
+ *  v3.6：补 `_PWD` 后缀（`MYSQL_PWD`/`PGPASSWORD` 历史命名）与 PROXY 键名
+ *  （`HTTPS_PROXY=http://user:pass@host` 值内嵌凭据） */
 export function sanitizeEnv(env: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
-  const SENSITIVE = /(KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL|AUTH|URL|URI|DSN|CONNECTION)/i;
+  const SENSITIVE = /(KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL|AUTH|URL|URI|DSN|CONNECTION|PROXY|_PWD$)/i;
   const out: NodeJS.ProcessEnv = {};
   for (const [k, v] of Object.entries(env)) {
     if (v === undefined) continue;
-    if (SENSITIVE.test(k)) continue; // INFU_*_API_KEY、OPENAI_API_KEY、DATABASE_URL 等全部剔除
+    if (SENSITIVE.test(k)) continue; // INFU_*_API_KEY、OPENAI_API_KEY、DATABASE_URL、HTTPS_PROXY 等全部剔除
     out[k] = v;
   }
   return out;
@@ -123,7 +125,10 @@ export async function dockerAvailable(): Promise<boolean> {
   } catch {
     dockerCache = false;
   }
-  setTimeout(() => (dockerCache = null), 60_000);
+  // v3.6 审计修复：缓存失效定时器 unref——原 setTimeout 阻止事件循环退出，
+  // CLI 单次任务结束后被拖 60s 才退出
+  const t = setTimeout(() => (dockerCache = null), 60_000);
+  t.unref?.();
   return dockerCache;
 }
 

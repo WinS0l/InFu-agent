@@ -80,7 +80,9 @@ console.log("\n▶ 摘要失败降级");
 const failSummarize = async () => { throw new Error("模型挂了"); };
 const fail = await compressMessages(longHistory, 8000, failSummarize);
 check("摘要失败仍返回压缩结果", fail.messages.length < longHistory.length);
-check("降级后无摘要消息（直接丢弃）", !fail.messages[0].content.includes("此前会话摘要"));
+// v3.6 恒真断言修复：原 `!fail.messages[0].content.includes(...)` 只查首条（恒为 system，
+// 摘要注入点在 messages[1]）——摘要若被错误注入此断言发现不了；改查全部消息
+check("降级后无摘要消息（直接丢弃）", !fail.messages.some((m) => typeof m.content === "string" && m.content.includes("此前会话摘要")), JSON.stringify(fail.messages.slice(0, 2).map((m) => m.content)));
 check("摘要字段为空", fail.summary === "");
 
 // 5. 未超预算：原样返回且不调摘要

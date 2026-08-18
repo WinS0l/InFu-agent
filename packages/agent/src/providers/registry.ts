@@ -2,18 +2,13 @@
  * InFu 模型接入层 — Provider Registry
  *
  * 设计目标：任意大模型即插即用。
- *  - 官方适配：OpenAI / Anthropic / Google（AI SDK v6 配套 3.x，返回 V3 兼容）
- *  - OpenAI 兼容端点（统一走 createOpenAI + baseURL）：
- *      DeepSeek / 智谱 GLM / 通义千问 / Ollama / 任意自定义网关
- *      （One API、New API、vLLM、本地代理等）
+ *  - 模型调用统一走自研 OpenAI 兼容流式客户端（providers/chat.ts streamChat）；
+ *    本模块只负责配置解析（凭据/端点/上下文窗口/思考级别），不持有 AI SDK 适配
+ *  - OpenAI 兼容端点（DeepSeek / 智谱 GLM / 通义千问 / Ollama / 任意自定义网关）
  *
  * 与 InFu 差异：InFu 固化国内模型目录；InFu 完全开放，用户配置即接入。
  */
 
-import { createOpenAI } from "@ai-sdk/openai";
-import { createAnthropic } from "@ai-sdk/anthropic";
-import { createGoogleGenerativeAI } from "@ai-sdk/google";
-import type { LanguageModel } from "ai";
 import type { InfuConfig, ModelConfig, ProviderConfig, ProviderKind } from "@infu/shared";
 import { PROVIDER_TEMPLATES, getProviderTemplate } from "./templates.js";
 
@@ -98,57 +93,11 @@ export function resolveModelBaseURL(cfg: InfuConfig | null | undefined, model: M
   return resolveBaseURL(kind, p?.baseURL ?? model.baseURL);
 }
 
-/** 根据用户配置创建 LanguageModel（AI SDK v6 统一协议；v1 内嵌字段兼容，无调用点保留） */
-export function createModel(cfg: ModelConfig): LanguageModel {
-  const kind = cfg.provider ?? "custom";
-  const apiKey = cfg.apiKey || process.env[`INFU_${kind.toUpperCase()}_API_KEY`] || "";
-  const baseURL = cfg.baseURL || DEFAULT_BASE_URLS[kind];
-
-  // 调试：INFU_DEBUG_FETCH=1 时打印服务端真实请求与响应状态
-  const debugFetch: typeof fetch | undefined = process.env.INFU_DEBUG_FETCH
-    ? async (url, init) => {
-        const headers = (init?.headers ?? {}) as Record<string, string>;
-        const auth = String(headers.authorization ?? headers.Authorization ?? "");
-        console.error(`[debug-fetch] → ${String(url)}`);
-        console.error(`[debug-fetch]   auth: ${auth.slice(0, 20)}...（len=${auth.length}）`);
-        console.error(`[debug-fetch]   body: ${String(init?.body ?? "").slice(0, 200)}`);
-        const res = await fetch(url, init);
-        const body = await res.text().catch(() => "");
-        console.error(`[debug-fetch] ← status=${res.status} type=${res.headers.get("content-type")} body=${body.slice(0, 200)}`);
-        return new Response(body, { status: res.status, statusText: res.statusText, headers: res.headers });
-      }
-    : undefined;
-
-  switch (kind) {
-    case "openai":
-      // 官方 OpenAI：统一走 Chat Completions（与兼容端点行为一致，最通用）
-      return createOpenAI({ apiKey, fetch: debugFetch }).chat(cfg.model);
-    case "anthropic":
-      return createAnthropic({ apiKey })(cfg.model);
-    case "google":
-      return createGoogleGenerativeAI({ apiKey })(cfg.model);
-    case "deepseek":
-    case "zhipu":
-    case "qwen":
-    case "ollama":
-    case "custom": {
-      // OpenAI 兼容协议：DeepSeek/智谱/通义/Ollama/自建网关均提供 /v1 兼容接口
-      // ⚠️ 必须用 .chat()（Chat Completions）——默认的 Responses API 兼容端点不支持
-      if (kind === "custom" && !baseURL) {
-        throw new Error(`模型 "${cfg.name}"（custom）缺少 baseURL，请配置任意 OpenAI 兼容端点`);
-      }
-      return createOpenAI({
-        apiKey: apiKey || "not-needed",
-        fetch: debugFetch,
-        ...(baseURL ? { baseURL } : {}),
-      }).chat(cfg.model);
-    }
-    default: {
-      const _exhaustive: never = kind;
-      throw new Error(`未知的模型供应商: ${String(_exhaustive)}`);
-    }
-  }
-}
+/**
+ * v3.6 审计修复：createModel（AI SDK 适配）已删除——自研 OpenAI 兼容流式客户端
+ * （providers/chat.ts streamChat）才是实际模型调用路径，本函数自 v1 起无任何调用点
+ * （含 createOpenAI/createAnthropic/createGoogleGenerativeAI 的 AI SDK 依赖随之移除）。
+ */
 
 /** 读取用户配置（~/.infu/config.json；zod schema 校验 + v1 在线迁移 + 损坏备份） */
 import { readFileSync, existsSync, copyFileSync, mkdirSync, writeFileSync, chmodSync, renameSync } from "node:fs";

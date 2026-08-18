@@ -8,7 +8,7 @@
  *  - applyPreToolUseHooks / applyPostToolUseHooks：allow 放行 / block 拦截 / 改 args / 改 result / 抛错放行
  *  - skills：frontmatter 解析（正常/缺失/目录名不一致）、listSkills 层级（项目级 + config 显式）、buildSkillsPrompt
  *  - infuConfigSchema：plugins/skills 节 + passthrough
- *  - API：/api/plugins CRUD + probe、/api/skills（备份/恢复用户配置）
+ *  - API：/api/plugins CRUD + probe、/api/skills（数据目录重定向隔离）
  *  - 工具层：plugin_add（high + requireExplicit 审批/白名单）、use_skill（读取/未找到）
  */
 import { createApp } from "../src/server.js";
@@ -21,9 +21,10 @@ import { isProtectedPath } from "../src/sandbox/index.js";
 import { TOOLS } from "../src/tools/index.js";
 import { parseInfuConfig } from "@infu/shared";
 import type { AgentEvent, PluginConfig } from "@infu/shared";
-import { mkdtempSync, writeFileSync, mkdirSync, existsSync, copyFileSync, rmSync } from "node:fs";
-import { tmpdir, homedir } from "node:os";
+import { mkdtempSync, writeFileSync, mkdirSync, existsSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { setDataDirForTest } from "../src/data-dir.js";
 
 let passed = 0;
 let failed = 0;
@@ -33,6 +34,10 @@ function check(name: string, cond: boolean, detail = "") {
 }
 
 console.log("\n=== 插件系统 v1 自测 ===\n");
+
+// v3.6：数据目录重定向到临时目录（原备份/恢复真实 ~/.infu/config.json 崩溃即污染用户数据）
+const tmpData = mkdtempSync(join(tmpdir(), "infu-test-"));
+setDataDirForTest(tmpData);
 
 // ── 0. 测试夹具：临时项目 + 插件文件 + skill 目录 ──
 const proj = mkdtempSync(join(tmpdir(), "infu-plugin-test-"));
@@ -229,26 +234,26 @@ console.log("\n▶ config schema（plugins/skills 节）");
   check("旧配置无插件节兼容", r2.ok && r2.config.plugins === undefined);
 }
 
-// ── 4.5 写保护精确化（v2.3 批 2：项目内 .infu/skills 放开，用户级 ~/.infu 仍保护）──
-console.log("\n▶ 写保护：用户级 .infu 仍拦，项目级 .infu/skills 放开");
+// ── 4.5 写保护精确化（v2.3 批 2：项目内 .infu/skills 放开，数据目录仍保护）──
+console.log("\n▶ 写保护：数据目录仍拦，项目级 .infu/skills 放开");
 {
-  const homeInfu = join(homedir(), ".infu", "config.json");
-  check("用户级 ~/.infu 仍受保护", isProtectedPath(homeInfu) === "InFu 配置目录");
-  check("用户级 ~/.infu 目录本身受保护", isProtectedPath(join(homedir(), ".infu")) === "InFu 配置目录");
+  // v3.6：数据目录已重定向到临时目录——「InFu 配置目录」规则跟随 dataDir，
+  // 断言改对重定向目录验证（原针对真实 ~/.infu，重定向后不再是数据目录）
+  const homeInfu = join(tmpData, "config.json");
+  check("数据目录 config.json 仍受保护", isProtectedPath(homeInfu) === "InFu 配置目录");
+  check("数据目录本身受保护", isProtectedPath(tmpData) === "InFu 配置目录");
   check("项目内 .infu/skills 放开", isProtectedPath(join(proj, ".infu", "skills", "x", "SKILL.md")) === null);
   check("项目内 .infu 目录放开", isProtectedPath(join(proj, ".infu")) === null);
-  // 其他敏感目录不受影响
+  // 其他敏感目录不受影响（模式匹配，与数据目录无关）
   check(".ssh 仍受保护", isProtectedPath(join(proj, ".ssh", "id_rsa")) === "SSH 密钥目录");
-  check(".aws 仍受保护", isProtectedPath(join(homedir(), ".aws", "credentials")) === "AWS 凭据目录");
+  check(".aws 仍受保护", isProtectedPath(join(proj, ".aws", "credentials")) === "AWS 凭据目录");
 }
 
 // ── 5. API：/api/plugins + /api/skills ──
 console.log("\n▶ /api/plugins + /api/skills API");
 {
-  const CONFIG = join(homedir(), ".infu", "config.json");
-  const backup = CONFIG + ".plugin-test-backup";
-  const hadConfig = existsSync(CONFIG);
-  if (hadConfig) copyFileSync(CONFIG, backup);
+  // v3.6：config 已重定向到临时数据目录（无需备份/恢复真实 ~/.infu/config.json）
+  const CONFIG = join(tmpData, "config.json");
   const saveTestConfig = (cfg: unknown) => writeFileSync(CONFIG, JSON.stringify(cfg, null, 2), "utf-8");
 
   const app = createApp({ defaultRoot: proj });
@@ -360,7 +365,8 @@ console.log("\n▶ /api/plugins + /api/skills API");
     // 清理生成的插件（删除注册 + 默认目录文件 + 自定义路径文件）
     await call("/api/plugins/gen-hooks", { method: "DELETE" });
     await call("/api/plugins/gen-hooks-3", { method: "DELETE" });
-    const genDefaultFile = join(homedir(), ".infu", "plugins", "gen-hooks.mjs");
+    // v3.6：生成默认目录跟随重定向数据目录（原为真实 ~/.infu/plugins/）
+    const genDefaultFile = join(tmpData, "plugins", "gen-hooks.mjs");
     if (existsSync(genDefaultFile)) rmSync(genDefaultFile, { force: true });
     if (j.path && existsSync(j.path)) rmSync(j.path, { force: true });
 
@@ -390,12 +396,7 @@ console.log("\n▶ /api/plugins + /api/skills API");
     r = await call("/api/skills/good-skill", { method: "DELETE" });
     check("移除不存在 → 404", r.status === 404);
   } finally {
-    if (hadConfig) {
-      copyFileSync(backup, CONFIG);
-      rmSync(backup);
-    } else {
-      rmSync(CONFIG, { force: true });
-    }
+    // v3.6：无需恢复——config 已重定向到临时数据目录，随 tmpData 一并清理
   }
 }
 
@@ -426,6 +427,9 @@ console.log("\n▶ plugin_add / use_skill 工具层");
   const out3 = await t2.execute({ name: "no-such" }, ctx);
   check("未找到技能 → 提示可用列表", out3.includes("未找到技能") && out3.includes("good-skill"));
 }
+
+// 清理临时数据目录（v3.6：只删测试自己的临时目录，绝不动用户 ~/.infu）
+try { rmSync(tmpData, { recursive: true, force: true }); } catch { /* 忽略 */ }
 
 console.log(`\n=== 结果：${passed} 通过 / ${failed} 失败 ===`);
 process.exit(failed ? 1 : 0);

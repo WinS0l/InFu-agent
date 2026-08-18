@@ -4,10 +4,11 @@
  */
 import { TOOLS } from "../src/tools/index.js";
 import { htmlToText } from "../src/tools/web.js";
-import { configPath, saveConfig } from "../src/providers/registry.js";
-import { existsSync, copyFileSync, rmSync } from "node:fs";
-import { homedir } from "node:os";
+import { saveConfig } from "../src/providers/registry.js";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { setDataDirForTest } from "../src/data-dir.js";
 import { createServer, type Server } from "node:http";
 import type { ToolContext, AgentEvent } from "@infu/shared";
 
@@ -18,16 +19,17 @@ function check(name: string, cond: boolean, detail = "") {
   else { failed++; console.log(`  ❌ ${name} ${detail}`); }
 }
 
-// v3.5 审计修复：固定 smart 档（备份/恢复）——「只读联网 low 自动放行」断言依赖档位，
+// v3.5 审计修复：固定 smart 档——「只读联网 low 自动放行」断言依赖档位，
 // 用户真实配置为 confirm 时 webfetch 靠已批准记忆侥幸通过、web_search 无记忆则被拒（假阴性）
-const CONFIG_FILE = configPath();
-const CONFIG_HAD = existsSync(CONFIG_FILE);
-const CONFIG_BACKUP = join(homedir(), ".infu", "config.json.web-tools-test-backup");
-if (CONFIG_HAD) copyFileSync(CONFIG_FILE, CONFIG_BACKUP);
+// v3.6：数据目录重定向到临时目录（原备份/恢复真实 ~/.infu/config.json 崩溃即污染用户数据）
+const tmpData = mkdtempSync(join(tmpdir(), "infu-test-"));
+setDataDirForTest(tmpData);
 saveConfig({ models: [], approvalPolicy: { mode: "smart" } });
 
 // ── 本地 HTTP 服务器（webfetch 目标）──
 // v2.13：SSRF 防护默认拦截本地地址——测试场景显式豁免（仅本套件；生产默认不设）
+// v3.6：记录原值并在末尾恢复（原实现设置后不恢复——本进程内后续 SSRF 拦截全部失效）
+const ORIG_ALLOW_PRIVATE = process.env.INFU_ALLOW_PRIVATE_URL;
 process.env.INFU_ALLOW_PRIVATE_URL = "1";
 let server: Server;
 let base = "";
@@ -83,21 +85,38 @@ const wfAuto = await TOOLS.webfetch.execute({ url: base }, autoCtx);
 check("webfetch 自动放行执行成功", wfAuto.includes("Hello InFu"), wfAuto);
 check("webfetch 未触发审批", netApprovals === 0, `approvals=${netApprovals}`);
 const wsAuto = await TOOLS.web_search.execute({ query: "infu" }, autoCtx);
-check("web_search 自动放行（返回合理文本）", typeof wsAuto === "string" && (wsAuto.includes("搜索结果") || wsAuto.includes("失败") || wsAuto.includes("未找到")), wsAuto);
+// v3.6 恒真断言修复：原 web_search 走真实 Bing/DDG 网络（成败皆过、测不到解析正确性）
+// → mock Bing RSS 返回固定结果，断言真实解析（标题/链接/摘要字段）
+const ORIG_FETCH = globalThis.fetch;
+(globalThis as any).fetch = async (url: unknown, init?: unknown) => {
+  if (String(url).includes("bing.com/search")) {
+    const xml =
+      `<?xml version="1.0" encoding="UTF-8"?><rss version="2.0"><channel><title>Bing</title>` +
+      `<item><title>InFu 测试搜索结果</title><link>https://example.com/infu</link><description>InFu 是一个 AI 编程助手</description></item>` +
+      `</channel></rss>`;
+    return new Response(xml, { status: 200, headers: { "content-type": "application/rss+xml; charset=utf-8" } });
+  }
+  return ORIG_FETCH(url as RequestInfo | URL, init as RequestInit | undefined);
+};
+try {
+  const wsMock = await TOOLS.web_search.execute({ query: "infu" }, autoCtx);
+  check("web_search 解析 mock 结果（标题）", wsMock.includes("InFu 测试搜索结果"), wsMock);
+  check("web_search 解析 mock 结果（链接）", wsMock.includes("https://example.com/infu"), wsMock);
+} finally {
+  globalThis.fetch = ORIG_FETCH;
+}
 
 // 4. web_search 审批通过但后端失败 → 错误透出（不崩）
 console.log("\n▶ web_search");
 const ws = await run("web_search", { query: "infu" });
 // 通过审批后：可能成功（有网）或失败（无网），都应返回合理文本而非抛异常
-check("web_search 返回合理结果", typeof ws === "string" && (ws.includes("搜索结果") || ws.includes("失败") || ws.includes("未找到")), ws);
+check("web_search 返回合理结果", typeof ws === "string" && ws.length > 0, ws);
 
 server.close();
-// 恢复用户真实配置
-if (CONFIG_HAD) {
-  copyFileSync(CONFIG_BACKUP, CONFIG_FILE);
-  rmSync(CONFIG_BACKUP, { force: true });
-} else {
-  rmSync(CONFIG_FILE, { force: true });
-}
+// v3.6：恢复 INFU_ALLOW_PRIVATE_URL 原值（原实现遗留——同进程后续 SSRF 拦截全失效）
+if (ORIG_ALLOW_PRIVATE === undefined) delete process.env.INFU_ALLOW_PRIVATE_URL;
+else process.env.INFU_ALLOW_PRIVATE_URL = ORIG_ALLOW_PRIVATE;
+// 清理临时数据目录（v3.6：只删测试自己的临时目录，绝不动用户 ~/.infu）
+try { rmSync(tmpData, { recursive: true, force: true }); } catch { /* 忽略 */ }
 console.log(`\n=== 结果：${passed} 通过 / ${failed} 失败 ===`);
 process.exit(failed ? 1 : 0);

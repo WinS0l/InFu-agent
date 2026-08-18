@@ -22,21 +22,20 @@ function restoreFetch() {
   globalThis.fetch = originalFetch;
 }
 
-// 临时配置文件隔离（server 用 ~/.infu/config.json——这里备份/恢复）
-import { readFileSync, writeFileSync, existsSync, copyFileSync, rmSync } from "node:fs";
-import { homedir } from "node:os";
+// v3.6：数据目录重定向到临时目录（server 用 configPath()——原备份/恢复真实
+// ~/.infu/config.json 崩溃即污染用户数据）
+import { writeFileSync, rmSync, mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
-const CONFIG = join(homedir(), ".infu", "config.json");
-const backup = CONFIG + ".providers-test-backup";
+import { setDataDirForTest } from "../src/data-dir.js";
+const tmpData = mkdtempSync(join(tmpdir(), "infu-test-"));
+setDataDirForTest(tmpData);
+const CONFIG = join(tmpData, "config.json");
 function saveTestConfig(cfg: unknown) {
   writeFileSync(CONFIG, JSON.stringify(cfg, null, 2), "utf-8");
 }
 
 console.log("\n=== 供应商上游获取自测 ===\n");
-
-// 备份用户配置（测试后恢复）
-const hadConfig = existsSync(CONFIG);
-if (hadConfig) copyFileSync(CONFIG, backup);
 
 const app = createApp();
 const call = (url: string, init?: RequestInit) => app.request(url, init);
@@ -92,12 +91,11 @@ try {
   check("data 非数组返回空列表", j5.ok && j5.models.length === 0);
 } finally {
   restoreFetch();
-  // 恢复用户配置
-  if (hadConfig) {
-    copyFileSync(backup, CONFIG);
-    rmSync(backup, { force: true });
-  }
+  // v3.6：无需恢复——config 已重定向到临时数据目录，随 tmpData 一并清理
 }
+
+// 清理临时数据目录（v3.6：只删测试自己的临时目录，绝不动用户 ~/.infu）
+try { rmSync(tmpData, { recursive: true, force: true }); } catch { /* 忽略 */ }
 
 console.log(`\n=== 结果：${passed} 通过 / ${failed} 失败 ===`);
 process.exit(failed ? 1 : 0);

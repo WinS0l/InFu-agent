@@ -12,11 +12,12 @@
  *  4. 审计标签 egress-blocked 落库
  */
 import { TOOLS } from "../src/tools/index.js";
-import { sanitizeEnv } from "../src/sandbox/index.js";
+import { sanitizeEnv, commandLogPath } from "../src/sandbox/index.js";
 import { detectEgress, egressBlockedMessage } from "../src/sandbox/net-policy.js";
-import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
+import { mkdtempSync, writeFileSync, rmSync, readFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { setDataDirForTest } from "../src/data-dir.js";
 import type { ToolContext, AgentEvent } from "@infu/shared";
 
 let passed = 0;
@@ -27,6 +28,11 @@ function check(name: string, cond: boolean, detail = "") {
 }
 
 console.log("\n=== 网络出站软控制策略自测（M6） ===\n");
+
+// v3.6：数据目录重定向到临时目录（原审计断言读真实 ~/.infu/logs/commands.log
+// 历史累计——重定向后日志只含本套件自身写入的条目，不再依赖/污染用户数据）
+const tmpData = mkdtempSync(join(tmpdir(), "infu-test-"));
+setDataDirForTest(tmpData);
 
 // 1. detectEgress 检测
 console.log("▶ detectEgress 检测");
@@ -87,9 +93,9 @@ check("network=true 审批拒绝 → 普通命令按断网执行并告知", r5.i
 
 // 3. 审计：egress-blocked 与沙箱档位写入 commands.log
 console.log("\n▶ 审计");
-import { readFileSync, existsSync } from "node:fs";
-import { homedir } from "node:os";
-const logPath = join(homedir(), ".infu", "logs", "commands.log");
+// v3.6：logPath 跟随重定向数据目录（commandLogPath）——日志只含本套件自身
+// 运行写入的条目（r1/r4 各写一条 egress-blocked），不再读真实历史累计日志
+const logPath = commandLogPath();
 if (existsSync(logPath)) {
   const log = readFileSync(logPath, "utf-8");
   check("外传拦截写入审计（egress-blocked）", (log.match(/sandbox=egress-blocked/g) ?? []).length >= 2, log.slice(-300));
@@ -102,6 +108,8 @@ if (existsSync(logPath)) {
 check("拦截文案含工具名与放行指引", egressBlockedMessage("curl").includes("curl") && egressBlockedMessage("curl").includes("network=true"));
 
 rmSync(proj, { recursive: true, force: true });
+// 清理临时数据目录（v3.6：只删测试自己的临时目录，绝不动用户 ~/.infu）
+try { rmSync(tmpData, { recursive: true, force: true }); } catch { /* 忽略 */ }
 
 console.log(`\n=== 结果：${passed} 通过 / ${failed} 失败 ===`);
 process.exit(failed ? 1 : 0);

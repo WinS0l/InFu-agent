@@ -148,6 +148,11 @@ interface StoreState {
    *  依赖它做「有截图才刷新」——无轮询，Agent 实际截屏才拉一次截图列表） */
   screenShotTick: number;
   bumpScreenShots: () => void;
+  /** v3.3 补 16：Agent 打开浏览器的待建 tab（URL 或 null）——右侧栏折叠时 open-request
+   *  事件先由 App 顶层响应（展开侧栏），BrowserPanel 那时才挂载、事件订阅已错过；
+   *  改为 store 状态记录，BrowserPanel 挂载/变化时消费建 tab（恢复 v3.6 误删的 tick 机制） */
+  pendingBrowserOpen: string | null;
+  setPendingBrowserOpen: (url: string | null) => void;
   /** v3.1：每会话消息缓存（多会话并行：流式事件写对应缓存；切换会话秒切，不丢流式状态） */
   sessionCache: Record<string, ChatMsg[]>;
   /** v3.1：SSE 事件路由目标会话（api.ts 每连接设置；null = 当前视图会话） */
@@ -193,8 +198,6 @@ interface StoreState {
   diffContent: string;
   /** 右侧面板：本次任务的文件修改摘要 */
   fileChanges: string[];
-  /** 当前任务来源模板 id（v2.2 动态步数启发式参考；null = 普通任务） */
-  templateId: string | null;
   /** 各编排阶段使用的模型（v2.2 角色路由可视化：Timeline 阶段头展示） */
   phaseModels: Partial<Record<PhaseId, string>>;
   /** v2 思考级别（4 档 UI，按模型实际级别数自动映射；1-4，默认 2） */
@@ -217,12 +220,7 @@ interface StoreState {
   sidebarCollapsed: boolean;
   sidebarWidth: number;
   browserMenuOpen: boolean;
-  browserOpenTick: number;
-  browserOpenUrl?: string;
   setBrowserMenuOpen: (v: boolean) => void;
-  bumpBrowserOpen: (url?: string) => void;
-  clearBrowserOpenUrl: () => void;
-  clearBrowserOpenTick: () => void;
   detailsOpen: boolean;
   detailsWidth: number;
   setSidebarCollapsed: (v: boolean) => void;
@@ -239,7 +237,6 @@ interface StoreState {
   setModels: (models: ModelConfig[]) => void;
   setModelId: (id: string) => void;
   setRoot: (root: string) => void;
-  setTemplateId: (id: string | null) => void;
   setThinkingLevel: (level: number) => void;
   /** v2.1 会话：列表 + 当前会话 */
   sessions: SessionMeta[];
@@ -330,7 +327,6 @@ interface StoreState {
   setReport: (content: string) => void;
   /** v3：LLM usage（done 事件携带的缓存命中统计 → StatsLine；v2.12 四桶：uncached=miss/output=completion/cacheRead=hit） */
   usage: { cacheHit: number; cacheMiss: number; promptTokens: number; completionTokens: number };
-  setUsage: (u: { cacheHit: number; cacheMiss: number; promptTokens: number; completionTokens: number }) => void;
   /** v2.13：usage 按会话存（切换会话后 StatsLine 显示该会话自己的数字） */
   usageBySession: Record<string, { cacheHit: number; cacheMiss: number; promptTokens: number; completionTokens: number }>;
   setUsageFor: (sid: string, u: { cacheHit: number; cacheMiss: number; promptTokens: number; completionTokens: number }) => void;
@@ -456,55 +452,71 @@ function attachSubagentId(msgs: ChatMsg[], ev: Extract<AgentEvent, { type: "suba
 /**
  * 子智能体内部过程事件路由（带 subagentId）：收集进线程消息流（右侧栏详情的数据源；
  * 与父 Agent 消息同构——思考/文本/工具过程）。主对话流不再内嵌展示。
+ * v3.6 审计修复：原实现原地改 thread.messages（push/`+=`）——thread 对象引用不变，
+ * 按 subagentThreads[id] 订阅的组件不重渲染（此前靠 RightRail 全量订阅兜底，脆弱）；
+ * 改为不可变更新：返回新线程对象（消息数组/消息对象全部重建）。
  */
-function routeSubagentEvent(threads: Record<string, SubagentThread>, ev: AgentEvent): boolean {
-  if (!ev || !("subagentId" in ev) || !ev.subagentId) return false;
+function routeSubagentEvent(thread: SubagentThread, ev: AgentEvent): SubagentThread | null {
+  if (!ev || !("subagentId" in ev) || !ev.subagentId) return null;
   const id = ev.subagentId;
-  const thread = threads[id];
-  if (!thread) return false;
   const msgs = thread.messages;
   const cur = msgs[msgs.length - 1];
+  let next = msgs; // 仅在有变更时替换为新区块
   switch (ev.type) {
     case "step-start": {
-      // 新一轮 = 新消息（与父 Agent 同构）；同轮重复 step-start 忽略
       if (cur && (cur.text || cur.reasoning || cur.tools.length)) {
-        msgs.push({ id: `${id}-s${ev.step}`, text: "", tools: [], step: ev.step });
+        next = [...msgs, { id: `${id}-s${ev.step}`, text: "", tools: [], step: ev.step }];
       }
       break;
     }
-    case "text":
-      // v2.14 批 3：工具调用之后的文本独立成消息（子线程同构）
-      if (!cur || cur.tools.length > 0) msgs.push({ id: `${id}-s${(cur?.step ?? 0) + 1}`, text: "", tools: [], step: cur?.step ?? 1 });
-      msgs[msgs.length - 1].text += ev.text;
+    case "text": {
+      if (!cur || cur.tools.length > 0) {
+        next = [...msgs, { id: `${id}-s${(cur?.step ?? 0) + 1}`, text: ev.text, tools: [], step: cur?.step ?? 1 }];
+      } else {
+        next = msgs.map((m, i) => (i === msgs.length - 1 ? { ...m, text: m.text + ev.text } : m));
+      }
       break;
-    case "reasoning":
-      if (!cur) msgs.push({ id: `${id}-s1`, text: "", tools: [], step: 1 });
-      msgs[msgs.length - 1].reasoning = (msgs[msgs.length - 1].reasoning ?? "") + ev.text;
+    }
+    case "reasoning": {
+      if (!cur) {
+        next = [...msgs, { id: `${id}-s1`, text: "", tools: [], reasoning: ev.text, step: 1 }];
+      } else {
+        next = msgs.map((m, i) =>
+          i === msgs.length - 1 ? { ...m, reasoning: (m.reasoning ?? "") + ev.text } : m
+        );
+      }
       break;
-    case "tool-start":
-      if (!cur) msgs.push({ id: `${id}-s1`, text: "", tools: [], step: 1 });
-      msgs[msgs.length - 1].tools.push({
-        id: `${id}-t${msgs[msgs.length - 1].tools.length}-${ev.tool}`,
+    }
+    case "tool-start": {
+      const base = cur ?? { id: `${id}-s1`, text: "", tools: [], step: 1 };
+      const last = { ...base, tools: [...base.tools] };
+      last.tools.push({
+        id: `${id}-t${last.tools.length}-${ev.tool}`,
         tool: ev.tool,
         args: ev.args,
         risk: ev.risk,
         status: "running",
-        step: msgs[msgs.length - 1].step,
+        step: last.step,
         startedAt: Date.now(),
       });
+      next = cur ? msgs.map((m, i) => (i === msgs.length - 1 ? last : m)) : [...msgs, last];
       break;
+    }
     case "tool-result": {
-      const tools = msgs[msgs.length - 1]?.tools;
-      if (tools) {
-        const x = tools.find((it) => it.tool === ev.tool && it.status === "running");
-        if (x) { x.status = ev.ok ? "ok" : "error"; x.summary = ev.summary; }
+      const last = msgs[msgs.length - 1];
+      const idx = last?.tools.findIndex((it) => it.tool === ev.tool && it.status === "running");
+      if (last && idx !== undefined && idx >= 0) {
+        const status: ToolEventState["status"] = ev.ok ? "ok" : "error";
+        const tools = last.tools.map((t, i) => (i === idx ? { ...t, status, summary: ev.summary } : t));
+        next = msgs.map((m, i) => (i === msgs.length - 1 ? { ...m, tools } : m));
       }
       break;
     }
     default:
-      break; // approval-*/model-fallback/context-compressed 等不进入消息流
+      return null; // approval-*/model-fallback/context-compressed 等不进入消息流
   }
-  return true;
+  if (next === msgs) return null;
+  return { ...thread, messages: next };
 }
 
 /** v2.5 重放辅助：子智能体过程事件 → 线程（会话历史重建） */
@@ -516,6 +528,7 @@ export const useStore = create<StoreState>()(
   modelId: "",
   root: "", // v2.6.2：初始为空——由设置 defaultRoot 或侧栏项目选择填充（不再指向测试占位目录）
   screenShotTick: 0, // v3.3 补 9：截图事件标记（screen_capture tool-result 到达 +1）
+  pendingBrowserOpen: null, // v3.3 补 16：Agent 开浏览器待建 tab
   messages: [],
   runningIds: [],
   running: false,
@@ -623,7 +636,6 @@ export const useStore = create<StoreState>()(
   stepStartTimes: {},
   diffContent: "",
   fileChanges: [],
-  templateId: null,
   phaseModels: {},
   thinkingLevel: 2,
   uiShowThinking: true,
@@ -636,8 +648,6 @@ export const useStore = create<StoreState>()(
   sidebarWidth: 280,
   // v3.0 批 3：右侧栏「新建 tab」菜单打开标记（浏览器面板据此让位视图，防原生层覆盖）
   browserMenuOpen: false,
-  browserOpenTick: 0,
-  browserOpenUrl: undefined as string | undefined,
   detailsOpen: true,
   detailsWidth: 360,
   terminalOpen: false,
@@ -655,9 +665,6 @@ export const useStore = create<StoreState>()(
   setSidebarCollapsed: (v) => set({ sidebarCollapsed: v }),
   setSidebarWidth: (w) => set({ sidebarWidth: Math.max(264, Math.min(420, w)) }),
   setBrowserMenuOpen: (v) => set({ browserMenuOpen: v }),
-  bumpBrowserOpen: (url) => set((s) => ({ browserOpenTick: s.browserOpenTick + 1, browserOpenUrl: url })),
-  clearBrowserOpenUrl: () => set({ browserOpenUrl: undefined }),
-  clearBrowserOpenTick: () => set({ browserOpenTick: 0 }),
   setDetailsOpen: (v) => set({ detailsOpen: v }),
   setDetailsWidth: (w) => set({ detailsWidth: Math.max(300, Math.min(520, w)) }),
 
@@ -669,7 +676,6 @@ export const useStore = create<StoreState>()(
     });
   },
   setModelId: (id) => set({ modelId: id }),
-  setTemplateId: (id) => set({ templateId: id }),
   setThinkingLevel: (level) => set({ thinkingLevel: Math.max(1, Math.min(4, Math.round(level)))}),
   approvalMode: "smart",
   setApprovalMode: (mode) => set({ approvalMode: mode }),
@@ -732,7 +738,15 @@ export const useStore = create<StoreState>()(
     const subagentThreads: Record<string, SubagentThread> = {};
     for (const { seq, ts, event } of events) {
       // v2.5：子智能体内部事件（带 subagentId）→ 收集进线程消息流，不进入主消息流
-      if (routeSubagentEvent(subagentThreads, event)) continue;
+    // v3.6：适配 routeSubagentEvent 新签名（不可变单线程更新）
+    if (event && "subagentId" in event && event.subagentId) {
+      const t = subagentThreads[event.subagentId];
+      if (t) {
+        const next = routeSubagentEvent(t, event);
+        if (next) subagentThreads[event.subagentId] = next;
+      }
+      continue;
+    }
       switch (event.type) {
         case "user-message":
           // seqStart 记 user-message 事件 seq（回滚锚点：编辑重发 = 替换这条用户消息）
@@ -1185,8 +1199,13 @@ export const useStore = create<StoreState>()(
     const s = get();
     const sid = targetId(s);
     const msgs = viewMsgs(s, sid);
-    const msg = msgs[msgs.length - 1];
-    if (!msg || msg.role !== "assistant") return;
+    // v3.6 审计修复：原只匹配**最后一条**消息——中间文本消息（appendText 在末条含工具时
+    // 新建消息）/ 并行工具场景下 tool-result 到达时匹配不到 → 工具行卡「运行中」直到任务
+    // 结束重放（队列连发时重放被跳过可能永久错）；改为从后往前找包含该 tool 且仍 running 的消息
+    const msg = [...msgs].reverse().find(
+      (m) => m.role === "assistant" && m.tools.some((t) => t.tool === ev.tool && t.status === "running")
+    );
+    if (!msg) return;
     // v3.3 补 9：screen_capture 完成 → 截图事件标记（ComputerUsePane 事件驱动刷新，无轮询）
     if (ev.tool === "screen_capture") get().bumpScreenShots();
     // 收集 diff 输出 → 右侧面板（仅视图会话）
@@ -1219,6 +1238,8 @@ export const useStore = create<StoreState>()(
   setRunning: (r) => set((s) => patchRunning(s, s.activeSessionId, r)),
   // v3.3 补 9：截图事件标记 +1（screen_capture tool-result 到达时调用；ComputerUsePane 事件驱动刷新）
   bumpScreenShots: () => set((s) => ({ screenShotTick: s.screenShotTick + 1 })),
+  // v3.3 补 16：Agent open-request → 记录待建 tab（BrowserPanel 消费后清空）
+  setPendingBrowserOpen: (url) => set({ pendingBrowserOpen: url }),
   // v2.13：abortController 按会话存（并行会话互相踩——stop 失效/停错对象修复）
   setAbortController: (c) =>
     set((s) => {
@@ -1283,11 +1304,16 @@ export const useStore = create<StoreState>()(
     if (!a) return;
     // 从队列移除当前审批（弹窗自动显示下一个）
     set((s) => ({ approvals: s.approvals.filter((x) => x.id !== a.id) }));
+    // v3.6 审计修复：原 .catch(() => {}) 静默——请求失败时服务端 pendingApprovals 挂起
+    // 等待、任务永久悬挂且用户无感知；失败重新入队 + 错误提示（用户可重试）
     apiFetch(`/api/approvals/${a.id}`, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ approved }),
-    }).catch(() => {});
+    }).catch(() => {
+      get().addErrorFor(a.sessionId ?? sid, "审批提交失败（网络错误），已恢复审批弹窗——请重新点击允许/拒绝");
+      set((s) => ({ approvals: [...s.approvals, a] }));
+    });
   },
 
   /** v3.1 审批流优化：批量决策（并行工具调用堆积多个审批时一键全允/全拒） */
@@ -1301,7 +1327,11 @@ export const useStore = create<StoreState>()(
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ approved }),
-      }).catch(() => {});
+      }).catch(() => {
+        // v3.6：失败项重新入队 + 提示（其余项继续，不整体回滚）
+        get().addErrorFor(a.sessionId ?? sid, "批量审批部分提交失败（网络错误），已恢复对应审批弹窗");
+        set((s) => ({ approvals: s.approvals.some((x) => x.id === a.id) ? s.approvals : [...s.approvals, a] }));
+      });
     }
   },
 
@@ -1310,11 +1340,16 @@ export const useStore = create<StoreState>()(
     const q = get().askQuestion;
     if (!q) return;
     set({ askQuestion: null });
+    // v3.6 审计修复：原 .catch(() => {}) 静默——请求失败时服务端 pendingQuestions
+    // 挂起、Agent 永久等待且用户无感知；失败恢复弹窗 + 提示（用户可重试）
     apiFetch(`/api/ask/${q.id}`, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ answer }),
-    }).catch(() => {});
+    }).catch(() => {
+      get().addError("提问提交失败（网络错误），已恢复提问弹窗——请重新回答");
+      set({ askQuestion: q });
+    });
   },
 
   /** v2.5：subagent-start → 主对话流委派条目挂 subagentId + 初始化线程（右侧栏详情数据源） */
@@ -1338,11 +1373,15 @@ export const useStore = create<StoreState>()(
       };
     }),
 
-  /** v2.5：带 subagentId 的子智能体内部事件 → 收集进线程消息流（不进入主消息流） */
+  /** v2.5：带 subagentId 的子智能体内部事件 → 收集进线程消息流（不进入主消息流）
+   *  v3.6：不可变更新（routeSubagentEvent 返回新线程对象——按线程订阅的组件正确重渲染） */
   updateSubagent: (ev) => {
     const s = useStore.getState();
-    const threads = { ...s.subagentThreads };
-    if (routeSubagentEvent(threads, ev)) useStore.setState({ subagentThreads: threads });
+    if (!ev || !("subagentId" in ev) || !ev.subagentId) return;
+    const t = s.subagentThreads[ev.subagentId];
+    if (!t) return;
+    const next = routeSubagentEvent(t, ev);
+    if (next) useStore.setState({ subagentThreads: { ...s.subagentThreads, [ev.subagentId]: next } });
   },
 
   /** v2.5：subagent-done → 线程状态与最终摘要 */
@@ -1398,7 +1437,7 @@ export const useStore = create<StoreState>()(
     ),
 
   usage: { cacheHit: 0, cacheMiss: 0, promptTokens: 0, completionTokens: 0 },
-  setUsage: (u) => set({ usage: u }),
+  // v3.6：setUsage（直接写 usage）删除——仅 setUsageFor 按会话写入（api.ts 消费）
   setUsageFor: (sid, u) =>
     set((s) => {
       const usageBySession = { ...s.usageBySession, [sid]: u };

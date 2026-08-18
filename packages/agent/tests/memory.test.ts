@@ -207,7 +207,10 @@ console.log("\n── 工具接线 ──");
     ...over,
   });
 
-  (async () => {
+  // v3.6：顶层 await（原 fire-and-forget IIFE + setTimeout(50) 汇总竞态——IIFE 内
+  // 异步 I/O 超过 50ms 时断言与 process.exit 竞争，且 IIFE 异常成未处理 rejection 被
+  // 静默吞掉假绿；await 保证断言全部执行完再收尾）
+  await (async () => {
     // memory_read 工具：列主题 / 读主题 / global
     const rList = await TOOLS.memory_read.execute({}, mkCtx());
     check("memory_read 列主题", rList.includes("conventions"));
@@ -242,7 +245,7 @@ console.log("\n── 工具接线 ──");
     // 写保护不变：write_file 写数据目录（含记忆区）仍被拦截（绝对路径先触 root 越界，随后是保护检查；两种都算拦截成功）
     const rProt = await TOOLS.write_file.execute({ path: join(tmpData, "memory", "evil.md"), content: "x" }, mkCtx());
     check("write_file 写数据目录/记忆 仍被拦截", rProt.includes("越界") || rProt.includes("受保护区域"));
-  })();
+  })(); // v3.6：已 await（见上方注释）
 }
 
 // ── 5. 自动沉淀（项目历史）──
@@ -292,13 +295,11 @@ console.log("\n── 自动沉淀 ──");
   check("改动概览防爆（≤40 行）", count <= 40 && count === 40);
 }
 
-// ── 汇总（清理在最后：工具接线节是 microtask，先于同步清理执行）──
-setTimeout(() => {
-  rmSync(proj, { recursive: true, force: true });
-  // 清理临时数据目录（v3.5 审计修复：只删测试自己的临时目录，绝不动用户 ~/.infu）
-  try {
-    rmSync(tmpData, { recursive: true, force: true });
-  } catch { /* ignore */ }
-  console.log(`\n=== 记忆系统自测完成：${passed} 通过，${failed} 失败 ===\n`);
-  if (failed > 0) process.exit(1);
-}, 50);
+// ── 汇总（v3.6：工具接线节已 await，同步收尾——原 setTimeout(50) 竞态修复见上方）──
+rmSync(proj, { recursive: true, force: true });
+// 清理临时数据目录（v3.5 审计修复：只删测试自己的临时目录，绝不动用户 ~/.infu）
+try {
+  rmSync(tmpData, { recursive: true, force: true });
+} catch { /* ignore */ }
+console.log(`\n=== 记忆系统自测完成：${passed} 通过，${failed} 失败 ===\n`);
+if (failed > 0) process.exit(1);

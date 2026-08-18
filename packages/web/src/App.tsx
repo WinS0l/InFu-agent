@@ -189,9 +189,12 @@ export default function App() {
   useEffect(() => {
     const d = window.infuDesktop;
     if (!d) return;
-    return d.onOpenRequest(() => {
+    return d.onOpenRequest((url) => {
       setDetailsOpen(true);
       useStore.getState().openRightTab({ id: "browser", kind: "browser", label: "浏览器" });
+      // v3.3 补 16：记录待建 tab——BrowserPanel 可能此刻才挂载（订阅已错过 open-request
+      // 事件），由 store 状态驱动它消费建 webview（修复「Agent 打开浏览器无内容」）
+      useStore.getState().setPendingBrowserOpen(url ?? "");
     });
   }, []);
 

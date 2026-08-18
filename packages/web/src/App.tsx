@@ -298,8 +298,18 @@ export default function App() {
                     代码
                   </button>
                 </div>
-                {/* v3.3 补 13：终端开关 → 聊天界面顶部区域右上角（用户拍板；no-drag 可点） */}
-                <div className="ml-auto flex items-center pr-3" style={{ WebkitAppRegion: "no-drag" } as React.CSSProperties}>
+                {/* v3.3 补 13/15：终端开关 → 聊天界面顶部区域右上角（用户拍板；no-drag 可点）。
+                    v3.3 补 15：动态让位——Electron 原生三按钮悬浮窗口右上角（约 140px 宽、
+                    40px 高），header 右缘到窗口右缘的距离 = 右栏宽度（展开 360 / 折叠 56 /
+                    代码 0）；右栏折叠/代码模式时按钮会落进原生按钮区被盖（用户反馈），
+                    按缺口动态让位（让位 = 140 - 右栏宽度，最小 0） */}
+                <div
+                  className="ml-auto flex items-center"
+                  style={{
+                    paddingRight: Math.max(0, 140 - (viewMode === "code" ? 0 : detailsOpen ? detailsWidth : 56)),
+                    WebkitAppRegion: "no-drag",
+                  } as React.CSSProperties}
+                >
                   {viewMode === "chat" && (
                     <TerminalToggleButton open={terminalOpen} onClick={() => setTerminalOpen(!terminalOpen)} />
                   )}

@@ -66,6 +66,9 @@ export default function CodeView() {
     const root = useWorktree && worktree ? worktree.path : rawRoot;
   const codeViewFile = useStore((s) => s.codeViewFile);
   const [files, setFiles] = useState<FsTreeFile[] | null>(null);
+  // v3.3 补 22：文件树实际加载成功的 root——worktree 残留路径失败回退项目根后，
+  // 点击文件/工具行定位必须用回退后的 root（否则内容请求仍打无效路径 → 空）
+  const [effRoot, setEffRoot] = useState(rawRoot);
   const [collapsed, setCollapsed] = useState<Record<string, boolean>>({});
   const [sel, setSel] = useState<string | null>(null);
   const [content, setContent] = useState<{ content: string; binary?: boolean; size?: number; truncated?: boolean } | null>(null);
@@ -82,6 +85,7 @@ export default function CodeView() {
     // v3.3 补 21：worktree 残留路径无效（root 400）→ 回退项目根重试
     const load = (r: string) =>
       fetchFsTree(r).then((f) => {
+        setEffRoot(r); // 树从哪个 root 加载成功，内容就从这个 root 读
         setFiles(f);
         // 默认展开含改动文件的顶层目录（其余折叠）
         const changed = new Set<string>();
@@ -104,6 +108,11 @@ export default function CodeView() {
         fail(new Error("root 无效"));
       }
     });
+  }, [root]);
+
+  // v3.3 补 22：root（工作树/项目）变化时重置生效 root——避免旧值残留串到新会话
+  useEffect(() => {
+    setEffRoot(root);
   }, [root]);
 
   // v2.14：工具行文件链接外部定位——展开路径目录 + 选中文件 + 加载内容（消费后清空）
@@ -148,7 +157,7 @@ export default function CodeView() {
     // （对齐 ReviewPane 的 diffSeq 守卫）；加载失败不再卡死「加载中…」
     const req = ++fileSeqRef.current;
     try {
-      const d = await fetchFsFile(root, path);
+      const d = await fetchFsFile(effRoot, path);
       if (req !== fileSeqRef.current) return; // 过期响应丢弃
       setContent(d);
     } catch (e) {

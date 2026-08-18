@@ -154,6 +154,24 @@ console.log("\n▶ full 档断网策略放行");
   );
 }
 
+// 6. v5.0（C1）：会话级临时联网（非 full 档——按会话 id 放行，过期自动失效）
+console.log("\n▶ 会话级临时联网");
+{
+  const { setEgressAllow, clearEgressAllow, resetEgressAllow } = await import("../src/egress-allow.js");
+  resetEgressAllow();
+  setEgressAllow("net-sess-1", 5);
+  const ctxNet: ToolContext = { ...mkCtx(true), sessionId: "net-sess-1" };
+  const rn = await TOOLS.run_command.execute({ command: "echo curl test" }, ctxNet);
+  check("临时联网会话 egress 放行", rn.includes("curl test") && !rn.includes("断网策略拦截"), rn.slice(0, 120));
+  const rn2 = await TOOLS.run_command.execute({ command: "echo curl test" }, mkCtx(true));
+  check("无临时联网的会话仍拦截", rn2.includes("断网策略拦截"), rn2.slice(0, 120));
+  if (existsSync(logPath)) {
+    const log = readFileSync(logPath, "utf-8");
+    check("临时联网放行写入审计（egress-allowed-temp）", log.includes("sandbox=egress-allowed-temp"), log.slice(-300));
+  }
+  clearEgressAllow("net-sess-1");
+}
+
 rmSync(proj, { recursive: true, force: true });
 // 清理临时数据目录（v3.6：只删测试自己的临时目录，绝不动用户 ~/.infu）
 try { rmSync(tmpData, { recursive: true, force: true }); } catch { /* 忽略 */ }

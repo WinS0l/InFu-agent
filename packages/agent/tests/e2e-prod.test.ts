@@ -144,6 +144,26 @@ try {
       await page.waitForTimeout(800);
       const theme = await page.evaluate(() => document.documentElement.dataset.theme);
       check("服务端配置主题生效（config→store→dataset.theme）", theme === "light", String(theme));
+      // v5.1 补 4：欢迎界面（无活动会话）🌐 临时联网可用——菜单可展开、选时长后本地待定态激活
+      // （无会话时不开 POST，发送消息时随 /api/chat 的 egressMinutes 对本会话生效）
+      const pillClickable = await page.locator("button", { hasText: "临时联网" }).count();
+      check("欢迎界面 🌐 临时联网药丸可见", pillClickable > 0, String(pillClickable));
+      // button:has-text 精确命中按钮（text= 会同时匹配内层 span，严格模式抛错）
+      await page.locator("button", { hasText: "临时联网" }).first().click().catch((e) => console.log("  ⚠ pill click:", String(e).slice(0, 100)));
+      await page.waitForTimeout(300);
+      const menuOpen = await page.locator("text=联网时长").count();
+      check("欢迎界面药丸可展开时长菜单", menuOpen > 0, String(menuOpen));
+      await page.locator("button", { hasText: "10 分钟" }).first().click().catch(() => {});
+      await page.waitForTimeout(300);
+      const pillActive = await page.locator("text=联网中").count();
+      check("欢迎界面选时长后药丸激活（本地待定态）", pillActive > 0, String(pillActive));
+      // 关闭恢复
+      await page.locator("button", { hasText: "联网中" }).first().click().catch(() => {});
+      await page.waitForTimeout(200);
+      await page.locator("button", { hasText: "关闭临时联网" }).first().click().catch(() => {});
+      await page.waitForTimeout(300);
+      const pillClosed = await page.locator("text=联网中").count() === 0;
+      check("欢迎界面可关闭临时联网", pillClosed, "");
       await page.evaluate(() => localStorage.removeItem("infu-chat"));
     } finally {
       await browser.close().catch(() => {});

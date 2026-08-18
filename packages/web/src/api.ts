@@ -797,6 +797,9 @@ export async function sendChat(
     images?: string[];
     /** v3.0 批 12：桌面版附件路径引用（真实绝对路径，不复制内容） */
     paths?: string[];
+    /** v5.1 补 4：临时联网剩余分钟数（随请求交给服务端对本会话生效——欢迎界面
+     *  无会话时先选好时长，发送时原子绑定，无竞态） */
+    egressMinutes?: number;
   }
 ): Promise<boolean> {
   const st = useStore.getState();
@@ -805,6 +808,13 @@ export async function sendChat(
   st.setEventTarget(connSid);
   st.addUserMsg(prompt);
   st.ensureAssistant();
+
+  // v5.1 补 4：临时联网剩余分钟数（未显式传时从 store 取——排队消费/后台续跑同享；
+  // 欢迎界面无会话时药丸先本地开启，发送时随本请求生效）
+  const egressMinutes = opts?.egressMinutes ??
+    (st.egressUntil && st.egressUntil > Date.now()
+      ? Math.max(1, Math.ceil((st.egressUntil - Date.now()) / 60000))
+      : undefined);
 
   // 停止支持：AbortController 存入 store，点击停止按钮时 abort
   const controller = new AbortController();
@@ -846,6 +856,8 @@ export async function sendChat(
         attachments: opts?.attachments,
         files: opts?.files,
         images: opts?.images,
+        // v5.1 补 4：临时联网剩余分钟数（服务端对本会话 setEgressAllow——新会话/续跑均适用）
+        egressMinutes,
       }),
       signal: controller.signal,
     });

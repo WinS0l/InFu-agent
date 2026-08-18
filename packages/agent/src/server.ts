@@ -1106,6 +1106,12 @@ const pendingQuestions = new Map<string, { sessionId: string; resolve: (answer: 
 
       const body = await c.req.json().catch(() => ({}));
       const prompt: string = body.prompt || "";
+      // v5.1 补 4：随请求携带的临时联网剩余分钟数（欢迎界面无会话时先选好时长，
+      // 发送时对本会话立即生效——服务端与会话创建原子绑定，无竞态）
+      const egressMinutes: number | undefined =
+        typeof body.egressMinutes === "number" && body.egressMinutes >= 1 && body.egressMinutes <= 120
+          ? Math.round(body.egressMinutes)
+          : undefined;
       const modelId: string | undefined = body.modelId;
       const fallbackModelIds: string[] | undefined = Array.isArray(body.fallbackModelIds)
         ? body.fallbackModelIds.map(String)
@@ -1223,6 +1229,11 @@ const pendingQuestions = new Map<string, { sessionId: string; resolve: (answer: 
       }
       // 用户消息落库（检查点之一：Rewind 锚点）
       store.appendEvent(sessionId, { type: "user-message", text: prompt });
+      // v5.1 补 4：随请求携带的临时联网 → 对本会话立即生效（新会话/续跑都适用；
+      // 与既有 POST /api/egress/allow 同语义——过期自动失效，命令审计照常）
+      if (egressMinutes) {
+        setEgressAllow(sessionId, egressMinutes);
+      }
 
       // ── v3.1 附件处理（sessionId 已定）：文件内容写入暂存目录 ~/.infu/attachments/<sid>/ ──
       // 浏览器 Web 安全限制拿不到文件绝对路径 → 内容上传，服务端暂存后给 Agent 绝对路径引用；

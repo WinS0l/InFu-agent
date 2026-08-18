@@ -56,7 +56,10 @@ function DiffView({ diff }: { diff: string }) {
 }
 
 export default function ReviewPane() {
-  const root = useStore((s) => s.root);
+  // v3.3 补 19：审查/代码界面目录 = 工作树优先（worktree 模式下 Agent 改动在
+    // .infu/worktrees/<name> 独立工作树里，主项目根 git diff 为空 → 界面全空；
+    // 未开工作树 = 项目根）
+    const root = useStore((s) => s.worktree?.path ?? s.root);
   const { messages } = useStore();
   const lastTest = [...messages]
     .reverse()

@@ -55,7 +55,10 @@ function ChangeBadge({ f }: { f: FsTreeFile }) {
 }
 
 export default function CodeView() {
-  const root = useStore((s) => s.root);
+  // v3.3 补 19：审查/代码界面目录 = 工作树优先（worktree 模式下 Agent 改动在
+    // .infu/worktrees/<name> 独立工作树里，主项目根 git diff 为空 → 界面全空；
+    // 未开工作树 = 项目根）
+    const root = useStore((s) => s.worktree?.path ?? s.root);
   const codeViewFile = useStore((s) => s.codeViewFile);
   const [files, setFiles] = useState<FsTreeFile[] | null>(null);
   const [collapsed, setCollapsed] = useState<Record<string, boolean>>({});

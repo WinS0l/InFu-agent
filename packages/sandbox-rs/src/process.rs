@@ -298,9 +298,23 @@ pub fn run_restricted_process(
     };
 
     // 管道与启动信息
+    // v4.0 审计修复（L1）：部分创建失败时关闭已成功创建的句柄——原实现走统一 `_` 分支
+    // 只删了 cmd 文件，已创建的管道读/写端与 NUL 句柄全部泄漏（每次 2-6 个句柄，
+    // 长驻服务低频失败路径累积）
     let (out_pipe, err_pipe, nul_stdin) = match (create_pipe(), create_pipe(), open_nul_stdin()) {
         (Ok(o), Ok(e), Ok(n)) => (o, e, n),
-        _ => {
+        (o, e, n) => {
+            for p in [o, e] {
+                if let Ok(p) = p {
+                    unsafe {
+                        CloseHandle(p.read);
+                        CloseHandle(p.write);
+                    }
+                }
+            }
+            if let Ok(n) = n {
+                unsafe { CloseHandle(n) };
+            }
             outcome.stdout = "创建管道失败".to_string();
             delete_file(&cmd_file);
             return outcome;

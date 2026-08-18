@@ -22,6 +22,20 @@ import {
 import { TOOLS, getReadOnlyTools } from "../src/tools/index.js";
 import { rebuildMessages } from "../src/db/rebuild.js";
 import { runAgent } from "../src/agent/loop.js";
+import { setDataDirForTest } from "../src/data-dir.js";
+
+// v4.0 审计修复（H1）：数据目录重定向 + 显式固定 confirm 档——原套件热读真实用户
+// ~/.infu/config.json（v3.9 起为 full 档），requireExplicit（联网放行）在 guard 层被
+// full 档直接自动放行、不再转发父级 →「requireExplicit 仍转发父级」断言必挂
+// （实测 93 通过 / 1 失败）。与 mcp/plugin 套件同款修复；confirm 档下非红线内部调用
+// 仍由 makeSubagentApproval 继承免审批（「父 0 次」断言不受影响）。
+const __tmpData = mkdtempSync(join(tmpdir(), "infu-subagent-test-"));
+setDataDirForTest(__tmpData);
+writeFileSync(
+  join(__tmpData, "config.json"),
+  JSON.stringify({ version: 1, approvalPolicy: { mode: "confirm" } }),
+  "utf-8"
+);
 
 let passed = 0;
 let failed = 0;
@@ -241,7 +255,9 @@ console.log("\n▶ 安全边界");
   }
 
   // 7.5 模型解析失败（modelId 不存在）
-  await expectError(runSubagent({ prompt: "x", modelId: "no-such-model" }, makeCtx()), /未找到模型/, "modelId 未找到报错");
+  // v4.0：套件数据目录重定向后 config.json 存在（models 空）→ 错误文案走「未配置模型」
+  // 分支（原无配置走「未找到模型」）——两种都是正确的失败语义，断言按语义收窄
+  await expectError(runSubagent({ prompt: "x", modelId: "no-such-model" }, makeCtx()), /未找到模型|未配置模型|无法解析子模型/, "modelId 未找到报错");
 
   // 7.6 缺模型上下文（无 modelConfig 且无 modelId）
   await expectError(runSubagent({ prompt: "x" }, makeCtx({ modelConfig: undefined })), /缺少子模型配置/, "缺模型上下文报错");

@@ -108,6 +108,16 @@ function check(name: string, cond: boolean, detail = "") {
   const trace = await TOOLS.session_trace.execute({ session_id: sid }, { root: ".", cwd: "." } as any);
   check("session_trace 轨迹含关键事件", trace.includes("修测试") && trace.includes("read_file") && trace.includes("完成"), trace.slice(0, 150));
   check("session_trace 不重复展示子智能体内部噪音", trace.includes("另一个无关会话") === false);
+  // v4.0 审计修复（M5）：历史工具参数/结果中的凭据脱敏——write_file 内容/命令文本中的
+  // 令牌不得原样进入当前模型上下文（low 工具 + 高敏感数据的错配）
+  const sid2 = testStore.createSession({ title: "凭据脱敏", root: "E:\\proj2" });
+  testStore.appendEvent(sid2, { type: "user-message", text: "任务" });
+  testStore.appendEvent(sid2, { type: "tool-start", tool: "run_command", args: { command: "curl -H 'Authorization: Bearer sk-test1234567890abc' http://x" }, risk: "medium", callId: "s1" });
+  testStore.appendEvent(sid2, { type: "tool-result", tool: "run_command", ok: true, summary: "输出 ghp_abcdefghijklmnopqrstuvwxyz123456 完成", callId: "s1" });
+  const traceMasked = await TOOLS.session_trace.execute({ session_id: sid2 }, { root: ".", cwd: "." } as any);
+  check("session_trace 凭据脱敏（Bearer/sk-）", !traceMasked.includes("sk-test1234567890abc"), traceMasked);
+  check("session_trace 凭据脱敏（ghp_）", !traceMasked.includes("ghp_abcdefghijklmnopqrstuvwxyz123456"), traceMasked);
+  check("session_trace 脱敏后保留可读标记", traceMasked.includes("已脱敏"), traceMasked);
   const traceBad = await TOOLS.session_trace.execute({ session_id: "nope" }, { root: ".", cwd: "." } as any);
   check("session_trace 会话不存在报错", traceBad.includes("不存在"));
   // limit 参数

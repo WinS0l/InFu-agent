@@ -32,12 +32,14 @@ console.log("\n=== server API 回归（server-api）自测 ===\n");
 const app = createApp({});
 
 // ── 1. /api/approvals/bypass 路由顺序回归（bypass 不被 :id 吞掉）──
+// v4.0 审计修复（H1 缓解）：bypass 必须针对已存在会话（404）+ 开启动作落库审计事件
 console.log("▶ approvals/bypass 路由");
 {
+  const sid = getStore().createSession({ title: "bypass 测试", root: tmpData });
   const r1 = await app.fetch(new Request("http://localhost/api/approvals/bypass", {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ sessionId: "server-api-test-s1", enabled: true }),
+    body: JSON.stringify({ sessionId: sid, enabled: true }),
   }));
   const j1 = (await r1.json()) as { ok?: boolean; bypass?: boolean; message?: string };
   check("bypass 开启可达（未被 :id 吞掉）", r1.status === 200 && j1.ok === true && j1.bypass === true, JSON.stringify(j1));
@@ -45,10 +47,22 @@ console.log("▶ approvals/bypass 路由");
   const r2 = await app.fetch(new Request("http://localhost/api/approvals/bypass", {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ sessionId: "server-api-test-s1", enabled: false }),
+    body: JSON.stringify({ sessionId: sid, enabled: false }),
   }));
   const j2 = (await r2.json()) as { bypass?: boolean };
   check("bypass 关闭", j2.bypass === false, JSON.stringify(j2));
+
+  // v4.0：不存在的会话拒绝开启（防任意会话预埋）
+  const r404 = await app.fetch(new Request("http://localhost/api/approvals/bypass", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ sessionId: "no-such-session", enabled: true }),
+  }));
+  check("bypass 不存在会话 → 404", r404.status === 404, String(r404.status));
+
+  // v4.0：开启动作落库审计事件（approval-bypass）
+  const events = getStore().getEvents(sid);
+  check("bypass 开启落库审计事件", events.some((e) => e.event.type === "approval-bypass" && e.event.enabled === true), JSON.stringify(events.map((e) => e.event.type)));
 
   const r3 = await app.fetch(new Request("http://localhost/api/approvals/bypass", {
     method: "POST",

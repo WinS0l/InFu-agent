@@ -1334,6 +1334,12 @@ const pendingQuestions = new Map<string, { sessionId: string; resolve: (answer: 
         question: string,
         options?: Array<string | { label: string; desc?: string; recommended?: boolean }>
       ) => {
+        // v3.9（2026-08-18 用户拍板「最大审批权限」）：full 档全自主——不挂起等用户，
+        // 事件照常落库（审计可见），返回 null 让模型自行决策继续
+        if (resolveApprovalPolicy(loadConfig()).mode === "full") {
+          emit({ type: "ask-user", id: randomUUID(), question, options: options as Array<string | { label: string; desc?: string; recommended?: boolean }> | undefined, autoSkipped: true });
+          return null;
+        }
         const id = randomUUID();
         emit({ type: "ask-user", id, question, options: options as Array<string | { label: string; desc?: string; recommended?: boolean }> | undefined });
         return new Promise<string | null>((resolve) => {
@@ -1360,6 +1366,11 @@ const pendingQuestions = new Map<string, { sessionId: string; resolve: (answer: 
       const confirmPlan = async (planText: string) => {
         const id = randomUUID();
         emit({ type: "plan", id, content: planText });
+        // v3.9（2026-08-18 用户拍板「最大审批权限」）：full 档全自主——计划自动批准
+        // （事件已落库审计），不挂起等用户确认
+        if (resolveApprovalPolicy(loadConfig()).mode === "full") {
+          return { plan: undefined, feedback: "批准执行" };
+        }
         return new Promise<{ plan?: string; feedback: string } | null>((resolve) => {
           pendingPlans.set(id, {
             sessionId,
@@ -1567,7 +1578,16 @@ const pendingQuestions = new Map<string, { sessionId: string; resolve: (answer: 
     const body = await c.req.json().catch(() => ({}));
     const sid = typeof body.sessionId === "string" && body.sessionId ? body.sessionId : null;
     if (!sid) return c.json({ ok: false, message: "缺少 sessionId" });
-    setSessionBypass(sid, body.enabled !== false);
+    // v4.0 审计修复（H1 缓解）：① bypass 必须针对**已存在**会话（防任意会话预埋）；
+    // ② 开启/关闭动作落库审计事件——本机任意进程（含沙箱内命令）拿到令牌即可调
+    // 本端点，开启动作本身留痕，会话重放/审计可查
+    const store = getStore();
+    if (!store.getSession(sid)) return c.json({ ok: false, message: "会话不存在" }, 404);
+    const enabled = body.enabled !== false;
+    setSessionBypass(sid, enabled);
+    try {
+      store.appendEvent(sid, { type: "approval-bypass", enabled, at: Date.now() });
+    } catch { /* 审计落库失败不影响开关 */ }
     return c.json({ ok: true, bypass: isSessionBypassed(sid) });
   });
 
@@ -2245,6 +2265,13 @@ const pendingQuestions = new Map<string, { sessionId: string; resolve: (answer: 
           return c.body(injected, 200, {
             "content-type": MIME[ext] ?? "application/octet-stream",
             "cache-control": cacheable ? "public, max-age=31536000, immutable" : "no-cache",
+            // v4.0 审计修复（M12）：安全响应头——X-Frame-Options 防 iframe 点击劫持
+            // （webview 内恶意页 iframe 嵌入 InFu UI 的路径）、CSP frame-ancestors 同防、
+            // nosniff 防 MIME 嗅探、no-referrer 防 URL 泄漏（token 在 query 的场景）
+            "x-frame-options": "DENY",
+            "content-security-policy": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'",
+            "x-content-type-options": "nosniff",
+            "referrer-policy": "no-referrer",
           });
         }
       } catch { /* 文件不存在 → SPA fallback */ }
@@ -2252,7 +2279,13 @@ const pendingQuestions = new Map<string, { sessionId: string; resolve: (answer: 
       if (!pathname.includes(".")) {
         try {
           const html = readFileSync(join(opts.staticDir!, "index.html"));
-          return c.html(injectToken(html.toString("utf-8")));
+          return c.html(injectToken(html.toString("utf-8")), 200, {
+            "cache-control": "no-cache",
+            "x-frame-options": "DENY",
+            "content-security-policy": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'",
+            "x-content-type-options": "nosniff",
+            "referrer-policy": "no-referrer",
+          });
         } catch { /* 无 index.html → 404 */ }
       }
       return c.notFound();

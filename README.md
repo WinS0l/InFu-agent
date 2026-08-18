@@ -2,7 +2,7 @@
 
 软件工程智能体平台 — 让 AI 从"代码补全工具"升级为能理解项目、规划任务并执行工程工作的开发伙伴。
 
-> 状态：v3.8（Agent 核心 + Web UI + Windows 桌面端 + 嵌入式浏览器均可用；43 套测试套件 1286 断言全绿）
+> 状态：v4.0（Agent 核心 + Web UI + Windows 桌面端 + 嵌入式浏览器均可用；43 套测试套件 1329 断言全绿）
 > 相关文档：[技术选型方案](docs/TECHNICAL-SELECTION.md)、[路线图](docs/ROADMAP.md)
 
 ## 核心能力
@@ -10,7 +10,7 @@
 - **AI 对话中心**：自然语言任务输入，流式输出（思考过程/工具调用/审批请求实时可见）
 - **52 个内置工具**：文件读写（read-before-edit 三层门禁）、shell 命令（沙箱分派）、Git、测试、搜索、语义检索、LSP 诊断、记忆、子智能体委派（并行/后台）、异步任务编排、计算机操作（桌面截图/点击/输入）等
 - **任意大模型接入**：DeepSeek / OpenAI / Anthropic / Google / 智谱 GLM / 通义千问 / Ollama / 任意 OpenAI 兼容网关；备用模型降级链 + 上下文自动压缩
-- **分层编排（可关）**：Planner（只读规划 + 计划确认三态）→ Executor → Reviewer（只读审查）
+- **分层编排（可选）**：Planner（只读规划 + 计划确认三态）→ Executor → Reviewer（只读审查）；默认单一 Agent 循环直接执行（主流做法），`--orchestrate` 显式开启
 - **Windows 桌面端（Electron）**：嵌入式真浏览器（Agent 可驱动网页操作）、computer-use 桌面控制、系统通知/托盘、开机自启（可选）
 - **会话持久化**：SQLite 全量事件流 + 消息级重建续跑 + 回滚 + 自动归档；使用统计（活跃热力图/Token 趋势）
 - **扩展生态**：MCP 服务器、JS 插件（工具/钩子/技能）、SKILL.md 技能、定时任务、模板任务引导
@@ -92,7 +92,7 @@ npm run start        #    或启动服务（http://127.0.0.1:4317，Web UI 后�
 
 **备用模型降级链（v2.2）**：`fallbackModelIds` 配置主模型失败时的备用模型列表（也可在 Web 模型管理弹窗或 CLI `--fallback-model` 指定）。API 瞬时故障（429/5xx/超时/网络中断）自动指数退避重试（1s/2s/4s），重试耗尽自动切换到备用模型，全程 `model-fallback` 事件可见。
 
-**上下文压缩（v2.2，按模型因地制宜）**：`contextWindow`（token）配置模型上下文极限；缺省按 provider/模型名推断（deepseek/GLM 128k、Qwen/Kimi 256k、Claude 200k、Gemini 1M、兜底 128k）。历史估算超窗口 ×80% 时自动压缩为摘要（压到 ×60%），**只影响发给模型的上下文，会话记录无损**；降级切模型后预算自动跟随新模型。
+**上下文压缩（v2.2，按模型因地制宜）**：`contextWindow`（token）配置模型上下文极限；缺省按 provider/模型名推断（2026-08 校准：DeepSeek/GLM-5.2/GPT-5.6/Claude Sonnet-5/Kimi K3/Qwen 3.6 均 1M、Gemini 1M、兜底 128k）。历史估算超窗口 ×80% 时自动压缩为摘要（压到 ×60%），**只影响发给模型的上下文，会话记录无损**；降级切模型后预算自动跟随新模型。
 
 **按角色路由（v2.2+ 轻量模型选择）**：规划/执行/审查 可分别指定模型**与独立思考级别**——Web 模型管理 → 模型 Tab → 「角色路由」面板（三行各选模型 + 思考级别 1-4，未设置跟随默认/全局）；config 层 `roles` 支持 `"模型id"` 或 `{"model": "id", "thinkingLevel": 3}`；CLI `--planner-model` / `--executor-model` / `--reviewer-model` 最高优先。各角色自带独立降级链。
 
@@ -109,8 +109,9 @@ npm run infu -- "把 README 的标题改成 InFu" --root . -y
 npm run infu -- --template fix-tests --root . -y        # 一键修复测试失败
 npm run infu -- --template init-project --root . -y     # 一键初始化新项目
 
-# 编排控制（默认：Planner→计划确认→Executor→Reviewer 分层编排，可关）
-npm run infu -- "任务" --root . -y --no-plan-approval   # 不要求确认计划，直接执行
+# 分层编排（显式开启：Planner→计划确认→Executor→Reviewer；默认单一循环直接执行）
+npm run infu -- "任务" --root . --orchestrate           # 显式启用分层编排（计划确认后执行）
+npm run infu -- "任务" --root . --orchestrate --no-plan-approval   # 编排但不弹计划确认
 
 # 会话（v2.1+ 持久化，v2.2 消息级重建续跑）
 npm run infu -- sessions                                # 会话历史列表
@@ -135,7 +136,7 @@ npm run start -w @infu/agent
 
 ## 安全设计
 
-- **审批档位**：auto（低中自动）/ smart（低自动，默认）/ confirm（全人工）/ full（完全信任，红线也放行）——工具级覆盖 + 命令白名单 + 会话级「已批准记忆」
+- **审批档位**：auto（低中自动）/ smart（低自动）/ confirm（全人工）/ full（完全信任，红线也放行，**默认档位**——2026-08-18 用户拍板「最大审批权限，全自主不弹窗」）——工具级覆盖 + 命令白名单 + 会话级「已批准记忆」；**安全红线不降级**（受保护路径/SSRF/路径作用域/显式禁用工具在任何档位下都拦截）
 - **路径越界防护**：所有文件操作限制在项目根目录内（词法 + realpath 双检防符号链接逃逸）；敏感路径写保护（~/.ssh、~/.infu、~/.aws 等）
 - **read-before-edit**：写文件/编辑前必须已读取（未读/截断视图/文件被外部修改均拒绝），写后刷新指纹
 - **高风险命令检测**：`rm -rf` / `Remove-Item` / `format` / `dd if=` 等多分支变体强制 requireExplicit 审批；命令白名单命中仍过组合符与高危双检

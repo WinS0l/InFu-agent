@@ -30,7 +30,9 @@ export const SANDBOX_MODES: SandboxMode[] = ["auto", "off", "soft", "restricted"
  *  v3.6：补 `_PWD` 后缀（`MYSQL_PWD`/`PGPASSWORD` 历史命名）与 PROXY 键名
  *  （`HTTPS_PROXY=http://user:pass@host` 值内嵌凭据） */
 export function sanitizeEnv(env: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
-  const SENSITIVE = /(KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL|AUTH|URL|URI|DSN|CONNECTION|PROXY|_PWD$)/i;
+  // v3.9 审计修复：补 PASSPHRASE/_PW/_PASS/CONNSTR 键名——`SSH_PASSPHRASE`/`MYSQL_PW`/
+  //  `API_PASS`/`AZURE_CONNSTR` 值内嵌凭据（原正则漏检，模型 echo 可读）
+  const SENSITIVE = /(KEY|TOKEN|SECRET|PASSWORD|PASSWD|PASSPHRASE|CREDENTIAL|AUTH|URL|URI|DSN|CONNECTION|CONNSTR|PROXY|_PWD$|_PW$|_PASS$)/i;
   const out: NodeJS.ProcessEnv = {};
   for (const [k, v] of Object.entries(env)) {
     if (v === undefined) continue;
@@ -58,7 +60,29 @@ const PROTECTED_PATTERNS: Array<{ name: string; match: (abs: string) => boolean 
   { name: "AWS 凭据目录", match: (a) => /(^|[\\/])\.aws([\\/]|$)/.test(a) },
   { name: "GnuPG 密钥目录", match: (a) => /(^|[\\/])\.gnupg([\\/]|$)/.test(a) },
   { name: "Docker 配置", match: (a) => /(^|[\\/])\.docker([\\/]|$)/.test(a) },
+  // v4.0 审计修复（M15）：home 凭据文件——.npmrc 含 registry _authToken、.git-credentials
+  // 存明文 token、.netrc 存 curl/ftp 凭据；此前全部未保护（且可被 read_file/read_files
+  // 在 root=home 会话读取、run_command `type` 白名单免审批读取）。仅保护 home 根下的
+  // 这三类文件（项目级 .npmrc 是合法写场景，不受影响）
+  {
+    name: "home 凭据文件",
+    match: (a) => {
+      const home = (process.platform === "win32" ? os.homedir().toLowerCase() : os.homedir()).replace(/[\\/]+$/, "");
+      if (a !== home && !a.startsWith(home + path.sep)) return false;
+      return /(^|[\\/])(\.npmrc|\.git-credentials|\.netrc)$/.test(a);
+    },
+  },
   { name: "浏览器凭据", match: (a) => /(^|[\\/])(AppData|Application Data)([\\/])/.test(a) && /(Login Data|Cookies|Local State)/i.test(a) },
+  // v3.9 审计修复（M3）：数据目录重定向指针——Agent 可写它改变 resolveDataDir 结果，
+  // 使新数据目录脱离写保护（再写新目录 config.json 即绕过凭据保护）；精确入保护
+  {
+    name: "数据目录重定向指针",
+    match: (a) => {
+      const p = path.join(os.homedir(), ".infu-redirect.json");
+      const norm = process.platform === "win32" ? p.toLowerCase() : p;
+      return a === norm;
+    },
+  },
 ];
 
 /**

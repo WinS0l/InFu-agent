@@ -1318,7 +1318,19 @@ export function StatsPane() {
   const [stats, setStats] = useState<UsageStats | null>(null);
   const [days, setDays] = useState(30);
   const [error, setError] = useState("");
-  useEffect(() => { fetchStats(days).then(setStats).catch((e) => setError((e as Error).message)); }, [days]);
+  // v4.0 审计修复（L4）：切换 7/30 天的过期响应守卫（与 CodeView/ReviewPane 同款）——
+  // 原实现无序号，快速切换时旧范围响应可覆盖新选中
+  const seqRef = useRef(0);
+  useEffect(() => {
+    const seq = ++seqRef.current;
+    fetchStats(days)
+      .then((s) => {
+        if (seq === seqRef.current) setStats(s);
+      })
+      .catch((e) => {
+        if (seq === seqRef.current) setError((e as Error).message);
+      });
+  }, [days]);
 
   // v3.0 UI 审查批 2：统计卡片改 ZCode 同款（图标 + label + value + sub）
   const card = (label: string, value: string, icon: React.ReactNode, sub?: string) => (
@@ -1851,17 +1863,27 @@ export function SchedulePane() {
   };
 
   const toggle = async (it: ScheduleItem) => {
-    await apiFetch(`/api/schedules/${it.id}`, {
-      method: "PATCH",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ enabled: !it.enabled }),
-    });
-    load();
+    try {
+      const r = await apiFetch(`/api/schedules/${it.id}`, {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ enabled: !it.enabled }),
+      });
+      const j = (await r.json().catch(() => ({}))) as { ok?: boolean; message?: string };
+      // v4.0 审计修复（M6）：检查 HTTP 响应——原实现不查 res.ok，4xx/5xx 静默"成功"，
+      // 随后 load() 刷新回旧状态，用户看到开关"弹回去"却无解释
+      if (!r.ok || j.ok === false) setError(j.message || `切换失败：${r.status}`);
+      else load();
+    } catch (e) {
+      setError((e as Error).message);
+    }
   };
   const remove = async (it: ScheduleItem) => {
     try {
-      await apiFetch(`/api/schedules/${it.id}`, { method: "DELETE" });
-      load();
+      const r = await apiFetch(`/api/schedules/${it.id}`, { method: "DELETE" });
+      const j = (await r.json().catch(() => ({}))) as { ok?: boolean; message?: string };
+      if (!r.ok || j.ok === false) setError(j.message || `删除失败：${r.status}`);
+      else load();
     } catch (e) {
       setError((e as Error).message);
     }

@@ -144,6 +144,31 @@ console.log("▶ migrateDataDir 迁移 + 缓存失效 + 消费模块跟随");
   });
 }
 
+// v4.0 审计修复（M11）：迁回/互迁到「已是数据目录」的目标 = 目标先整体备份再全新复制
+// （原实现逐项 force 覆盖 = 破坏性合并：目标独有文件残留 + 同名文件被静默覆盖）
+console.log("\n▶ 迁回备份（目标已含 config.json）");
+{
+  const src = path.join(root, "mig-src");
+  const dst = path.join(root, "mig-dst");
+  fs.mkdirSync(src, { recursive: true });
+  fs.mkdirSync(dst, { recursive: true });
+  // 源：数据目录（config.json + 独有文件）
+  fs.writeFileSync(path.join(src, "config.json"), JSON.stringify({ version: 1, defaultModelId: "m2" }), "utf-8");
+  fs.writeFileSync(path.join(src, "src-only.txt"), "from-src", "utf-8");
+  // 目标：旧数据目录（config.json + 目标独有文件）
+  fs.writeFileSync(path.join(dst, "config.json"), "{}", "utf-8");
+  fs.writeFileSync(path.join(dst, "dst-only.txt"), "from-dst", "utf-8");
+  withDataDir(src, () => {
+    const res = migrateDataDir(dst);
+    check("迁回迁移成功", res.ok, res.message);
+    check("目标 config.json 被源覆盖（新数据）", fs.readFileSync(path.join(dst, "config.json"), "utf-8").includes("m2"));
+    check("目标独有文件不再残留混合（全新复制）", !fs.existsSync(path.join(dst, "dst-only.txt")));
+    check("目标旧数据整体备份保留", fs.readdirSync(path.join(root)).some((n) => n.startsWith("mig-dst.bak-") && fs.existsSync(path.join(root, n, "dst-only.txt"))), "应有 mig-dst.bak-* 含 dst-only.txt");
+    check("源数据完整复制", fs.existsSync(path.join(dst, "src-only.txt")));
+    check("迁移消息提及备份", res.message.includes("备份"));
+  });
+}
+
 // ── 清理 ──
 try {
   if (savedRedirect === null) fs.rmSync(REDIRECT_FILE, { force: true });

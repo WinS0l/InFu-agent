@@ -16,6 +16,7 @@ import { join } from "node:path";
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import type { ToolDef, ToolContext } from "@infu/shared";
+import { isPrivateHostText } from "@infu/shared";
 import { guard, clip } from "../../tools/util.js";
 import { getPage, closeBrowser, desktopSetViewport, type BrowserTab } from "./runtime.js";
 
@@ -23,6 +24,32 @@ import { getPage, closeBrowser, desktopSetViewport, type BrowserTab } from "./ru
 const skillDir = (name: string) => fileURLToPath(new URL(`./skills/${name}`, import.meta.url));
 
 const NET_TIMEOUT = 30000;
+
+/**
+ * v4.0 审计修复（H4）：浏览器导航 SSRF 门禁——与 webfetch 防护对齐。
+ * 浏览器携带用户登录会话（Cookie），信息价值远高于 webfetch：云元数据
+ * （169.254.169.254）/内网管理页（192.168/10/172.16）/本机服务（127.0.0.1）的
+ * IP 直写形式直接拒绝；localhost/127.0.0.1/[::1] 显式白名单（本地开发预览是
+ * 浏览器工具核心用途，桌面端导航守卫同语义）。域名不做 DNS 复查（系统解析，
+ * 通用 SSRF DNS-rebinding TOCTOU 局限，与 webfetch 一致）。返回 null = 允许。
+ */
+function ssrfBlockReason(url: string): string | null {
+  let u: URL;
+  try {
+    u = new URL(url);
+  } catch {
+    return "URL 无效";
+  }
+  if (u.protocol !== "http:" && u.protocol !== "https:") return "仅支持 http/https";
+  const host = u.hostname;
+  if (host === "localhost" || host.endsWith(".localhost")) return null;
+  const r = isPrivateHostText(host);
+  if (r !== null && r.private) {
+    if (host === "127.0.0.1" || host === "::1" || /^127\./.test(host)) return null; // 回环显式白名单
+    return `目标地址 ${host} 是内网/本机地址，浏览器导航已拦截（防 SSRF——浏览器携带你的登录会话；仅允许公网地址或 localhost/127.0.0.1）`;
+  }
+  return null;
+}
 
 /**
  * 页面快照（v3.0 批 5：AI 可访问性树 = 单一来源——交互节点带 [n] 编号，
@@ -61,6 +88,9 @@ export const browserTools: ToolDef[] = [
       if (typeof args.url !== "string" || !/^https?:\/\//i.test(args.url)) {
         return "错误：url 必须是 http/https 地址";
       }
+      // v4.0 审计修复（H4）：SSRF 门禁（内网/云元数据 IP 直写拒绝）
+      const ssrf = ssrfBlockReason(args.url);
+      if (ssrf) return `错误：${ssrf}`;
       if (!(await guard(ctx, "browser_navigate", "low", `浏览器访问：${args.url}`))) {
         return "用户拒绝：未联网访问（InFu 默认断网，联网需人工审批放行）";
       }
@@ -248,6 +278,11 @@ export const browserTools: ToolDef[] = [
     async execute(args, ctx) {
       const url = typeof args.url === "string" && args.url.trim() ? args.url.trim() : undefined;
       if (url && !/^https?:\/\//i.test(url)) return "错误：url 必须是 http/https 地址";
+      // v4.0 审计修复（H4）：SSRF 门禁（与 browser_navigate 同款）
+      if (url) {
+        const ssrf = ssrfBlockReason(url);
+        if (ssrf) return `错误：${ssrf}`;
+      }
       if (!(await guard(ctx, "browser_tab_new", "low", "浏览器新开标签页" + (url ? "：" + url : "")))) return "用户拒绝：未新开";
       const g = globalThis as Record<string, unknown>;
       const openFn = g.__infuOpenEmbeddedBrowser as ((url?: string) => void) | undefined;

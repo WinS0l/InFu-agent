@@ -370,12 +370,15 @@ console.log("\n▶ mcp_register 自注册");
     check("http 缺 url 拒绝", !r2.ok && (r2 as any).message.includes("url"));
 
     // 成功注册 + 白名单约束（只动 mcpServers，其他字段保留）
+    // v3.9：默认档位已改 full——本段验证 mcp_register 的审批触发语义（high + requireExplicit），
+    // 必须显式固定档位（confirm：low 也弹窗，requireExplicit 必然弹窗）
     writeFileSync(CONFIG2, JSON.stringify({
       version: 2,
       models: [{ id: "m1", name: "M1", model: "x", providerId: "d" }],
       providers: [{ id: "d", name: "D", kind: "deepseek", apiKey: "sk-keep" }],
       roles: { planner: "m1" },
       customFuture: { keep: true },
+      approvalPolicy: { mode: "confirm" },
     }, null, 2), "utf-8");
     const r3 = registerMcpServer({
       name: "filesystem", type: "stdio", command: "npx.cmd",

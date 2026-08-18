@@ -162,7 +162,9 @@ export function isPrivateIpv6Text(input: string): boolean {
  * `parts` 供调用方展示/测试用。
  */
 export function isPrivateHostText(host: string): { private: boolean; parts?: number[] } | null {
-  const h = host.trim();
+  // v3.9 审计修复（M2）：FQDN 根标记尾点归一——`localhost.` / `127.0.0.1.` 与无尾点
+  // 等价（系统解析器接受），原实现漏判导致桌面导航守卫/SSRF 可被 `localhost.` 绕过
+  const h = host.trim().replace(/\.+$/, "");
   if (!h) return null;
   if (h.includes(":")) {
     // IPv6（含内嵌 IPv4 / 完整形式回环；解析失败 fail-closed）
@@ -188,7 +190,8 @@ function isLoopbackV4(parts: number[]): boolean {
  * hex/octal 段（0x7f.0.0.1）无法判定 → fail-closed 视为回环。域名（非 localhost）→ false。
  */
 export function isLoopbackHostText(host: string): boolean {
-  const h = host.trim().toLowerCase();
+  // v3.9 审计修复（M2）：FQDN 根标记尾点归一（`localhost.` = localhost、`127.0.0.1.` = 127.0.0.1）
+  const h = host.trim().toLowerCase().replace(/\.+$/, "");
   if (h === "localhost" || h.endsWith(".localhost")) return true;
   if (h.includes(":")) {
     const g = parseIpv6Groups(h);

@@ -18,6 +18,15 @@ export function setSessionStoreProvider(p: () => SessionStore): void {
 /** 轨迹只挑关键事件（跳过 reasoning/tool 内部噪音/审批过程——复盘看结论与动作） */
 const TRACE_KEY_TYPES = new Set(["user-message", "text", "tool-start", "tool-result", "error", "done", "plan", "review", "subagent-start", "subagent-done"]);
 
+// v4.0 审计修复（M5）：历史工具参数/结果可能含凭据（write_file 写过的内容、run_command
+// 命令文本中的令牌、API 输出），原样灌入当前上下文 = 低风险工具 + 高敏感数据错配。
+// 与 run_command 落盘前的 SENSITIVE_OUT 同模式脱敏（保留前缀便于识别，正文打码）。
+const TRACE_SENSITIVE =
+  /(sk-[A-Za-z0-9]{12,}|AKIA[0-9A-Z]{16}|ghp_[A-Za-z0-9]{20,}|xox[baprs]-[A-Za-z0-9-]{10,}|AIza[0-9A-Za-z_-]{20,}|ya29\.[0-9A-Za-z_-]+|eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}|BEGIN (RSA|OPENSSH|EC|DSA|PGP) PRIVATE KEY|Bearer [A-Za-z0-9._~+\/-]{16,}|api[_-]?key["']?\s*[:=]\s*["'][^"']{8,}["'])/i;
+function maskSecrets(s: string): string {
+  return s.replace(TRACE_SENSITIVE, (m) => `${m.slice(0, 4)}…[已脱敏 ${m.length} 字符]`);
+}
+
 function fmtEvent(e: StoredEvent): string {
   const ev = e.event as any;
   switch (ev.type) {
@@ -26,9 +35,9 @@ function fmtEvent(e: StoredEvent): string {
     case "text":
       return `💬 ${String(ev.text ?? "").replace(/\s+/g, " ").slice(0, 200)}`;
     case "tool-start":
-      return `⚙ ${ev.tool} ${JSON.stringify(ev.args ?? {}).slice(0, 120)}`;
+      return `⚙ ${ev.tool} ${maskSecrets(JSON.stringify(ev.args ?? {})).slice(0, 120)}`;
     case "tool-result":
-      return `  ↳ ${ev.ok ? "✓" : "✗"} ${String(ev.summary ?? "").replace(/\s+/g, " ").slice(0, 160)}`;
+      return `  ↳ ${ev.ok ? "✓" : "✗"} ${maskSecrets(String(ev.summary ?? "").replace(/\s+/g, " ")).slice(0, 160)}`;
     case "error":
       return `⛔ 错误：${String(ev.message ?? "").slice(0, 200)}`;
     case "done":

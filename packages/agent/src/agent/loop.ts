@@ -538,7 +538,9 @@ export async function runAgent(opts: AgentRunOptions): Promise<RunResult> {
       }
       return out.join("").trim() || "（空摘要）";
     };
-    const r = await compressMessages(messages, window, summarize);
+    // v3.9 审计修复（C1）：force 透传 compressMessages——原实现 ensureContextBudget(true)
+    // 只跳过 loop 侧估算早退，compressMessages 内部仍按 trigger 早退（400 恢复 = 空操作）
+    const r = await compressMessages(messages, window, summarize, force);
     // v3.5 审计修复（H5）：压缩降级死代码——原 `if (r.summary)` 门槛导致「摘要过大拒绝/
     // 摘要生成失败 → 直接丢弃最老部分」的降级路径永不生效（messages 保持未压缩，
     // 上下文持续超限）。改为「压缩确实变小才应用」（无论摘要是否可用）。

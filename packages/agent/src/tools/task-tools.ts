@@ -11,15 +11,22 @@ import path from "node:path";
 import fg from "fast-glob";
 import type { ToolDef, ToolContext } from "@infu/shared";
 import { checkPathScope } from "../memory/index.js";
+import { isProtectedPath } from "../sandbox/index.js";
 import { clip, MAX_FILE_READ, isPathInside } from "./util.js";
 
 // ── read_files ──
 
-/** 单文件读取核心（与 read_file 同规则：越界/作用域/大小/行号；v3.1 附件白名单放行） */
+/** 单文件读取核心（与 read_file 同规则：越界/作用域/敏感路径/大小/行号；v3.1 附件白名单放行）
+ *  v4.0 审计修复：补 isProtectedPath——批量通道与单文件 read_file 防护对齐（此前 root=home
+ *  会话可用 read_files 整批读出 ~/.ssh 私钥与 ~/.infu/config.json 凭据） */
 export function readOneFile(rel: string, ctx: ToolContext, offset = 0, limit = 200): string {
   const abs = path.resolve(ctx.root, rel);
   const inExtra = (ctx.extraReadDirs ?? []).some((d) => isPathInside(d, abs));
   if (!isPathInside(ctx.root, abs) && !inExtra) return `错误：路径越界（不允许访问项目根之外）: ${rel}`;
+  const protectedName = isProtectedPath(abs);
+  if (protectedName && !inExtra) {
+    return `错误：目标路径位于受保护区域（${protectedName}），拒绝读取——Agent 没有读取 SSH 密钥/凭据/配置的合法场景`;
+  }
   const scopeErr = checkPathScope(rel, ctx.scopeRules);
   if (scopeErr && !inExtra) return `错误：路径超出作用域——${scopeErr}（项目指令「路径作用域」节）`;
   if (!fs.existsSync(abs) || !fs.statSync(abs).isFile()) return `错误：文件不存在 ${rel}`;

@@ -336,6 +336,10 @@ export type AgentEvent =
   | { type: "tool-result"; tool: string; ok: boolean; summary: string; callId?: string; subagentId?: string }
   | { type: "approval-required"; id: string; description: string; risk: RiskLevel; subagentId?: string }
   | { type: "approval-result"; id: string; approved: boolean; subagentId?: string }
+  // ── v4.0 审计新增 ──
+  /** 会话全权放行开关（v4.0：开启/关闭动作落库留痕——本机进程拿到令牌后可调
+   *  /api/approvals/bypass，开启动作本身可审计） */
+  | { type: "approval-bypass"; enabled: boolean; at: number }
   | { type: "report"; content: string }
   | { type: "review"; content: string }
   | { type: "plan"; id: string; content: string }
@@ -407,6 +411,8 @@ export type AgentEvent =
       /** v2.10：选项可结构化（label + desc + recommended）；旧事件为纯 string[] 兼容 */
       options?: Array<string | { label: string; desc?: string; recommended?: boolean }>;
       subagentId?: string;
+      /** v3.9：full 档全自主自动跳过（不挂起等用户；事件仅落库审计） */
+      autoSkipped?: boolean;
     }
   // ── v3.1 附件新增 ──
   /** 用户附加的文件/文件夹/图片（落库供重放展示；图片字节不落库，仅当次请求内走视觉） */

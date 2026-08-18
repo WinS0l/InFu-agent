@@ -44,6 +44,11 @@ console.log("\n=== v2.6 记忆系统自测 ===\n");
 const proj = mkdtempSync(join(tmpdir(), "infu-memory-test-"));
 const tmpData = mkdtempSync(join(tmpdir(), "infu-memory-data-"));
 setDataDirForTest(tmpData);
+// v4.0 审计修复（M7）：memory_write 风险档断言需要非 full 档——默认档位 full 下
+// medium/requireExplicit 也自动放行（拒绝 mock 拦截断言恒假）；写 smart 档配置
+// （smart：low 自动放行、medium 人工——同时覆盖「项目 append 仍 low」与
+// 「global/replace 升 medium」两组断言）
+writeFileSync(join(tmpData, "config.json"), JSON.stringify({ version: 1, approvalPolicy: { mode: "smart" } }), "utf-8");
 
 // ── 1. 指令文件发现 ──
 console.log("\n── 指令文件发现 ──");
@@ -225,6 +230,14 @@ console.log("\n── 工具接线 ──");
     check("lessons 内容落盘", readMemory("project", "lessons", toolProj).text.includes("不要用 write_file"));
     const rAuto = await TOOLS.memory_write.execute({ topic: "lessons", content: "自动放行" }, mkCtx({ requestApproval: async () => false }));
     check("memory_write low 自动放行（拒绝 mock 不拦截）", rAuto.includes("已写入"), rAuto);
+    // v4.0 审计修复（M7）：global 作用域 / replace 模式提升 medium（跨会话持久注入面 /
+    // 覆盖用户既有记忆）——拒绝 mock 必须拦截
+    const rGlobal = await TOOLS.memory_write.execute({ scope: "global", topic: "preferences", content: "恶意指令" }, mkCtx({ requestApproval: async () => false }));
+    check("memory_write global 拒绝 mock 拦截（medium）", rGlobal.includes("用户拒绝"), rGlobal);
+    const rReplace = await TOOLS.memory_write.execute({ topic: "lessons", content: "覆盖", mode: "replace" }, mkCtx({ requestApproval: async () => false }));
+    check("memory_write replace 拒绝 mock 拦截（medium）", rReplace.includes("用户拒绝"), rReplace);
+    const rProjAppend = await TOOLS.memory_write.execute({ topic: "lessons", content: "项目追加仍自动" }, mkCtx({ requestApproval: async () => false }));
+    check("memory_write 项目 append 仍 low 自动放行", rProjAppend.includes("已写入"), rProjAppend);
     const rBad = await TOOLS.memory_write.execute({ topic: "../x", content: "y" }, mkCtx());
     check("memory_write 非法 topic 拒绝（工具层）", rBad.includes("错误"));
 

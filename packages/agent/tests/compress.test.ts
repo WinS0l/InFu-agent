@@ -30,6 +30,11 @@ check("粗估为正值且中文按 1 字符/token", est1 > 20 && est1 < 40, Stri
 check("英文 4 字符≈1 token", estimateTokens([{ role: "user", content: "a".repeat(400) }]) < 130, String(estimateTokens([{ role: "user", content: "a".repeat(400) }])));
 const withCalls: ChatMessageLike[] = [{ role: "assistant", content: "", tool_calls: [{ id: "1", type: "function", function: { name: "read_file", arguments: "{}" } }] }];
 check("工具调用计入开销", estimateTokens(withCalls) > estimateTokens([{ role: "assistant", content: "" }]));
+// v3.9 审计修复（C1）：tool_calls arguments JSON 正文计入估算（原实现只计固定 16/条——
+// 参数数千字符时被低估）
+const withBigArgs: ChatMessageLike[] = [{ role: "assistant", content: "", tool_calls: [{ id: "1", type: "function", function: { name: "write_file", arguments: JSON.stringify({ content: "x".repeat(4000) }) } }] }];
+const withSmallArgs: ChatMessageLike[] = [{ role: "assistant", content: "", tool_calls: [{ id: "1", type: "function", function: { name: "write_file", arguments: "{}" } }] }];
+check("tool_calls 参数正文计入估算（4000 字符 >> {}）", estimateTokens(withBigArgs) > estimateTokens(withSmallArgs) + 800, String(estimateTokens(withBigArgs)));
 
 // 2. resolveContextWindow 因地制宜（2026-08 调研校准：主流模型已升级 1M）
 console.log("\n▶ resolveContextWindow");
@@ -91,6 +96,16 @@ const tiny: ChatMessageLike[] = [{ role: "system", content: "s" }, { role: "user
 let called = false;
 const noop = await compressMessages(tiny, 8000, async () => { called = true; return "x"; });
 check("未超预算原样返回", noop.messages.length === tiny.length && !called);
+
+// 5.5 v3.9 审计修复（C1）：force 强制压缩——400 上下文超限恢复路径用（估算可能低估），
+// 跳过 trigger 早退直接压到 target；同一消息集在 force=false 时原样返回（大窗口用例）
+console.log("\n▶ force 强制压缩");
+summarizeCalls.length = 0;
+const forcedBig = await compressMessages(longHistory, 1_000_000, fakeSummarize, true);
+check("force 下大窗口也压缩（after < before）", forcedBig.after < forcedBig.before, `${forcedBig.before} → ${forcedBig.after}`);
+check("force 下调用摘要生成", summarizeCalls.length === 1, `calls=${summarizeCalls.length}`);
+check("force 下保留 system", forcedBig.messages[0].role === "system" && forcedBig.messages[0].content === "你是 InFu", JSON.stringify(forcedBig.messages[0]));
+check("force 下保留最近内容", forcedBig.messages.some((m) => m.role === "assistant"), JSON.stringify(forcedBig.messages.slice(0, 3)));
 
 // 6. v3.4 审计修复（H2）：system 消息永不参与压缩（强断言——旧弱断言「或保留 system」
 // 恰好掩盖了 system 被压缩进摘要的行为）

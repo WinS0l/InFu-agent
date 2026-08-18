@@ -81,6 +81,10 @@ check("ff02::1 组播私有", priv("ff02::1"));
 check("公网 IPv6 2001:4860:4860::8888 非私有", pub("2001:4860:4860::8888"));
 check("公网 IPv6 hex mapped ::ffff:8.8.8.8 非私有", pub("::ffff:8.8.8.8"));
 check("域名返回 null（需 DNS）", isPrivateHostText("example.com") === null);
+// v3.9 审计修复（M2）：FQDN 尾点归一（`localhost.` / `127.0.0.1.` 与无尾点等价）
+check("127.0.0.1. 尾点私有", priv("127.0.0.1."));
+check("127.1. 尾点简写私有", priv("127.1."));
+check("8.8.8.8. 尾点公网", pub("8.8.8.8."));
 
 // ── isLoopbackHostText：回环/本机判定（桌面导航守卫语义）──
 console.log("\n▶ isLoopbackHostText（回环判定，不含局域网）");
@@ -101,6 +105,9 @@ check("192.168.1.1 非回环（局域网）", nlb("192.168.1.1"));
 check("10.0.0.5 非回环", nlb("10.0.0.5"));
 check("8.8.8.8 非回环", nlb("8.8.8.8"));
 check("example.com 非回环（域名）", nlb("example.com"));
+// v3.9 审计修复（M2）：FQDN 尾点归一
+check("localhost. 尾点回环", lb("localhost."));
+check("127.0.0.1. 尾点回环", lb("127.0.0.1."));
 check("公网 IPv6 非回环", nlb("2001:4860:4860::8888"));
 
 console.log(`\n=== 结果：${passed} 通过 / ${failed} 失败 ===`);

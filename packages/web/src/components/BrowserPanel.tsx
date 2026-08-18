@@ -102,8 +102,17 @@ export default function BrowserPanel() {
 
   /** 新建 tab（用户 ➕ / Agent open-request）：本地 pending → webview dom-ready 后填充 wcId */
   const createTab = (url?: string) => {
+    // v4.0 审计修复（M8）：渲染层对 Agent open-request URL 双保险校验——主进程
+    // sanitizeBrowserUrl（will-navigate 等）会拦截恶意导航，但渲染层不能把安全
+    // 完全押在单一防线（webview sandbox=no 可直读磁盘，file:// 等 scheme 在此拒绝；
+    // normalizeUrl 与地址栏共用同一规范化，行为一致）
+    let safeUrl = "";
+    if (url) {
+      safeUrl = normalizeUrl(url);
+      if (!safeUrl) return; // 非法 scheme：拒绝建 tab（与地址栏非法输入同语义）
+    }
     const id = `t${++seqRef.current}`;
-    setTabs((ts) => [...ts.map((t) => ({ ...t, active: false })), { id, title: "新标签页", url: url ?? "", active: true, pending: true }]);
+    setTabs((ts) => [...ts.map((t) => ({ ...t, active: false })), { id, title: "新标签页", url: safeUrl, active: true, pending: true }]);
     setFreeSize(null);
   };
 

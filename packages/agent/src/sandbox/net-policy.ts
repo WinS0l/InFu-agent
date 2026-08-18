@@ -56,6 +56,18 @@ const EGRESS_PATTERNS: RegExp[] = [
   /(powershell|pwsh).{0,120}(Invoke-WebRequest|Invoke-RestMethod|DownloadFile|DownloadString|Net\.WebClient|WebRequest|Start-BitsTransfer|System\.Net\.Sockets|curl|wget)/i,
   /(python|python3|py)(\s+-c|\s+-m\s+http|\s+[a-zA-Z_]+\.py).{0,120}(urllib|requests|http\.client|socket|ftplib|paramiko)/i,
   /(node|npx|deno|bun).{0,120}(\bhttps?\b|\bnet\b|\bhttp\b|\bws\b)\.(get|request|createConnection|connect)/i,
+  // v3.9 审计修复（M4）：补版本管理/包管理器/wsl 外传面——git push/fetch/clone 直连远程、
+  // npm/pip install 拉包、wsl 启动 Linux 环境联网、PowerShell -enc 编码命令（可隐藏
+  // 任意网络调用）此前全部漏检。git status/diff 等本地只读操作不受影响（组合模式只
+  // 匹配 push/fetch/clone 等外传动词）
+  // v4.0 审计修复：参数位置绕过——`git -C <dir> push` / `git --git-dir=/x fetch` /
+  // `npm --prefix /x install` 的动词不紧贴工具名，原模式漏检。改为允许任意 `-flag [值]`
+  // 选项前缀（非 -flag 的普通参数不吞，`git status` / `npm run` 不受影响）
+  /\bgit\s+(?:-\S+(?:\s+\S+)?\s+)*(push|fetch|clone|pull|remote\s+add|submodule\s+update)\b/i,
+  /\b(npm|pnpm|yarn|bun)\s+(?:-\S+(?:\s+\S+)?\s+)*(install|add|ci|update|publish)\b/i,
+  /\b(pip|pip3|pipx)\s+(?:-\S+(?:\s+\S+)?\s+)*install\b/i,
+  /\b(powershell|pwsh).{0,80}-enc/i,
+  /\bwsl\b/i,
   // v3.5 审计修复（H7）：裸 fetch( / Invoke-* 全称无前缀组合（node fetch 全局 /
   // PS 全名与别名无 powershell 前缀的直呼写法）——断网策略保守侧（echo 类文本命中可接受）
   /fetch\s*\(/i,

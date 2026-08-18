@@ -203,7 +203,8 @@ export default function App() {
   useEffect(() => {
     const st = useStore.getState();
     if (!st.root) return;
-    const norm = (p: string) => p.replace(/[\/]+$/, "").toLowerCase();
+    // v4.0（L5）：Windows 反斜杠尾分隔符同样归一（与下方 normP 同款；原只去 `/`）
+    const norm = (p: string) => p.replace(/[\\/]+$/, "").toLowerCase();
     fetchProjects().then((ps) => {
       const registered = ps.some((p) => norm(p.root) === norm(st.root));
       const inSession = st.sessions.some((s) => norm(s.root) === norm(st.root));

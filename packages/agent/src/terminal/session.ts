@@ -89,6 +89,9 @@ export function createTerminalSession(cwd?: string, shell?: string): TerminalSes
     for (const fn of session.listeners) {
       try { fn(`\r\n[进程已退出]\r\n`); } catch { /* 忽略 */ }
     }
+    // v4.0 审计修复（M10）：退出后从注册表移除——原实现只置 exited，僵尸会话
+    // （64KB 缓冲 + listeners 集合）在长驻服务永久累积（用户敲 exit/进程自行退出路径）
+    sessions.delete(session.id);
   });
   sessions.set(session.id, session);
   return session;
@@ -110,7 +113,13 @@ export function subscribeOutput(session: TerminalSession, fn: (data: string) => 
 /** 写入输入（已退出/不存在由调用方校验；此处只管写入） */
 export function writeInput(session: TerminalSession, data: string): void {
   if (session.exited) return;
-  session.proc.write(data);
+  // v4.0 审计修复（L9）：exited 检查与 proc.write 之间进程退出会抛异常冒泡到端点层
+  try {
+    session.proc.write(data);
+  } catch {
+    session.exited = true;
+    sessions.delete(session.id);
+  }
 }
 
 /** 调整 PTY 尺寸（前端 fit 后同步） */

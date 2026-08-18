@@ -8,7 +8,7 @@
  */
 import { homedir } from "node:os";
 import { join, isAbsolute, resolve } from "node:path";
-import { existsSync, readFileSync, mkdirSync, writeFileSync, cpSync, statSync, readdirSync } from "node:fs";
+import { existsSync, readFileSync, mkdirSync, writeFileSync, cpSync, statSync, readdirSync, renameSync } from "node:fs";
 
 export const REDIRECT_FILE = join(homedir(), ".infu-redirect.json");
 const DEFAULT_DATA_DIR = join(homedir(), ".infu");
@@ -69,6 +69,21 @@ export function migrateDataDir(targetRaw: string): MigrateResult {
   if (guardErr) return { ok: false, message: guardErr, from: cur };
 
   // 复制前确保目标父目录存在；复制内容 = 整个旧目录（含 config.json）
+  // v4.0 审计修复（M11）：互迁/迁回目标已含 config.json 时，原实现逐项 force 复制 =
+  // 破坏性覆盖合并（目标独有文件残留 + 同名文件被静默覆盖）。先整体改名备份
+  // （目标.bak-<ts>），再全新复制——目标侧独有数据完整保留可查，无混合目录。
+  let targetBackup = "";
+  if (existsSync(target)) {
+    try {
+      const st = statSync(target);
+      if (st.isDirectory() && existsSync(join(target, "config.json"))) {
+        targetBackup = `${target}.bak-${Date.now()}`;
+        renameSync(target, targetBackup);
+      }
+    } catch {
+      return { ok: false, message: `目标目录备份失败（无法重命名目标）`, from: cur };
+    }
+  }
   mkdirSync(target, { recursive: true });
   try {
     // v3.5 bug 修复：Node 24 Windows 下同步 fs.cpSync(src, dst) 整体复制在服务进程内会
@@ -87,7 +102,12 @@ export function migrateDataDir(targetRaw: string): MigrateResult {
     return { ok: false, message: `指针写入失败：${(e as Error).message}`, from: cur };
   }
   invalidateDataDir();
-  return { ok: true, message: `数据已迁移到 ${target}（旧目录已保留为备份）`, from: cur, to: target };
+  return {
+    ok: true,
+    message: `数据已迁移到 ${target}（旧目录已保留为备份${targetBackup ? `；目标原有数据已备份到 ${targetBackup}` : ""}）`,
+    from: cur,
+    to: target,
+  };
 }
 
 /** 目标路径合法性校验（返回错误文案；null = 通过） */

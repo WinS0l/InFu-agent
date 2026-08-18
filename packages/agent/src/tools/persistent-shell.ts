@@ -71,9 +71,14 @@ export function execPersistent(sessionId: string, root: string, command: string,
       else resolvePromise(out);
     };
     const timer = setTimeout(() => {
-      // 超时：终止当前命令（Ctrl+C 语义）并返回已收集输出
-      try { session.proc.stdin.write("\x03"); } catch { /* 忽略 */ }
-      finish(new Error(`命令超时（${timeoutMs}ms）——已发送中断；输出：${out.slice(-500)}`));
+      // v4.0 审计修复（M1）：管道 stdin 下 `\x03` 只是普通字节（cmd/bash 均不产生
+      // SIGINT——中断依赖控制台信号而非字节流），原实现「已发送中断」是假消息，
+      // 命令继续运行且残留输出（含旧 marker）会混入下一次调用，导致结果错位。
+      // 处理：销毁整个持久会话（下一次调用自动重建）——残留输出随进程消失，杜绝串扰；
+      // 文案如实说明命令可能仍在运行（持久会话本就不受 L1.5 约束，孤儿进程由 OS 回收）。
+      try { session.proc.kill(); } catch { /* 忽略 */ }
+      sessions.delete(sessionId);
+      finish(new Error(`命令超时（${timeoutMs}ms）——已终止持久会话，命令可能仍在运行（输出已丢弃尾部）；输出：${out.slice(-500)}`));
     }, timeoutMs);
 
     const onData = (chunk: Buffer) => {
@@ -88,7 +93,9 @@ export function execPersistent(sessionId: string, root: string, command: string,
       }
     };
     const onErrData = (chunk: Buffer) => {
-      out += chunk.toString("utf-8");
+      // v4.0 审计修复：stderr 同样环形裁剪（原实现只裁剪 stdout 路径——纯 stderr 刷屏
+      // 命令在超时前可吃满内存，与 v3.6 对 stdout 的修复同型遗漏）
+      out = (out + chunk.toString("utf-8")).slice(-SHELL_OUTPUT_LIMIT);
     };
     session.proc.stdout.on("data", onData);
     session.proc.stderr.on("data", onErrData);

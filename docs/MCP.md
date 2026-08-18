@@ -85,7 +85,7 @@ Agent：read_file 参考示例 → write_file 编写 server → （可选 run_te
   → 注册成功 → 下一任务执行阶段自动注入该服务器工具
 ```
 
-- **工具**：`mcp_register`（第 11 个内置工具，仅 Executor/直接模式可用）
+- **工具**：`mcp_register`（第 7 个内置工具——read_file/write_file/edit_file/search_code/list_directory/run_command 之后；仅 Executor/直接模式可用）
 - **白名单边界**：只允许追加 `mcpServers` 节；`models/providers/roles/apiKey` 等其余配置字段不可达——Agent 无法自我提权（改自己的模型/凭据/角色）
 - **审批**：high + requireExplicit（与联网放行同级特权），审批描述展示完整注册内容（command/args/url/riskOverrides）
 - **闭环实测（2026-08-13）**：真实任务中 Agent 自主编写 `self-mcp-server.mjs`（get_time 工具，参考项目内示例）→ 调用 mcp_register 注册 `my-time`（high 审批批准）→ 下一任务自动注入并成功调用 `get_time`

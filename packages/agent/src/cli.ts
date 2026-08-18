@@ -28,7 +28,7 @@ import { findTemplate, renderTemplate } from "./templates.js";
 import { getStore } from "./db/store.js";
 import { rebuildMessages } from "./db/rebuild.js";
 import { inferResumePhase } from "./agent/resume.js";
-import { resolveApprovalPolicy, shouldAutoApprove } from "./approval/policy.js";
+import { resolveApprovalPolicy, shouldAutoApprove, currentApprovalPolicy } from "./approval/policy.js";
 import { loadMcpTools, withMcpTools } from "./mcp/index.js";
 import { mcpCli } from "./mcp/cli.js";
 import { loadPlugins, withPlugins } from "./plugin/index.js";
@@ -637,9 +637,9 @@ async function main() {
   };
 
   // v2.3 计划确认：交互输入回复文本（直接回车 = 批准执行；输入内容由 AI 判断 execute/revise/abort）
-  // -y 自动批准时直接通过；要取消输入"取消/先不做"（判为 abort）
+  // -y 自动批准时直接通过；v3.9 full 档（最大审批权限）同样自动批准；要取消输入"取消/先不做"（判为 abort）
   const cliConfirmPlan = async (planText: string) => {
-    if (autoApprove) return { plan: undefined, feedback: "批准执行" };
+    if (autoApprove || currentApprovalPolicy().mode === "full") return { plan: undefined, feedback: "批准执行" };
     console.error(C.cyan("\n【执行计划】请确认："));
     console.error(planText.slice(0, 2000));
     const feedback = await ask("你的回复（直接回车=批准执行；或输入意见/先不做/修改计划…）");
@@ -648,8 +648,9 @@ async function main() {
 
   // v2.6 收尾：执行中提问（ask_user 工具）——交互输入（回车=跳过/空回答）；v2.10 支持结构化选项
   // v3.5：-y（无人值守）直接跳过提问（等价「自动继续」），避免无人在终端时挂起
+  // v3.9：full 档（最大审批权限）同样跳过——全自主不等待用户
   const cliAskUser = async (question: string, options?: Array<string | { label: string; desc?: string; recommended?: boolean }>) => {
-    if (autoApprove) return "";
+    if (autoApprove || currentApprovalPolicy().mode === "full") return "";
     const labels = (options ?? []).map((o) => (typeof o === "string" ? o : o.label));
     console.error(C.cyan(`\n❓ Agent 提问：${question}`));
     if (labels.length) console.error(C.dim(`  选项：${labels.map((o, i) => `${i + 1}. ${o}`).join("  ")}（输入编号/文本，回车跳过）`));

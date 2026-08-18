@@ -77,6 +77,10 @@ export function buildContinuationPrompt(summary: SessionSummary, newPrompt: stri
 
 export class SessionStore {
   private db: DatabaseSync;
+  /** v4.0：事务嵌套深度——rewind 内部调用 appendEvent（appendEvent 自身包事务），
+   *  SQLite 不支持嵌套 BEGIN（"cannot start a transaction within a transaction"）；
+   *  深度 > 0 时 appendEvent 只参与外层事务，不自行 BEGIN/COMMIT */
+  private txnDepth = 0;
 
   constructor(dbPath: string = defaultDbPath()) {
     mkdirSync(join(resolveDataDir()), { recursive: true });
@@ -177,15 +181,30 @@ export class SessionStore {
    */
   appendEvent(sessionId: string, event: AgentEvent): number {
     const now = Date.now();
-    const row = this.db
-      .prepare(
-        `INSERT INTO events (session_id, seq, ts, event_json)
-         SELECT ?, COALESCE(MAX(seq), -1) + 1, ?, ? FROM events WHERE session_id = ?
-         RETURNING seq`
-      )
-      .get(sessionId, now, JSON.stringify(event), sessionId) as { seq: number } | undefined;
-    this.db.prepare(`UPDATE sessions SET updated_at = ? WHERE id = ?`).run(now, sessionId);
-    return row ? Number(row.seq) : 0;
+    // v4.0 审计修复（L8）：INSERT 与 UPDATE sessions 包事务——原实现 UPDATE 失败
+    // （罕见）会留下「事件已入但 updated_at 停滞」的中间态；外层已有事务（rewind）时
+    // 只参与不嵌套（txnDepth 见上）
+    const nested = this.txnDepth > 0;
+    if (!nested) this.db.exec("BEGIN");
+    let seq = 0;
+    try {
+      const row = this.db
+        .prepare(
+          `INSERT INTO events (session_id, seq, ts, event_json)
+           SELECT ?, COALESCE(MAX(seq), -1) + 1, ?, ? FROM events WHERE session_id = ?
+           RETURNING seq`
+        )
+        .get(sessionId, now, JSON.stringify(event), sessionId) as { seq: number } | undefined;
+      this.db.prepare(`UPDATE sessions SET updated_at = ? WHERE id = ?`).run(now, sessionId);
+      if (!nested) this.db.exec("COMMIT");
+      seq = row ? Number(row.seq) : 0;
+    } catch (e) {
+      if (!nested) {
+        try { this.db.exec("ROLLBACK"); } catch { /* 忽略 */ }
+      }
+      throw e;
+    }
+    return seq;
   }
 
   /** 会话全量事件（seq 升序） */
@@ -250,14 +269,25 @@ export class SessionStore {
   rewind(id: string, seq: number, opts?: { marker?: boolean }): boolean {
     const s = this.getSession(id);
     if (!s) return false;
-    this.db.prepare(`DELETE FROM events WHERE session_id = ? AND seq >= ?`).run(id, seq);
-    this.updateStatus(id, "stopped");
-    // v2.14 批 9：回滚标记落库（rebuild 时注入 system 提示——AI 意识到已回滚并知道位置）；
-    // v2.14 批 10：编辑场景（marker:false）不落标记——编辑 = 正常历史修改，AI 无需被告知（截断后自然看不到旧内容）
-    if (opts?.marker !== false) {
-      try {
+    // v4.0 审计修复（L5）：DELETE 事件 / updateStatus / marker 落库包事务——原实现
+    // 三步分离，进程崩溃会留下「事件已删但状态 running」或 marker 缺失的中间态；
+    // 内部 appendEvent 经 txnDepth 参与本事务（不嵌套 BEGIN）
+    this.txnDepth++;
+    this.db.exec("BEGIN");
+    try {
+      this.db.prepare(`DELETE FROM events WHERE session_id = ? AND seq >= ?`).run(id, seq);
+      this.updateStatus(id, "stopped");
+      // v2.14 批 9：回滚标记落库（rebuild 时注入 system 提示——AI 意识到已回滚并知道位置）；
+      // v2.14 批 10：编辑场景（marker:false）不落标记——编辑 = 正常历史修改，AI 无需被告知（截断后自然看不到旧内容）
+      if (opts?.marker !== false) {
         this.appendEvent(id, { type: "rewind", to: seq, at: Date.now() });
-      } catch { /* 标记失败不影响回滚本身 */ }
+      }
+      this.db.exec("COMMIT");
+    } catch (e) {
+      try { this.db.exec("ROLLBACK"); } catch { /* 忽略 */ }
+      throw e;
+    } finally {
+      this.txnDepth--;
     }
     return true;
   }

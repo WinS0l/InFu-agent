@@ -298,8 +298,9 @@ export default function Sidebar({ onOpenSettings, className = "" }: SidebarProps
       // 切换后把视图 messages 同步到该会话缓存
       useStore.setState({ messages: useStore.getState().sessionCache[id] ?? [] });
       if (sessionRoot && sessionRoot !== root) setRoot(sessionRoot);
-    } catch {
-      /* 加载失败静默 */
+    } catch (e) {
+      // v4.0 审计修复（L1）：加载失败静默 → 提示（原实现点会话无响应且无任何反馈）
+      useStore.getState().addError(`会话加载失败：${(e as Error).message}`);
     } finally {
       setBusyId(null);
     }
@@ -307,16 +308,26 @@ export default function Sidebar({ onOpenSettings, className = "" }: SidebarProps
 
   /** 删除会话（仅归档视图内使用；侧栏行删除入口不暴露） */
   const removeSession = async (id: string) => {
-    await deleteSession(id);
-    await fetchSessions();
-    if (activeSessionId === id) newSession();
+    try {
+      await deleteSession(id);
+      await fetchSessions();
+      if (activeSessionId === id) newSession();
+    } catch (e) {
+      // v4.0 审计修复（M7）：裸 rejection → 提示
+      useStore.getState().addError(`会话删除失败：${(e as Error).message}`);
+    }
   };
 
   /** 会话管理操作（重命名/顶置/归档）→ PATCH + 刷新 */
   const patchSession = async (id: string, body: { title?: string; pinned?: boolean; archived?: boolean }) => {
-    await updateSessionApi(id, body);
-    await fetchSessions();
-    await fetchProjects().then(setProjects);
+    try {
+      await updateSessionApi(id, body);
+      await fetchSessions();
+      await fetchProjects().then(setProjects);
+    } catch (e) {
+      // v4.0 审计修复（M7）：裸 rejection → 提示（重命名失败时输入框已退出编辑态，必须告知）
+      useStore.getState().addError(`会话更新失败：${(e as Error).message}`);
+    }
   };
 
   /** 在当前项目下新建会话（root 切到项目 + 清空聊天区；v3.1 运行中可新建） */
@@ -652,14 +663,20 @@ export default function Sidebar({ onOpenSettings, className = "" }: SidebarProps
                       <button
                         className="flex h-8 w-full cursor-pointer items-center gap-2 rounded-lg px-2.5 text-[13px] text-danger transition-colors hover:bg-danger-soft"
                         onClick={async () => {
-                          await removeProjectApi(p.id);
-                          setConfirmRemove(null);
-                          await fetchProjects().then(setProjects);
-                          await fetchSessions();
-                          // v3.0 批 12：移除的项目若正是当前 root → 清空（否则新建会话仍显示已删项目名）
-                          const st = useStore.getState();
-                          if (st.root && st.root.replace(/[\/]+$/, "").toLowerCase() === p.root.replace(/[\/]+$/, "").toLowerCase()) {
-                            useStore.getState().setRoot("");
+                          try {
+                            await removeProjectApi(p.id);
+                            setConfirmRemove(null);
+                            await fetchProjects().then(setProjects);
+                            await fetchSessions();
+                            // v3.0 批 12：移除的项目若正是当前 root → 清空（否则新建会话仍显示已删项目名）
+                            // v4.0（L5）：Windows 反斜杠路径同样归一（原只去 `/`，尾反斜杠路径匹配失效）
+                            const st = useStore.getState();
+                            if (st.root && st.root.replace(/[\\/]+$/, "").toLowerCase() === p.root.replace(/[\\/]+$/, "").toLowerCase()) {
+                              useStore.getState().setRoot("");
+                            }
+                          } catch (e) {
+                            // v4.0 审计修复（M7）：裸 rejection → 提示
+                            useStore.getState().addError(`项目移除失败：${(e as Error).message}`);
                           }
                         }}
                       >

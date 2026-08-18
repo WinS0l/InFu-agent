@@ -224,6 +224,43 @@ function createMainWindow() {
     return { action: "deny" };
   });
 
+  // v4.0 审计修复（M12）：主窗口导航守卫——主窗口持有令牌 + infuDesktop 桥，此前仅
+  // setWindowOpenHandler、无 will-navigate/will-redirect（guest webview 有三闸守卫而
+  // 主窗口裸奔，与威胁优先级不匹配）。放行 = 应用自身来源（dev localhost:5199 /
+  // prod 127.0.0.1:<serverPort>——loadURL 不触发 will-navigate，初始加载不受影响）；
+  // 其余 http(s) 交给系统浏览器并拦截（防 XSS/恶意链接把主窗口导航到任意远程页面后
+  // 持有完整桥），file:// 等一律拦截
+  const mainOrigin = (() => {
+    try {
+      return new URL(IS_DEV ? "http://localhost:5199" : `http://127.0.0.1:${serverPort}`).origin;
+    } catch {
+      return "";
+    }
+  })();
+  const isMainOrigin = (url: string) => {
+    try {
+      return !!mainOrigin && new URL(url).origin === mainOrigin;
+    } catch {
+      return false;
+    }
+  };
+  const guardMainNav = (url: string) => {
+    if (isMainOrigin(url)) return; // 应用自身来源放行
+    if (/^https?:/i.test(url)) shell.openExternal(url); // 外链 → 系统浏览器（窗口不离开）
+  };
+  win.webContents.on("will-navigate", (e, url) => {
+    if (!isMainOrigin(url)) {
+      e.preventDefault();
+      guardMainNav(url);
+    }
+  });
+  win.webContents.on("will-redirect", (e, url) => {
+    if (!isMainOrigin(url)) {
+      e.preventDefault();
+      guardMainNav(url);
+    }
+  });
+
   // 导航目标（统一等 agent 服务端口就绪后加载；dev = vite 独立端口 + query 传 API 端口）
   if (serverPort > 0) {
     const url = IS_DEV
@@ -819,7 +856,17 @@ function registerIpc() {
     }
   });
   ipcMain.on("browser-view:open-external", (_e, url: string) => {
-    if (/^https?:/i.test(url)) shell.openExternal(url);
+    // v4.0 审计修复（M5）：本机回环地址不进系统浏览器——https://127.0.0.1:4317/（含
+    // token 的 InFu UI）经此通道在外部浏览器打开，浏览器扩展/历史缓存可读取令牌；
+    // isLoopbackHostText（IPv6 解包/简写 fail-closed）拦回环与 localhost，公网与
+    // 内网（192.168 等）属用户意图照常打开
+    if (typeof url !== "string" || !/^https?:/i.test(url)) return;
+    try {
+      if (isLoopbackHostText(new URL(url).hostname)) return;
+    } catch {
+      return;
+    }
+    shell.openExternal(url);
   });
   // v3.5 修复：UI 视口（📄 预设/适应窗口）→ CDP Emulation 同步（与 Agent
   // browser_viewport 同一通道——此前只改元素 CSS，Agent 设过的设备度量残留 → 适应窗口无效）

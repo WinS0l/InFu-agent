@@ -39,7 +39,8 @@ setDataDirForTest(tmpData);
 console.log("▶ resolveApprovalPolicy");
 {
   const none = resolveApprovalPolicy(null);
-  check("无配置 → smart 默认 + 内置默认白名单", none.mode === "smart" && none.toolOverrides.length === 0 && none.commandAllowlist.length > 0);
+  // v3.9：默认档位已改为 full（用户拍板「最大审批权限」）
+  check("无配置 → full 默认 + 内置默认白名单", none.mode === "full" && none.toolOverrides.length === 0 && none.commandAllowlist.length > 0);
   const empty = resolveApprovalPolicy({ models: [] });
   check("空配置 → 默认", empty.mode === DEFAULT_POLICY.mode);
   const partial = resolveApprovalPolicy({ models: [], approvalPolicy: { mode: "auto", toolOverrides: [{ tool: "git*", risk: "low" }] } });

@@ -24,9 +24,10 @@ export interface ResolvedApprovalPolicy {
   commandAllowlist: string[];
 }
 
-/** 默认策略：smart 档位（low 自动、medium/high 人工）——历史行为 */
+/** 默认策略：full 档位（2026-08-18 用户拍板「最大审批权限」——全自主，不出现任何审批弹窗；
+ *  仅剩硬闸：显式禁用工具/受保护路径/SSRF/路径作用域。历史默认 smart 已弃） */
 export const DEFAULT_POLICY: ResolvedApprovalPolicy = {
-  mode: "smart",
+  mode: "full",
   toolOverrides: [],
   commandAllowlist: [],
 };
@@ -38,7 +39,10 @@ export const DEFAULT_POLICY: ResolvedApprovalPolicy = {
  */
 export const DEFAULT_COMMAND_ALLOWLIST: string[] = [
   // 元数据/查询
-  "ls*", "pwd", "date", "whoami", "id", "uname*", "hostname", "which*", "type*", "env", "echo*", "df -h", "du*",
+  // v4.0 审计修复（M15）：移除 `type*`——Windows cmd/PowerShell 下 `type` = 读文件命令
+  // （`type C:\Users\x\.npmrc` 可免审批读任意盘内文件）；POSIX 下仅为内置查询但
+  // 跨平台白名单必须按最危险平台收口
+  "ls*", "pwd", "date", "whoami", "id", "uname*", "hostname", "which*", "env", "echo*", "df -h", "du*",
   // git 只读（分支/配置写操作不放——git branch 创建删除、git config 写 ~/.gitconfig 均走审批）
   "git status*", "git diff*", "git log*", "git show*", "git branch -a*", "git branch -r*",
   "git branch --show-current*", "git branch -l*", "git remote -v*", "git ls-files*",

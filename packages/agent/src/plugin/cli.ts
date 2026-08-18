@@ -5,11 +5,10 @@
  * 行迭代器为模块级单例（与 mcp/cli.ts 同构；同一进程同一时刻只有一个向导）。
  */
 
-import { mkdirSync, writeFileSync, cpSync, existsSync, rmSync } from "node:fs";
-import { homedir } from "node:os";
+import { cpSync, existsSync, rmSync } from "node:fs";
 import { join, resolve } from "node:path";
 import type { InfuConfig } from "@infu/shared";
-import { loadConfig, configPath } from "../providers/registry.js";
+import { loadConfig, saveConfig } from "../providers/registry.js";
 import { resolveDataDir } from "../data-dir.js";
 import { loadPlugins } from "./index.js";
 import { listSkills, readSkillMeta } from "./skills.js";
@@ -43,11 +42,8 @@ function ask(question: string, def?: string): Promise<string> {
     .then((r) => r.value?.trim() || def || "");
 }
 
-function saveConfig(cfg: InfuConfig) {
-  mkdirSync(join(resolveDataDir()), { recursive: true });
-  const CONFIG_PATH = configPath();
-  writeFileSync(CONFIG_PATH, JSON.stringify({ ...cfg, version: cfg.version ?? 1 }, null, 2), "utf-8");
-}
+// v4.0 审计修复（M2）：删除本地直写 saveConfig（无原子写/无 0600 chmod，与常驻 server
+// 并发写可截断半写）——统一走 registry.saveConfig（tmp + rename 原子写 + chmod 0600）
 
 export async function pluginCli(args: string[]): Promise<void> {
   const cmd = args[0];

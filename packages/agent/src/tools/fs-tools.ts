@@ -86,20 +86,22 @@ export const fsTools: Record<string, ToolDef> = {
       const op = args.op as string;
       const rel = args.path as string;
       const destRel = args.dest as string | undefined;
-      // v3.4 审计修复（H4）：声明 medium 却零审批的破口——rm 递归删除/覆盖移动
-      // 在 confirm 档也静默执行。补齐审批门（与 write_file/edit_file/git_add 同级），
-      // 并补只读容器检查（自由会话默认根目录禁止写操作，此前只有 isProtectedPath）。
-      if (!(await guard(ctx, "file_ops", "medium", `文件操作 ${op}: ${rel}${destRel ? ` → ${destRel}` : ""}`))) {
-        return "用户拒绝：文件操作未执行";
-      }
-      const roBlock = sessionRootReadOnlyBlock(ctx);
-      if (roBlock) return `错误：${roBlock}`;
       const abs = path.resolve(ctx.root, rel);
       if (!isPathInside(ctx.root, abs)) return "错误：源路径越界";
       const scopeErr = checkPathScope(rel, ctx.scopeRules);
       if (scopeErr) return `错误：路径超出作用域——${scopeErr}`;
       const protectedName = isProtectedPath(abs);
       if (protectedName) return `错误：${protectedName} 受保护，拒绝写操作`;
+      // v4.0 审计修复（M4）：递归删除与 run_command `rm -rf` 红线对齐——
+      // 原实现 rm 目录递归仅 medium（auto 档自动放行 = 免红线删光项目），
+      // 现升级为 high + requireExplicit（无人值守/auto 档一律拒绝），与
+      // run_command DANGEROUS 分支同门槛；普通文件删除/移动/复制保持 medium。
+      const isRecursiveRm = op === "rm" && fs.existsSync(abs) && fs.statSync(abs).isDirectory() && args.recursive === true;
+      if (!(await guard(ctx, "file_ops", isRecursiveRm ? "high" : "medium", `文件操作 ${op}: ${rel}${destRel ? ` → ${destRel}` : ""}`, isRecursiveRm ? true : undefined))) {
+        return "用户拒绝：文件操作未执行";
+      }
+      const roBlock = sessionRootReadOnlyBlock(ctx);
+      if (roBlock) return `错误：${roBlock}`;
 
       if (op === "mkdir") {
         if (fs.existsSync(abs)) return `已存在：${rel}`;

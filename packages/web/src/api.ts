@@ -11,12 +11,23 @@ const API_BASE = (() => {
   const port = new URLSearchParams(window.location.search).get("infuAgentPort");
   return port ? `http://127.0.0.1:${port}` : "";
 })();
+// v4.0 审计修复（L12）：令牌一次性读取后从 window 全局删除——缩短 DOM 暴露面
+// （任何后续注入的脚本/XSS 无法再读 window.__INFU_TOKEN__；HTML 每次加载仍会注入，
+// 但读取发生在模块加载第一时间，暴露窗口 = 页面加载到 JS 执行之间）
+const LOCAL_TOKEN = (() => {
+  const g = globalThis as { __INFU_TOKEN__?: string };
+  const t = g.__INFU_TOKEN__;
+  if (t) {
+    try { delete g.__INFU_TOKEN__; } catch { /* 只读全局（罕见）降级 */ }
+  }
+  return t;
+})();
 async function apiFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
   const url = typeof input === "string" && input.startsWith("/") ? API_BASE + input : input;
   // v3.1 审计修复：本地令牌——生产模式（同端口静态托管）服务端注入
   // window.__INFU_TOKEN__（见 server.ts），所有 API 请求带 X-InFu-Token；
   // vite dev 无注入 → 不带头（服务端未启用令牌校验）
-  const token = (globalThis as { __INFU_TOKEN__?: string }).__INFU_TOKEN__;
+  const token = LOCAL_TOKEN;
   if (token) {
     const headers = new Headers(init?.headers);
     headers.set("X-InFu-Token", token);
@@ -34,7 +45,7 @@ export { apiFetch };
  */
 export function apiUrl(p: string): string {
   const base = API_BASE + p;
-  const token = (globalThis as { __INFU_TOKEN__?: string }).__INFU_TOKEN__;
+  const token = LOCAL_TOKEN;
   if (!token) return base;
   return `${base}${base.includes("?") ? "&" : "?"}token=${encodeURIComponent(token)}`;
 }
@@ -463,7 +474,7 @@ function handleEvent(ev: AgentEvent, connSid: string | null) {
     st.updateSubagent(ev);
     // 子智能体内部的高危审批/提问也必须进同一队列（否则服务端挂起死等）
     if (ev.type === "approval-required") st.requestApproval(ev, connSid ?? undefined);
-    if (ev.type === "ask-user") st.setAskQuestion({ id: ev.id, question: ev.question, options: ev.options });
+    if (ev.type === "ask-user") st.setAskQuestion({ id: ev.id, question: ev.question, options: ev.options }, connSid ?? undefined);
     return;
   }
   switch (ev.type) {
@@ -498,7 +509,7 @@ function handleEvent(ev: AgentEvent, connSid: string | null) {
       st.requestApproval(ev, connSid ?? undefined);
       break;
     case "ask-user":
-      st.setAskQuestion({ id: ev.id, question: ev.question, options: ev.options });
+      st.setAskQuestion({ id: ev.id, question: ev.question, options: ev.options }, connSid ?? undefined);
       break;
     case "approval-result":
       // 弹窗已由 resolveApproval 关闭
@@ -854,6 +865,11 @@ export async function sendChat(
     if (connSid) useStore.getState().clearAbortController(connSid);
     useStore.getState().finishAssistantFor(connSid ?? st.activeSessionId ?? "");
     if (connSid) useStore.getState().clearPlanFor(connSid);
+    // v4.0 审计修复（H1）：eventTarget 连接结束后重置——原实现只 set 从不 reset，
+    // 任务结束后组件侧错误（审批失败/插件加载失败等 addError）永久路由到最后一个
+    // 运行会话的缓存，用户无感知。重置后 targetId 回落 activeSessionId（当前视图）。
+    // 安全：并行 run 的 SSE 事件每帧重新 setEventTarget（handleEvent 460 行），无影响。
+    useStore.getState().setEventTarget(null);
     // 任务结束：重拉事件补全回滚锚点（实时流消息无 seqStart，重放后即可回滚）。
     // v2.13：被新 run 接管（队列连发 run2 已启动）→ 跳过重放（否则整体替换覆盖新 run 实时缓存）；
     // 后台会话 → 只写缓存（loadSessionCache，不污染视图全局字段）
@@ -976,7 +992,9 @@ export async function gitInitProject(root: string): Promise<{ ok: boolean; messa
 export async function fetchReviewFileDiff(root: string, path: string): Promise<string> {
   const res = await apiFetch(`/api/review/file?root=${encodeURIComponent(root)}&path=${encodeURIComponent(path)}`);
   const data = await res.json();
-  if (!res.ok || data.ok === false) return "";
+  // v4.0 审计修复（L3）：失败必须抛错——原返回 "" 使 ReviewPane 的 catch 分支永不
+  // 命中，401/400 显示为「该文件无改动」（误导）
+  if (!res.ok || data.ok === false) throw new Error(data.message || `diff 加载失败: ${res.status}`);
   return data.diff ?? "";
 }
 
@@ -1006,6 +1024,8 @@ export async function fetchFsFile(
 ): Promise<{ content: string; binary?: boolean; size?: number; truncated?: boolean }> {
   const res = await apiFetch(`/api/fs/file?root=${encodeURIComponent(root)}&path=${encodeURIComponent(path)}`);
   const data = await res.json();
-  if (!res.ok || data.ok === false) return { content: "", binary: false };
+  // v4.0 审计修复（L3）：失败必须抛错（与 fetchFsTree 同款）——原返回空内容使
+  // CodeView 的 catch 分支永不命中，401/400 显示为「空文件」（误导）
+  if (!res.ok || data.ok === false) throw new Error(data.message || `文件加载失败: ${res.status}`);
   return data;
 }

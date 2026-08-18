@@ -7,13 +7,13 @@
 
 | Provider | 模型 | 流式生成 | 思考字段 reasoning_content | 单轮工具调用 | 多轮工具调用 | 中文长输出 | 上下文窗口（InFu 默认） |
 |---|---|---|---|---|---|---|---|
-| deepseek | deepseek-v4-flash | ✅ | ✅ 1078 字符 | ✅ | ✅ | ✅ | 128k |
-| zhipu（GLM） | glm-5.2 | ⏳ 待实测 | ⏳ | ⏳ | ⏳ | ⏳ | 128k |
+| deepseek | deepseek-v4-flash | ✅ | ✅ 1078 字符 | ✅ | ✅ | ✅ | 1M（模型名匹配） |
+| zhipu（GLM） | glm-5.2 | ⏳ 待实测 | ⏳ | ⏳ | ⏳ | ⏳ | 1M（模型名匹配） |
 | qwen（通义） | qwen3-coder | ⏳ 待实测 | ⏳ | ⏳ | ⏳ | ⏳ | 256k（模型名匹配） |
-| custom（Kimi） | kimi-k3 | ⏳ 待实测 | ⏳ | ⏳ | ⏳ | ⏳ | 256k（模型名匹配） |
+| custom（Kimi） | kimi-k3 | ⏳ 待实测 | ⏳ | ⏳ | ⏳ | ⏳ | 1M（模型名匹配） |
 | ollama（本地） | qwen3:8b | ⏳ 待实测 | ⏳ | ⏳ | ⏳ | ⏳ | 128k |
-| openai | gpt-5.6-luna | ⏳ 待实测 | ⏳ | ⏳ | ⏳ | ⏳ | 400k（模型名匹配） |
-| anthropic | claude-sonnet-5 | ⏳ 待实测 | ⏳ | ⏳ | ⏳ | ⏳ | 200k |
+| openai | gpt-5.6-luna | ⏳ 待实测 | ⏳ | ⏳ | ⏳ | ⏳ | 1M（模型名匹配） |
+| anthropic | claude-sonnet-5 | ⏳ 待实测 | ⏳ | ⏳ | ⏳ | ⏳ | 1M（模型名匹配） |
 | google | gemini-3.6-flash | ⏳ 待实测 | ⏳ | ⏳ | ⏳ | ⏳ | 1M |
 
 > ⏳ 实测延后（2026-08-13 决策）：等你配好对应 API Key / 本地 Ollama 后，`npm run probe -- <modelId>` 逐个跑，结果回填。
@@ -24,7 +24,7 @@
 2. **思考字段**：`reasoning_content`（DeepSeek 原生）/ `reasoning`（部分兼容网关）都识别；其他模型无该字段则忽略（不报错）。重建消息时保留 `reasoning_content` 供 DeepSeek 续传。
 3. **工具调用**：
    - 模型不发 `tool_calls` → Agent 正常收尾输出文本（等价"不调用工具"），不视为错误。
-   - 若某 provider 实测**完全不支持工具调用**：提示词降级为"建议模式"（当前循环不做能力探测——工具调用按 OpenAI 协议假设；实测发现不支持者在此文档标注，并在 `resolveRoleThinking`/系统提示词层规避）。
+   - 若某 provider 实测**完全不支持工具调用**：模型直接输出文本收尾（等价"不调用工具"），不视为错误——原「建议模式」已随 v2.6.5 移除（主流语义：无工具能力的模型只能纯对话）。
    - 工具调用增量按 `index` 聚合（流式分片 arguments 拼接），坏帧跳过。
 4. **错误语义**：非 2xx 统一抛 `ModelApiError{status, retryable}`——429/5xx/408 可重试（指数退避），其他 4xx 不重试；主模型重试耗尽走 `fallbackModelIds` 降级链。
 5. **上下文窗口**：按模型 `contextWindow`（显式配置 > 模型名匹配表 > provider 默认 > 128k）触发压缩；实测可据此校准 `MODEL_CONTEXT_WINDOWS`（`packages/agent/src/providers/registry.ts`）。

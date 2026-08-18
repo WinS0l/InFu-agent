@@ -33,6 +33,12 @@ console.log("\n=== 网络出站软控制策略自测（M6） ===\n");
 // 历史累计——重定向后日志只含本套件自身写入的条目，不再依赖/污染用户数据）
 const tmpData = mkdtempSync(join(tmpdir(), "infu-test-"));
 setDataDirForTest(tmpData);
+// v3.9：默认审批档位已改为 full（最大权限）——本套件验证的是「非 full 档位下断网策略
+// 拦截语义」，必须显式固定档位（写临时目录 config.json；loadConfig 热读取每调用生效）
+writeFileSync(
+  join(tmpData, "config.json"),
+  JSON.stringify({ version: 2, approvalPolicy: { mode: "smart" } })
+);
 
 // 1. detectEgress 检测
 console.log("▶ detectEgress 检测");
@@ -41,8 +47,21 @@ check("wget 命中", detectEgress("wget http://x/file") === "wget");
 check("nc 命中（管道后）", detectEgress("dir | nc 1.2.3.4 4444") === "nc");
 check("ssh 命中", detectEgress("ssh user@host") === "ssh");
 check("ssh-keygen 不误伤", detectEgress("ssh-keygen -t ed25519") === null, "ssh-keygen 含 ssh 前缀但整词不匹配");
-check("git push 不受影响", detectEgress("git push origin main") === null);
-check("npm install 不受影响", detectEgress("npm install") === null);
+// v3.9 审计修复（M4）：git push/fetch/clone 与 npm/pip install 补入断网策略——
+// 此前「不受影响」= 外传/拉包命令漏检；git status/diff 等本地只读仍不受影响
+check("git push 命中（外传）", detectEgress("git push origin main") !== null);
+check("git status 本地只读不误伤", detectEgress("git status --short") === null);
+check("npm install 命中（拉包联网）", detectEgress("npm install") !== null);
+check("npm ls 本地查询不误伤", detectEgress("npm ls --depth=0") === null);
+// v4.0 审计修复（M3）：参数位置绕过——动词不紧贴工具名时原模式漏检
+check("git -C 参数位命中", detectEgress("git -C /repo push origin main") !== null, "git -C 后 push 必须拦截");
+check("git --git-dir 参数位命中", detectEgress("git --git-dir=/repo fetch origin") !== null, "git --git-dir 后 fetch 必须拦截");
+check("git 选项后 status 不误伤", detectEgress("git -C /repo status --short") === null, "git -C 后本地只读仍放行");
+check("npm --prefix 参数位命中", detectEgress("npm --prefix /x install") !== null, "npm --prefix 后 install 必须拦截");
+check("npm --prefix ls 不误伤", detectEgress("npm --prefix /x ls") === null, "npm --prefix 后本地查询放行");
+check("pip -r 参数位命中", detectEgress("pip -r requirements.txt install") !== null, "pip 选项后 install 必须拦截");
+check("pip show 不误伤", detectEgress("pip show requests") === null, "pip show 本地查询放行");
+check("npm run 不误伤", detectEgress("npm run build") === null, "npm run 执行本地脚本放行");
 check("echo curl 保守命中", detectEgress("echo curl") === "curl", "整词出现即拦截（保守策略）");
 check("powershell 组合命中", detectEgress('powershell -Command "Invoke-WebRequest http://x"') !== null);
 check("python 组合命中", detectEgress('python -c "import urllib.request"') !== null);

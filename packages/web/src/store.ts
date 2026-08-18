@@ -190,6 +190,9 @@ interface StoreState {
   approvals: ApprovalState[];
   /** v2.6 收尾：Agent 提问（ask_user 工具；null = 无提问） */
   askQuestion: AskState | null;
+  /** v4.0 审计修复（M3）：提问按会话存储（多会话并行时后到的问题不再覆盖先到的——后台
+   *  会话的提问挂起等待，切回该会话即可见）；askQuestion = 当前视图会话的提问（派生视图） */
+  askBySession: Record<string, AskState | null>;
   /** 当前阶段号（Timeline 分组） */
   currentStep: number;
   /** 各阶段开始时间戳（思考耗时计算，键 = 阶段:步骤 复合键） */
@@ -309,7 +312,7 @@ interface StoreState {
   requestApproval: (ev: Extract<AgentEvent, { type: "approval-required" }>, sessionId?: string) => void;
   resolveApproval: (approved: boolean) => void;
   resolveAllApprovals: (approved: boolean) => void;
-  setAskQuestion: (q: AskState | null) => void;
+  setAskQuestion: (q: AskState | null, sessionId?: string | null) => void;
   resolveAskQuestion: (answer: string | null) => void;
   // ── v2.5 子智能体（主对话流条目 + 右侧栏详情弹窗）──
   startSubagent: (ev: Extract<AgentEvent, { type: "subagent-start" }>) => void;
@@ -611,6 +614,7 @@ export const useStore = create<StoreState>()(
     ),
   approvals: [],
   askQuestion: null,
+  askBySession: {},
   sessions: [],
   activeSessionId: null,
   pendingRollback: null,
@@ -690,10 +694,12 @@ export const useStore = create<StoreState>()(
     set((s) => {
       const out: Partial<StoreState> = { activeSessionId: id };
       // v2.13：切换会话 → 视图派生字段跟随该会话（todos/usage/plan 按会话存储后回填）
+      // v4.0：askQuestion 同款回填（按会话存储后，切回有挂起提问的会话即可见）
       if (id) {
         out.todos = s.todosBySession[id] ?? [];
         out.usage = s.usageBySession[id] ?? { cacheHit: 0, cacheMiss: 0, promptTokens: 0, completionTokens: 0 };
         out.plan = s.plansBySession[id] ?? null;
+        out.askQuestion = s.askBySession[id] ?? null;
       }
       return out;
     }),
@@ -1277,7 +1283,15 @@ export const useStore = create<StoreState>()(
       if (!sid || sid === s.activeSessionId) out.plan = p;
       return out;
     }),
-  clearPlan: () => set({ plan: null }),
+  clearPlan: () =>
+    set((s) => {
+      // v4.0 审计修复（M1）：清视图同时清该会话的 plansBySession 残留——原实现只清
+      // 视图 plan，已决策/已取消的计划卡在切换会话后会从 plansBySession 复活
+      const sid = s.activeSessionId ?? "";
+      const plansBySession = { ...s.plansBySession };
+      if (sid in plansBySession) delete plansBySession[sid];
+      return { plan: null, plansBySession };
+    }),
   clearPlanFor: (sid) =>
     set((s) => {
       if (!sid || !(sid in s.plansBySession)) return {};
@@ -1335,11 +1349,21 @@ export const useStore = create<StoreState>()(
     }
   },
 
-  setAskQuestion: (q) => set({ askQuestion: q }),
+  setAskQuestion: (q, sessionId) =>
+    set((s) => {
+      // v4.0 审计修复（M3）：按会话存储——后台会话的提问不覆盖当前视图提问；
+      // 视图字段只跟随当前会话（切换会话时由 setActiveSessionId 回填）
+      const sid = sessionId ?? s.activeSessionId ?? "";
+      const askBySession = { ...s.askBySession, [sid]: q };
+      const out: Partial<StoreState> = { askBySession };
+      if (!sid || sid === s.activeSessionId) out.askQuestion = q;
+      return out;
+    }),
   resolveAskQuestion: (answer) => {
     const q = get().askQuestion;
     if (!q) return;
-    set({ askQuestion: null });
+    const sid = get().activeSessionId ?? "";
+    set({ askQuestion: null, askBySession: { ...get().askBySession, [sid]: null } });
     // v3.6 审计修复：原 .catch(() => {}) 静默——请求失败时服务端 pendingQuestions
     // 挂起、Agent 永久等待且用户无感知；失败恢复弹窗 + 提示（用户可重试）
     apiFetch(`/api/ask/${q.id}`, {
@@ -1347,8 +1371,9 @@ export const useStore = create<StoreState>()(
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ answer }),
     }).catch(() => {
-      get().addError("提问提交失败（网络错误），已恢复提问弹窗——请重新回答");
-      set({ askQuestion: q });
+      // v4.0：错误路由到提问所属会话（原全局 addError 在 eventTarget 陈旧时写错会话）
+      get().addErrorFor(sid, "提问提交失败（网络错误），已恢复提问弹窗——请重新回答");
+      set({ askQuestion: q, askBySession: { ...get().askBySession, [sid]: q } });
     });
   },
 
@@ -1537,6 +1562,7 @@ export const useStore = create<StoreState>()(
       running: false,
       approvals: [],
       askQuestion: null,
+      askBySession: {},
       diffContent: "",
       fileChanges: [],
       currentStep: 1,

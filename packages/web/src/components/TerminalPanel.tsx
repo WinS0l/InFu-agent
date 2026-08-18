@@ -172,9 +172,17 @@ export default function TerminalPanel() {
           for (const frame of frames) {
             const dataLine = frame.split("\n").find((l) => l.startsWith("data:"));
             if (!dataLine) continue;
+            // v4.0 审计修复（L2）：解析 event: 行——服务端 exit 事件此前被丢弃
+            // （只取 data: 行，`event: exit` 的 data 无 "data" 字段 → 忽略），
+            // 「进程已退出」徽标是永假死代码
+            const eventLine = frame.split("\n").find((l) => l.startsWith("event:"));
+            const evName = eventLine?.slice(6).trim();
             try {
               const ev = JSON.parse(dataLine.slice(5).trim());
-              if (ev && typeof ev === "object" && "data" in ev) {
+              if (evName === "exit") {
+                setExited(true);
+                setNote("进程已退出");
+              } else if (ev && typeof ev === "object" && "data" in ev) {
                 termRef.current?.write(String(ev.data));
               }
             } catch { /* 坏帧忽略 */ }
@@ -245,7 +253,8 @@ export default function TerminalPanel() {
           // 转义序列累积：CSI（ESC [ …）从第三字符起遇终结符（0x40-0x7E）结束；
           // OSC（ESC ] …）遇 BEL 或 ESC \ 结束；其余（SS3/单字符序列）遇终结符即结束。
           // 完整序列一次性透传（如 xterm 聚焦时的 focus 报告 ESC[O/ESC[I），不混入命令缓冲。
-          escBufRef.current += ch;
+          // v4.0（L7）：累积上限 4KB——持续输入无终结符的 ESC 前缀不再无限增长
+          escBufRef.current = (escBufRef.current + ch).slice(-4096);
           const len = escBufRef.current.length;
           const intro = escBufRef.current[1];
           let done = false;

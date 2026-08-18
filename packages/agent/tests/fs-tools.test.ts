@@ -31,6 +31,17 @@ const ctx: ToolContext = {
   scopeRules: undefined,
 } as unknown as ToolContext;
 
+// v4.0 审计修复（M4）：审批红线断言需要非 full 档——默认档位 full 下 requireExplicit
+// 也自动放行（红线断言会恒假）；重定向数据目录 + 写 confirm 档配置（后段 122 行的
+// setDataDirForTest 覆盖为 "{}" 配置 → full 档，其断言均为受保护路径拦截，与档位无关）
+const tmpDataDir = fs.mkdtempSync(path.join(os.tmpdir(), "infu-fstools-data-"));
+setDataDirForTest(tmpDataDir);
+fs.writeFileSync(
+  path.join(tmpDataDir, "config.json"),
+  JSON.stringify({ version: 1, approvalPolicy: { mode: "confirm" } }),
+  "utf-8"
+);
+
 console.log("=== v3.1 fs/env 工具自测 ===");
 
 // ── 注册与归类 ──
@@ -82,6 +93,28 @@ ok("project_tree 非写工具", !isMutatingTool("project_tree"));
   const r6 = await TOOLS.file_ops.execute({ op: "rm", path: "lib", recursive: true }, ctx);
   ok("rm 目录 recursive 成功", typeof r6 === "string" && r6.includes("已删除"));
   ok("目录已删", !fs.existsSync(path.join(root, "lib")));
+
+  // v4.0 审计修复（M4）：rm 目录递归 = high + requireExplicit（与 run_command rm -rf 同门槛）
+  fs.mkdirSync(path.join(root, "lib"), { recursive: true });
+  fs.writeFileSync(path.join(root, "lib", "keep.txt"), "x");
+  let explicitSeen = false;
+  const denyCtx: ToolContext = {
+    root, cwd: root, emit: () => {},
+    requestApproval: async (_d, _r, explicit) => { explicitSeen = explicit === true; return false; },
+    scopeRules: undefined,
+  } as unknown as ToolContext;
+  const rDeny = await TOOLS.file_ops.execute({ op: "rm", path: "lib", recursive: true }, denyCtx);
+  ok("rm 目录 recursive 拒绝时（红线 requireExplicit）不执行", rDeny.includes("用户拒绝"), rDeny);
+  ok("rm 目录 recursive 触发 requireExplicit 红线", explicitSeen, "递归删除必须 requireExplicit（无人值守不放行）");
+  ok("拒绝后目录保留", fs.existsSync(path.join(root, "lib", "keep.txt")));
+  let plainExplicit = false;
+  const plainCtx: ToolContext = {
+    root, cwd: root, emit: () => {},
+    requestApproval: async (_d, _r, explicit) => { plainExplicit = explicit === true; return true; },
+    scopeRules: undefined,
+  } as unknown as ToolContext;
+  await TOOLS.file_ops.execute({ op: "rm", path: "lib/keep.txt" }, plainCtx);
+  ok("rm 单文件不触发 requireExplicit（普通 medium）", !plainExplicit, "单文件删除保持 medium 语义");
 
   const r7 = await TOOLS.file_ops.execute({ op: "rm", path: "../../secrets" }, ctx);
   ok("越界拒绝", typeof r7 === "string" && r7.includes("越界"));

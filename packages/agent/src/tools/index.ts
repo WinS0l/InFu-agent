@@ -152,6 +152,14 @@ export const TOOLS: Record<string, ToolDef> = {
       // v3.1 附件只读白名单：用户附加的文件/文件夹（绝对路径）可读
       const inExtra = (ctx.extraReadDirs ?? []).some((d) => isPathInside(d, abs));
       if (!isPathInside(ctx.root, abs) && !inExtra) return "错误：路径越界（不允许访问项目根之外）";
+      // v3.9 审计修复（M3）：read_file 补敏感路径保护——此前只有写保护，root=home 的
+      // 会话可读 ~/.infu/config.json（含 API Key）经 webfetch 外传。只读白名单（Planner/
+      // Reviewer）同理。memory_read/use_skill 走独立实现不受影响；项目内 .infu 合法场景
+      // （outputs/skills）不命中数据目录保护。
+      const protectedName = isProtectedPath(abs);
+      if (protectedName && !inExtra) {
+        return `错误：目标路径位于受保护区域（${protectedName}），拒绝读取——Agent 没有读取 SSH 密钥/凭据/配置的合法场景`;
+      }
       // v2.6 路径作用域（INFU.md「路径作用域」节声明式规则：禁止直接拒绝 / 白名单模式）
       const scopeErr = checkPathScope(rel, ctx.scopeRules);
       if (scopeErr && !inExtra) return `错误：路径超出作用域——${scopeErr}（项目指令「路径作用域」节；如需访问请更新规则或与用户确认）`;
@@ -381,12 +389,19 @@ export const TOOLS: Record<string, ToolDef> = {
       let netAllowed = false;
       if (wantNetwork) {
         // 联网必须人工审批（🌐 标记 + requireExplicit：-y 自动批准也不放行；白名单不豁免联网）
-        netAllowed = await guard(ctx, "run_command", "high", `🌐 联网放行执行命令：${command}`, true);
+        netAllowed = await guard(ctx, "run_command", "high", `🌐 联网放行执行命令（cwd ${ctx.root}）：${command}`, true);
         if (!netAllowed && egress) {
-          // 外传命令未获联网放行 → 断网策略拦截（不执行）
-          const msg = egressBlockedMessage(egress);
-          auditCommand(ctx.root, command, false, msg, "egress-blocked");
-          return `${msg}\n⚠ 联网审批被拒绝（断网策略）`;
+          // v3.9（2026-08-18 用户拍板「最大审批权限」）：full 档断网策略放行——
+          // 命令可联网执行，审计照常落库（egress-allowed-full 标记）
+          if (currentApprovalPolicy().mode === "full") {
+            netAllowed = true;
+            auditCommand(ctx.root, command, true, "full 档全自主：断网策略放行", "egress-allowed-full");
+          } else {
+            // 外传命令未获联网放行 → 断网策略拦截（不执行）
+            const msg = egressBlockedMessage(egress);
+            auditCommand(ctx.root, command, false, msg, "egress-blocked");
+            return `${msg}\n⚠ 联网审批被拒绝（断网策略）`;
+          }
         }
       } else {
         // 常规审批（高危命令 high；其余 medium）；命令白名单（v2.4 设置）——
@@ -407,10 +422,11 @@ export const TOOLS: Record<string, ToolDef> = {
         } else if (DANGEROUS.test(command)) {
           // v3.1 审计修复：高危命令升级为 requireExplicit——CLI -y / 定时任务无人值守
           // 一律拒绝（此前无人值守自动放行 rm -rf 等，与「安全红线绝不自动放行」矛盾）
-          if (!(await guard(ctx, "run_command", "high", `执行高风险命令：${command}`, true))) {
+          // v3.9（CWE-451 轻量）：审批描述带真实 cwd，防「命令在此目录执行」歧义
+          if (!(await guard(ctx, "run_command", "high", `执行高风险命令（cwd ${ctx.root}）：${command}`, true))) {
             return "用户拒绝：高危命令未执行";
           }
-        } else if (!(await guard(ctx, "run_command", "medium", `执行命令：${command}`))) {
+        } else if (!(await guard(ctx, "run_command", "medium", `执行命令（cwd ${ctx.root}）：${command}`))) {
           return "用户拒绝：命令未执行";
         }
       }
@@ -463,7 +479,10 @@ export const TOOLS: Record<string, ToolDef> = {
       // v3.4 审计修复：落盘前凭据检测——命令输出含密钥/令牌/私钥时直接写入项目
       // .infu/outputs/*.log 等于把凭据落盘（read_file 可再读到、会话事件也全文存储）。
       // 命中则不入盘：只回填裁剪版 + 警告（模型可据此调整命令，比如只输出变量名）。
-      const SENSITIVE_OUT = /(sk-[A-Za-z0-9]{12,}|AKIA[0-9A-Z]{16}|BEGIN (RSA|OPENSSH|EC|DSA|PGP) PRIVATE KEY|Bearer [A-Za-z0-9._~+\/-]{16,}|api[_-]?key["']?\s*[:=]\s*["'][^"']{8,}["'])/i;
+      // v4.0 审计修复：凭据模式补常见令牌前缀——GitHub PAT（ghp_）、Slack（xoxb-）、
+      // Google API（AIza）、Google OAuth（ya29.）、JWT（eyJ…）此前漏检，命中时输出
+      // >8K 会带凭据落盘项目 .infu/outputs/*.log
+      const SENSITIVE_OUT = /(sk-[A-Za-z0-9]{12,}|AKIA[0-9A-Z]{16}|ghp_[A-Za-z0-9]{20,}|xox[baprs]-[A-Za-z0-9-]{10,}|AIza[0-9A-Za-z_-]{20,}|ya29\.[0-9A-Za-z_-]+|eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}|BEGIN (RSA|OPENSSH|EC|DSA|PGP) PRIVATE KEY|Bearer [A-Za-z0-9._~+\/-]{16,}|api[_-]?key["']?\s*[:=]\s*["'][^"']{8,}["'])/i;
       if (outText.length > 8000 && !SENSITIVE_OUT.test(outText)) {
         try {
           const outDir = join(ctx.root, ".infu", "outputs");
@@ -894,13 +913,16 @@ export const TOOLS: Record<string, ToolDef> = {
       if (!isPathInside(ctx.root, abs)) return `错误：路径越界（不允许访问项目根之外）: ${rel}`;
       const wantStat = args.stat !== false;
       const file = args.file as string | undefined;
-      // v2.13：file 参数命令注入修复——只允许安全字符（防 `$() 反引号在双引号内执行；
-      // git_diff 为 low 免审批，必须硬校验而非转义）
-      if (file !== undefined && !/^[^\\'"`$()&|<>;\n]+$/.test(file)) {
+      // v2.13：file 参数命令注入修复——只允许安全字符（防 $`() 反引号在双引号内执行；
+      // git_diff 为 low 免审批，必须硬校验而非转义）。
+      // v4.0 审计修复：放开反斜杠——cmd.exe 双引号内反斜杠无转义语义（`"src\a.ts"` 字面
+      // 安全），原字符类拒绝 `\` 使 Windows 相对路径（src\a.ts）不可用；`"` 仍拒绝
+      // （引号逃逸是 cmd 注入面），死代码 `.replace(/"/g, '\\"')` 随之删除
+      if (file !== undefined && !/^[^'"`$()&|<>;\n]+$/.test(file)) {
         return "错误：file 参数包含不安全字符（仅允许普通文件名/路径字符）";
       }
       const gitBase = args.staged ? "git diff --staged" : "git diff";
-      const fileArg = file ? ` -- "${file.replace(/"/g, '\\"')}"` : "";
+      const fileArg = file ? ` -- "${file}"` : "";
       const cmd = wantStat
         ? `${gitBase} --stat${fileArg} && ${gitBase}${fileArg}`
         : `${gitBase}${fileArg}`;
@@ -942,9 +964,18 @@ export const TOOLS: Record<string, ToolDef> = {
       // v3.1 审计修复：自定义 command 与 run_command 同门槛——高危命令 requireExplicit
       // （无人值守/auto 档不放行）、普通命令 medium（此前 low 免审批 = 任意命令旁路通道；
       // 自动检测出的标准测试命令仍 low 自动执行）
+      // v3.9 审计修复（M1）：白名单放行条件与 run_command 完全对齐——命中白名单且
+      // 无 shell 组合符且不高危才放行（原实现 `DANGEROUS && !isCommandAllowed` 让
+      // `git status && rm -rf x` 命中 git status* 白名单后降 medium → auto 档自动放行）
       if (explicit) {
         const policy = currentApprovalPolicy();
-        if (DANGEROUS.test(explicit) && !isCommandAllowed(explicit, policy.commandAllowlist)) {
+        if (
+          isCommandAllowed(explicit, policy.commandAllowlist) &&
+          !hasShellCombinators(explicit) &&
+          !DANGEROUS.test(explicit)
+        ) {
+          /* 白名单测试命令：信任放行 */
+        } else if (DANGEROUS.test(explicit)) {
           if (!(await guard(ctx, "run_test", "high", `执行高风险测试命令：${explicit}`, true))) {
             return "用户拒绝：高风险测试命令未执行";
           }
@@ -955,11 +986,16 @@ export const TOOLS: Record<string, ToolDef> = {
         return "用户拒绝：未运行测试";
       }
       // 断网策略：测试默认断网，外传命令拦截（run_test 无 network 参数，需去掉外传工具或改用 run_command）
+      // v3.9：full 档（最大审批权限）放行——审计照常（egress-allowed-full 标记）
       const egress = detectEgress(cmd);
       if (egress) {
-        const msg = egressBlockedMessage(egress);
-        auditCommand(abs, cmd, false, msg, "egress-blocked");
-        return `${msg}\n（受限沙箱·断网策略）测试未执行`;
+        if (currentApprovalPolicy().mode === "full") {
+          auditCommand(abs, cmd, true, "full 档全自主：断网策略放行", "egress-allowed-full");
+        } else {
+          const msg = egressBlockedMessage(egress);
+          auditCommand(abs, cmd, false, msg, "egress-blocked");
+          return `${msg}\n（受限沙箱·断网策略）测试未执行`;
+        }
       }
       // 测试命令与 run_command 同走沙箱分派（docker / 受限沙箱 / 软沙箱）；signal 中止时 kill；
       // v2.14 批 18：子智能体 agent 文件 sandbox 字段覆盖档位
@@ -979,6 +1015,9 @@ export const TOOLS: Record<string, ToolDef> = {
     async execute(args, ctx) {
       const rel = (args.path as string | undefined) || ".";
       const abs = path.resolve(ctx.root, rel);
+      // v4.0 审计修复：补目录越界拦截——原实现无 isPathInside（其余探索工具均有），
+      // `project_scan {path:"../../.."}` 可扫描/读取项目外目录的 package.json 等
+      if (!isPathInside(ctx.root, abs)) return "错误：路径越界";
       if (!fs.existsSync(abs) || !fs.statSync(abs).isDirectory()) return `错误：目录不存在 ${rel}`;
 
       // 技术栈识别
@@ -1107,8 +1146,12 @@ export const TOOLS: Record<string, ToolDef> = {
         return "错误：自由会话不能写入项目记忆（默认会话根目录为只读容器）——请用 scope=global，或先在侧栏选择/创建项目";
       }
       const desc = `${mode === "replace" ? "覆盖" : "追加到"}${scope === "global" ? "全局" : "项目"}记忆 ${topic}.md：\n${content.slice(0, 200)}`;
-      // v2.10 批 5：记忆写入降 low（自动放行；敏感凭据检测与全局写保护仍在）
-      if (!(await guard(ctx, "memory_write", "low", desc))) return "用户拒绝：未写入";
+      // v2.10 批 5：记忆写入降 low（对齐主流 memory 自动；敏感凭据检测与全局写保护仍在）
+      // v4.0 审计修复（M7）：global 作用域 / replace 模式提升 medium——全局记忆会被所有
+      // 后续会话读取（prompt 注入可借 low 免审批把恶意指令持久驻留跨会话），replace 可
+      // 覆盖用户长期建立的约定。项目 append 保持 low（项目内正常沉淀，主流同款）
+      const memRisk: RiskLevel = scope === "global" || mode === "replace" ? "medium" : "low";
+      if (!(await guard(ctx, "memory_write", memRisk, desc))) return "用户拒绝：未写入";
       const r = writeMemory(scope, topic, content, mode, ctx.root);
       return r.ok ? r.message : `错误：${r.message}`;
     },
@@ -1131,7 +1174,7 @@ export const TOOLS: Record<string, ToolDef> = {
       const rel = (args.path as string) || "";
       if (!rel.trim()) return "错误：path 必填";
       const r = await lspDiagnose(ctx.root, rel);
-      return r.ok ? r.message : r.message;
+      return r.message;
     },
   },
 

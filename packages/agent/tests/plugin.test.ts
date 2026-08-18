@@ -403,6 +403,9 @@ console.log("\n▶ /api/plugins + /api/skills API");
 // ── 6. 工具层：plugin_add / use_skill ──
 console.log("\n▶ plugin_add / use_skill 工具层");
 {
+  // v3.9：默认档位已改 full——本段验证 plugin_add 审批触发（high + requireExplicit），
+  // 必须显式固定 confirm 档（low 也弹窗，requireExplicit 必然弹窗）
+  writeFileSync(join(tmpData, "config.json"), JSON.stringify({ version: 2, models: [], providers: [], approvalPolicy: { mode: "confirm" } }, null, 2), "utf-8");
   // plugin_add：审批触发（high + requireExplicit）
   const approvals: Array<{ desc: string; risk: string; exp: boolean }> = [];
   const ctx = {

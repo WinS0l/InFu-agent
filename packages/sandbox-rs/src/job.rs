@@ -9,7 +9,9 @@
 use std::mem::size_of;
 use std::ptr;
 
-use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, HANDLE};
+use windows_sys::Win32::Foundation::{
+    CloseHandle, GetLastError, SetHandleInformation, HANDLE, HANDLE_FLAG_INHERIT,
+};
 use windows_sys::Win32::Security::SECURITY_ATTRIBUTES;
 use windows_sys::Win32::System::JobObjects::{
     AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
@@ -22,16 +24,26 @@ pub struct Job {
     pub handle: HANDLE,
 }
 
-/// 创建 Job Object。job handle 必须可继承（父进程退出后子进程树随之被杀，靠句柄计数）
+/// 创建 Job Object。
+/// v4.0 审计修复（H3）：job 句柄**不**可继承——原 bInheritHandle=1 使子进程及全部后代
+/// 继承句柄，KILL_ON_JOB_CLOSE「最后一个句柄关闭时杀光 job 内进程」因后代持有的继承句柄
+/// 永不触发：宿主崩溃/正常收尾（job.close() 只关父侧）后 `start /b` 分离进程可永久存活，
+/// 「超时/崩溃不留孤儿」承诺失效。挂载由父进程 AssignProcessToJobObject 完成，子进程
+/// 不需要 job 句柄；不继承后关闭父侧句柄即触发 KILL_ON_JOB_CLOSE，收尾自动杀残留。
 pub fn create(process_memory_mb: u32, job_memory_mb: u32, active_process_limit: u32) -> Result<Job, String> {
     let mut sa = SECURITY_ATTRIBUTES {
         nLength: size_of::<SECURITY_ATTRIBUTES>() as u32,
         lpSecurityDescriptor: ptr::null_mut(),
-        bInheritHandle: 1,
+        bInheritHandle: 0,
     };
     let h = unsafe { CreateJobObjectW(&mut sa, ptr::null()) };
     if h.is_null() {
         return Err(format!("CreateJobObjectW 失败（WinError {}）", unsafe { GetLastError() }));
+    }
+    // 双保险：即使 SECURITY_ATTRIBUTES 被未来改动放开，也显式清除继承标志
+    if unsafe { SetHandleInformation(h, HANDLE_FLAG_INHERIT, 0) } == 0 {
+        unsafe { CloseHandle(h) };
+        return Err(format!("SetHandleInformation 失败（WinError {}）", unsafe { GetLastError() }));
     }
 
     let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = unsafe { std::mem::zeroed() };

@@ -44,7 +44,14 @@ export function estimateTokens(messages: ChatMessageLike[]): number {
     total += cn + Math.ceil(other / 4);
     // 消息结构开销（role/字段名等，粗估）
     total += 4;
-    if (m.tool_calls?.length) total += 16 * m.tool_calls.length;
+    // v3.9 审计修复（C1）：tool_calls 的 arguments JSON 正文计入估算（原实现只计固定
+    // 每条 16 token——工具参数数千字符时上下文实际占用被系统性低估，400 恢复判断失真）
+    if (m.tool_calls?.length) {
+      total += 16 * m.tool_calls.length;
+      for (const tc of m.tool_calls) {
+        total += Math.ceil((tc.function?.arguments?.length ?? 0) / 4);
+      }
+    }
     if (m.reasoning_content) total += Math.ceil(m.reasoning_content.length / 3);
   }
   return total;
@@ -142,11 +149,15 @@ export function balanceToolPairs(messages: ChatMessageLike[], keepFrom: number):
  * 摘要生成失败自动降级为「直接丢弃最老部分」（保最新，不阻塞任务）。
  * @param budget 当前活动模型的窗口预算（token）
  * @param summarize 摘要生成器（调模型；失败时抛错由本函数内部降级）
+ * @param force v3.9 审计修复（C1）：强制压缩——API 400 上下文超限恢复路径用
+ *        （估算可能低估），跳过 trigger 阈值早退直接压到 target；默认 false 保持
+ *        常规「超 80% 才压缩」语义
  */
 export async function compressMessages(
   messages: ChatMessageLike[],
   budget: number,
-  summarize: (history: ChatMessageLike[]) => Promise<string>
+  summarize: (history: ChatMessageLike[]) => Promise<string>,
+  force = false
 ): Promise<CompressResult> {
   // v2.10：先剪超长工具结果（零模型成本；剪完可能不再超预算）
   const pruned = pruneToolResults(messages);
@@ -154,7 +165,7 @@ export async function compressMessages(
   // 预算换算：触发 = 窗口×80%，目标 = 窗口×60%
   const trigger = budget * COMPRESS_TRIGGER_RATIO;
   const target = budget * COMPRESS_TARGET_RATIO;
-  if (before <= trigger) {
+  if (!force && before <= trigger) {
     return { messages: pruned, before, after: before, summary: "" };
   }
 
@@ -165,7 +176,7 @@ export async function compressMessages(
   const systemMsgs = pruned.filter((m) => m.role === "system");
   const others = pruned.filter((m) => m.role !== "system");
   const othersBefore = estimateTokens(others);
-  if (othersBefore <= trigger) {
+  if (!force && othersBefore <= trigger) {
     return { messages: pruned, before, after: before, summary: "" };
   }
 

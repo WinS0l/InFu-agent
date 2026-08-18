@@ -311,7 +311,17 @@ export async function runOrchestratedTask(opts: OrchestratedRunOptions): Promise
     // v2.6.2 寒暄/闲聊短路：Planner 未调用任何工具且未产出计划（无【建议步数】）——
     // 视为非开发任务，其流式文本已进对话流（无前缀标记），此处只收尾，不重发、不进确认/执行/审查。
     // 判断依据：真开发任务 Planner 必然调用只读工具或输出带【建议步数】的计划。
-    if (plan.toolCount === 0 && !planText.includes("【建议步数】")) {
+    // v3.9 审计修复（C2）：原条件过宽——Planner 对开发任务未调工具且输出未按
+    // 【建议步数】格式时整任务被吞（文本直接作为最终回复）。收窄：文本含任务意图词
+    // 或长度像计划（≥200 字）时仍进执行阶段，由 Executor 自主判断。
+    const TASK_INTENT =
+      /(实现|修复|重构|创建|新建|添加|增加|修改|优化|完成|解决|分析|检查|测试|开发|集成|部署|迁移|升级|调整|支持|调研|评审|审查|构建|初始化|报错|异常|问题|改成|编写|做一个|写一个)/;
+    if (
+      plan.toolCount === 0 &&
+      !planText.includes("【建议步数】") &&
+      planText.length < 200 &&
+      !TASK_INTENT.test(planText)
+    ) {
       const reply = planText;
       emit({ type: "done", text: reply, toolCount: 0, steps: 0, usage: usageAgg });
       return { text: reply, steps: 0, toolCount: 0, approvals: plan.approvals, toolLogs: plan.toolLogs, planText: "", reviewText: "" };

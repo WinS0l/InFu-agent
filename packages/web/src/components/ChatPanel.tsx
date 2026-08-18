@@ -410,6 +410,9 @@ export default function ChatPanel() {
    *  仅当用户处于底部附近（离底 <48px）时跟随新内容；
    *  用户向上滚动浏览历史 → 停止跟随（可自由上滑），滚回底部 → 恢复跟随 */
   const atBottomRef = useRef(true);
+  // v4.0 审计修复（H2）：提交/回滚/编辑路径忙守卫——rewindSession 网络往返期间
+  // 重复 Enter/双击可触发双 rewind + 双 sendChat（服务端同会话双发保护前存在竞态窗口）
+  const busyRef = useRef(false);
   useEffect(() => {
     if (atBottomRef.current) bottomRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
@@ -518,6 +521,8 @@ export default function ChatPanel() {
   /** 确认回滚（v2.14 批 10：直接执行，不需要写消息 + 发送；截断后 AI 感知回滚） */
   const confirmRollback = async () => {
     if (!pendingRollback || !activeSessionId) return;
+    if (busyRef.current) return;
+    busyRef.current = true;
     try {
       await rewindSession(activeSessionId, pendingRollback.seq, true);
       truncateLocal(pendingRollback.seq);
@@ -525,6 +530,8 @@ export default function ChatPanel() {
       showRollbackToast("已回滚——之前的对话已截断，AI 将从这里继续");
     } catch (e) {
       useStore.getState().addError(`回滚失败: ${(e as Error).message}`);
+    } finally {
+      busyRef.current = false;
     }
   };
 
@@ -553,6 +560,8 @@ export default function ChatPanel() {
   /** 确认编辑（InFu 款）：截断到锚点（无回滚标记——AI 无需感知）+ 本地截断 + 重发编辑后文本 */
   const confirmEdit = async (text: string) => {
     if (editingSeq == null || !activeSessionId) return;
+    if (busyRef.current) return;
+    busyRef.current = true;
     try {
       await rewindSession(activeSessionId, editingSeq, false);
       truncateLocal(editingSeq);
@@ -561,16 +570,27 @@ export default function ChatPanel() {
       setInput("");
     } catch (e) {
       useStore.getState().addError(`编辑失败: ${(e as Error).message}`);
+      busyRef.current = false;
       return;
     }
     await sendChat(text, { sessionId: activeSessionId });
+    busyRef.current = false;
   };
 
   /** 提交任务；待定态下先提交回滚（截断服务端事件）再发送新消息。
    *  v3.1：当前会话运行中 → 排队发送（输入入队，done 后自动消费） */
   const submit = async () => {
+    if (busyRef.current) return; // v4.0（H2）：忙守卫（双击/重复 Enter 防双发）
     const text = input.trim();
     if (!text) return;
+    busyRef.current = true;
+    try {
+      await doSubmit(text);
+    } finally {
+      busyRef.current = false;
+    }
+  };
+  const doSubmit = async (text: string) => {
     if (running) {
       // 排队发送：AI 处理中预输入下一条（主流 QueueDock 同款；任务结束后自动发出）
       useStore.getState().enqueue(text);
@@ -635,7 +655,8 @@ export default function ChatPanel() {
     if (!paths.length) return;
     const drafts: AttachmentDraft[] = [];
     for (const p of paths) {
-      const name = p.split(/[\/]/).filter(Boolean).pop() ?? p;
+      // v4.0（L5）：Windows 反斜杠路径同样切分（原只认 `/`，C:\a\b.txt 整个成为"文件名"）
+      const name = p.split(/[\\/]/).filter(Boolean).pop() ?? p;
       drafts.push({ id: `a${Date.now()}-${drafts.length}`, name, rel: p, path: p });
     }
     if (drafts.length) setAttachments((prev) => [...prev, ...drafts]);

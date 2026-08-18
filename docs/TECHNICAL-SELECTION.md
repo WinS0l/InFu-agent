@@ -67,7 +67,7 @@ ZCode（`@zcode/desktop`）技术栈经安装包解析确认：Electron + TypeSc
 
 ### 4.1 ZCode 的做法
 
-- 基于 **Vercel AI SDK v6**（`ai@6.0.159`）+ **`@ai-sdk/gateway@3.0.96` 统一模型网关**（`@ai-sdk/provider@3.0.8`、`@ai-sdk/provider-utils@4.0.23`）。
+- **自研 OpenAI 兼容流式客户端**（v2.2 起替代 AI SDK v6 调用层——理由：① 所有模型统一走 OpenAI Chat Completions 协议，一个客户端覆盖全部；② 能拿到 DeepSeek 的 `reasoning_content`（AI SDK 不解析，思考过程丢失）；③ 完全可控：reasoning/工具调用增量聚合/错误细节透出。实现见 `packages/agent/src/providers/chat.ts`）。
 - 模型目录固化：`resources/model-providers/models_catalog_china_llm_zcode_2026-06-03.json` —— 内置**中国大模型供应商目录**（DeepSeek、GLM 等），用户在目录内选择，端点是平台预配置的。
 - 用户不需要（也不能）自由指定任意 baseURL / 模型标识。
 - 结论：ZCode 底层已是"任意模型"架构（gateway 支持注册多 provider），但**产品层把目录固化了**——这是与 InFu 的唯一本质差异。
@@ -93,7 +93,7 @@ ZCode（`@zcode/desktop`）技术栈经安装包解析确认：Electron + TypeSc
 └────────────────────┬─────────────────────────────┘
 ┌────────────────────▼─────────────────────────────┐
 │ ③ Agent 消费层（与具体模型解耦）                    │
-│   streamText + tool calls（AI SDK 统一协议）        │
+│   流式请求 + tool calls（自研 OpenAI 兼容客户端）        │
 └──────────────────────────────────────────────────┘
 ```
 
@@ -104,18 +104,18 @@ ZCode（`@zcode/desktop`）技术栈经安装包解析确认：Electron + TypeSc
 | 模型来源 | 内置中国大模型目录 | 任意：内置供应商 + 自定义 OpenAI 兼容端点 + 本地 Ollama |
 | 自定义端点 | ❌ 不支持 | ✅ `baseURL + apiKey + model` 即插即用 |
 | 能力探测 | 固定目录假设 | 运行时探测（是否支持工具调用/视觉/流式） |
-| 供应商适配 | AI SDK 内置 | AI SDK 内置 + `openai-compatible` 兜底（任何实现 OpenAI Chat Completions 协议的服务） |
+| 供应商适配 | 自研客户端统一 OpenAI Chat Completions 协议 | 同左（DeepSeek/智谱/通义/Ollama/任意兼容网关一视同仁） |
 | 密钥管理 | 平台托管 | 本地存储（用户本机 config，不进 git） |
 | 多模型策略 | 单一默认 | 每任务可指定模型；无工具调用能力的模型自动降级为纯对话模式 |
 
 **技术实现**：
-- 与 ZCode 同款：Vercel AI SDK v6 `generateText/streamText` + `@ai-sdk/gateway`，模型差异被 AI SDK 抹平（网关内注册多 provider，支持 tool-calling 统一协议）。
+- 自研 OpenAI 兼容流式客户端（`providers/chat.ts`）——所有模型统一走 Chat Completions 协议（DeepSeek/智谱/通义/Ollama/自定义网关均提供兼容接口；OpenAI/Anthropic/Google 经兼容端点验证）。
 - Provider 注册逻辑（网关注册表，产品层开放）：
-  1. `provider === 'openai' | 'anthropic' | 'google' | 'deepseek' | 'zhipu' | 'qwen'` → 对应 provider 适配器（AI SDK v6 provider 包 / gateway 内置）；
+  1. 全部 provider 统一 OpenAI Chat Completions 协议（`stream: true` SSE），差异在接入层消化（思考字段 `reasoning_content`/`reasoning` 双识别、工具调用按 index 聚合）；
   2. `provider === 'custom'` → OpenAI 兼容端点（`baseURL + apiKey + model`，任何 OpenAI Chat Completions 网关：One API、New API、vLLM、本地代理等）；
   3. `provider === 'ollama'` → 本地模型（qwen、llama 等）。
 - **能力探测**（`capabilities`）：尝试一次极短调用或按模型名规则推断 `toolCalling/streaming/vision`；无工具调用能力的模型走纯对话路径（Agent 输出 JSON 指令由执行器解析，降级策略）。
-- **降级策略**：用户配置了不支持工具调用的模型时，Agent 进入"建议模式"（只输出方案与命令建议，不自动执行）——保证小白用户不因模型能力不足而卡死。
+- **降级策略**：模型不支持工具调用时直接纯文本收尾（等价"不调用工具"）；视觉降级（图片附件 → 文本提示重试一次）；上下文超限自动压缩重试。原「建议模式」已随 v2.6.5 移除。
 
 ### 4.3 密钥与配置安全
 
@@ -153,7 +153,7 @@ infu/
       流式推送「思考 → 工具名 → 参数 → 结果摘要」到前端
       高风险操作（删除/写敏感路径/外部命令）→ 审批钩子 → 用户确认
   → 测试/验证：run_test 收集结果
-  → Reviewer：汇总 → 生成交付报告（改动清单、测试结果、风险）
+  → Reviewer：只读审查（结论/问题清单/风险）→ 汇总交付文本（交付报告已随 v3.0 移除——执行摘要 + 审查意见直接进对话流）
   → 前端 Diff 视图展示所有变更
 ```
 
@@ -164,7 +164,7 @@ infu/
 | M1（本次） | monorepo 骨架 + AI 接入层 + 10 工具 + Agent 循环 + CLI | CLI 端到端跑通"分析项目" |
 | M2 | Hono 服务 + SSE 流式 + 前端三栏 UI（对话/工具过程/Diff） | Web 可交互 demo |
 | M3 | 审批流 + 沙箱（进程级→Docker）+ 测试闭环 | 完成 PRD 一期 7 项功能 |
-| M4 | 交付报告 + 小白引导（模板任务）+ 模型管理 UI | MVP 验收（登录功能示例任务） |
+| M4 | 模板任务引导 + 模型管理 UI + 分层编排（交付报告已移除——任务摘要与审查意见进对话流） | MVP 验收（登录功能示例任务） |
 
 ## 八、风险与对策
 

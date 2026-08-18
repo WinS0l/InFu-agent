@@ -3,8 +3,9 @@
  * 运行：npx tsx packages/agent/tests/tools.test.ts
  */
 import { TOOLS } from "../src/tools/index.js";
+import { resolveDataDir } from "../src/data-dir.js";
 import { mkdtempSync, writeFileSync, mkdirSync, existsSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { tmpdir, homedir } from "node:os";
 import { join } from "node:path";
 import type { ToolContext, AgentEvent } from "@infu/shared";
 
@@ -56,6 +57,23 @@ console.log("\n▶ read_file");
 const rd = await run("read_file", { path: "src/app.ts" });
 check("读取内容", rd.includes("greet"), rd);
 check("带行号", rd.includes("1\t"), rd);
+
+// v3.9 审计修复（M3）：敏感路径读取保护——root=home 的会话不得读 SSH 密钥/配置
+// （此前只有写保护，可读 ~/.infu/config.json 含 API Key 经 webfetch 外传）
+const homeCtx: ToolContext = { ...ctx, root: homedir() };
+const rdSsh = await TOOLS.read_file.execute({ path: ".ssh/config" }, homeCtx);
+check("read_file 拒绝敏感路径（.ssh）", rdSsh.includes("受保护"), rdSsh);
+const rdCfg = await TOOLS.read_file.execute({ path: join(resolveDataDir(), "config.json") }, homeCtx);
+check("read_file 拒绝数据目录配置（config.json）", rdCfg.includes("受保护"), rdCfg);
+// v4.0 审计修复（H2）：批量通道 read_files 与单文件同款防护（此前漏 isProtectedPath——
+// 同一会话换工具名即可绕过，整批读出 SSH 私钥/凭据）
+const rdFilesSsh = await TOOLS.read_files.execute({ paths: [".ssh/config", "x.txt"] }, homeCtx);
+check("read_files 拒绝敏感路径（.ssh）", rdFilesSsh.includes("受保护"), rdFilesSsh);
+const rdFilesCfg = await TOOLS.read_files.execute({ paths: [join(resolveDataDir(), "config.json")] }, homeCtx);
+check("read_files 拒绝数据目录配置", rdFilesCfg.includes("受保护"), rdFilesCfg);
+// 用户显式附加（extraReadDirs）豁免——附件功能依赖读取数据目录下暂存文件
+const rdAttach = await TOOLS.read_file.execute({ path: join(resolveDataDir(), "config.json") }, { ...homeCtx, extraReadDirs: [resolveDataDir()] });
+check("附件白名单豁免（extraReadDirs）", rdAttach.includes("受保护") === false, rdAttach);
 
 // 4. search_code
 console.log("\n▶ search_code");

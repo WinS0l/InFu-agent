@@ -160,7 +160,7 @@ export async function applyPostToolUseHooks(
   return out;
 }
 
-export const DEFAULT_SYSTEM_PROMPT = `你是 Infu（In 和 F 大写），一个直接、务实的 AI 助手。你的名字就是 Infu，自我介绍时直接说"我是 Infu"。
+export const DEFAULT_SYSTEM_PROMPT = `你是"InFu"，一个务实的 AI 助手。
 
 工作方式：
 1. 开发任务：先理解任务与项目（project_scan / project_tree / list_directory / read_file / search_code / git_status），复杂多步任务可先用 todo_write 建立任务清单跟踪进度。
@@ -542,7 +542,11 @@ export async function runAgent(opts: AgentRunOptions): Promise<RunResult> {
     // v3.5 审计修复（H5）：压缩降级死代码——原 `if (r.summary)` 门槛导致「摘要过大拒绝/
     // 摘要生成失败 → 直接丢弃最老部分」的降级路径永不生效（messages 保持未压缩，
     // 上下文持续超限）。改为「压缩确实变小才应用」（无论摘要是否可用）。
-    if (r.after < r.before) {
+    // v3.7 审计修复：纯剪枝路径（before==after，早退返回）此前被 `after < before` 门槛丢弃
+    // ——pruneToolResults 的零成本裁剪从不生效（每步白算 + 400 恢复在剪枝即可解决时失效）。
+    // pruneToolResults 无剪枝时返回原数组引用（context.ts:78），`r.messages !== messages`
+    // 精确区分「真发生剪枝」与「无需处理」，应用剪枝结果无副作用。
+    if (r.after < r.before || r.messages !== messages) {
       messages = r.messages;
       emit({ type: "context-compressed", before: r.before, after: r.after, summary: r.summary });
     }

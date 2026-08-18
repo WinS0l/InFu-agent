@@ -953,7 +953,9 @@ export interface ReviewFileInfo {
 export async function fetchReviewFiles(root: string): Promise<{ files: ReviewFileInfo[]; git: boolean }> {
   const res = await apiFetch(`/api/review/files?root=${encodeURIComponent(root)}`);
   const data = await res.json();
-  if (!res.ok || data.ok === false) return { files: [], git: false };
+  // v3.3 补 21：root 无效（400）抛错（ReviewPane catch 回退项目根）；
+  // 非 git 仓库是 ok:true + git:false（200），正常返回不抛
+  if (!res.ok || data.ok === false) throw new Error(data.message || "审查文件列表加载失败");
   return { files: data.files ?? [], git: data.git !== false };
 }
 
@@ -978,7 +980,9 @@ export interface FsTreeFile {
 export async function fetchFsTree(root: string): Promise<FsTreeFile[]> {
   const res = await apiFetch(`/api/fs/tree?root=${encodeURIComponent(root)}`);
   const data = await res.json();
-  if (!res.ok || data.ok === false) return [];
+  // v3.3 补 21：root 无效（400）必须抛错——CodeView 靠 catch 回退项目根；
+  // 返回 [] 会让回退逻辑静默失效（用户实测代码界面仍空）
+  if (!res.ok || data.ok === false) throw new Error(data.message || "文件树加载失败");
   return data.files ?? [];
 }
 

@@ -8,7 +8,7 @@ import { z } from "zod";
 import fs from "node:fs";
 import path from "node:path";
 import type { ToolDef, ToolContext } from "@infu/shared";
-import { isProtectedPath } from "../sandbox/index.js";
+import { isProtectedPath, isProtectedProjectPath } from "../sandbox/index.js";
 import { isPathInside, clip, guard, sessionRootReadOnlyBlock } from "./util.js";
 import { checkPathScope } from "../memory/index.js";
 
@@ -100,6 +100,9 @@ export const fsTools: Record<string, ToolDef> = {
       if (scopeErr) return `错误：路径超出作用域——${scopeErr}`;
       const protectedName = isProtectedPath(abs);
       if (protectedName) return `错误：${protectedName} 受保护，拒绝写操作`;
+      // v3.3 补 24：项目 .infu 数据目录写保护（mv/cp/rm/mkdir 一律拒绝）
+      const projProtected = isProtectedProjectPath(ctx.root, abs);
+      if (projProtected) return `错误：${projProtected} 受保护（InFu 自身数据），拒绝写操作`;
 
       if (op === "mkdir") {
         if (fs.existsSync(abs)) return `已存在：${rel}`;
@@ -132,7 +135,7 @@ export const fsTools: Record<string, ToolDef> = {
         if (!isPathInside(ctx.root, destAbs)) return "错误：目标路径越界";
         const destScopeErr = checkPathScope(destRel, ctx.scopeRules);
         if (destScopeErr) return `错误：目标超出作用域——${destScopeErr}`;
-        const destProtected = isProtectedPath(destAbs);
+        const destProtected = isProtectedPath(destAbs) ?? isProtectedProjectPath(ctx.root, destAbs);
         if (destProtected) return `错误：目标 ${destProtected} 受保护，拒绝写操作`;
         if (stat.isDirectory() && args.recursive !== true && op === "cp") {
           return `错误：复制目录需 recursive=true`;

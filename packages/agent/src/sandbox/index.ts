@@ -75,6 +75,21 @@ export function isProtectedPath(abs: string): string | null {
   return null;
 }
 
+/**
+ * v3.3 补 24：项目级 .infu 数据目录写保护——Agent 工具（write_file/edit_file/file_ops）
+ * 不可修改项目根 .infu/ 下的任何文件（InFu 自身数据：history/memory/screenshots/
+ * browser/outputs/worktrees/agents/skills 等），只能由 InFu 系统通道自身产生
+ * （memory_write / 自动沉淀 / 截图落盘 / 输出落盘——它们不经过工具守卫）。
+ * 大小写归一（win32）；精确匹配 <root>/.infu（防 .infu-x 前缀误伤）。
+ */
+export function isProtectedProjectPath(root: string, abs: string): string | null {
+  const base = path.join(root, ".infu");
+  const nAbs = process.platform === "win32" ? abs.toLowerCase() : abs;
+  const nBase = process.platform === "win32" ? base.toLowerCase() : base;
+  if (nAbs === nBase || nAbs.startsWith(nBase + path.sep)) return "项目 .infu 数据目录";
+  return null;
+}
+
 /** 命令审计日志 */
 export function commandLogPath(): string {
   return path.join(resolveDataDir(), "logs", "commands.log");

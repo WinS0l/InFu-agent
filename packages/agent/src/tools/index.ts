@@ -8,7 +8,7 @@ import fs from "node:fs";
 import path, { join } from "node:path";
 import type { ToolDef, ToolContext, RiskLevel } from "@infu/shared";
 import {
-  sanitizeEnv, isProtectedPath, auditCommand,
+  sanitizeEnv, isProtectedPath, isProtectedProjectPath, auditCommand,
 } from "../sandbox/index.js";
 import { detectEgress, egressBlockedMessage } from "../sandbox/net-policy.js";
 import { registerMcpServer, type RegisterInput } from "../mcp/register.js";
@@ -202,6 +202,12 @@ export const TOOLS: Record<string, ToolDef> = {
       if (protectedName) {
         return `错误：目标路径位于受保护区域（${protectedName}），拒绝写入——Agent 没有修改 SSH 密钥/凭据/配置的合法场景`;
       }
+      // v3.3 补 24：项目 .infu 数据目录（InFu 自身数据：记忆/历史/截图/技能等）——
+      // Agent 工具不可修改，只能由 InFu 系统通道自身产生
+      const projProtected = isProtectedProjectPath(ctx.root, abs);
+      if (projProtected) {
+        return `错误：目标路径位于受保护区域（${projProtected}）——.infu 是 InFu 自身数据目录（记忆/历史/截图/技能等），Agent 不能修改；需要扩展技能/角色请放入项目对应目录由系统管理`;
+      }
       // v3 默认会话根目录只读（自由会话容器）
       const roBlock = sessionRootReadOnlyBlock(ctx);
       if (roBlock) return `错误：${roBlock}`;
@@ -248,6 +254,11 @@ export const TOOLS: Record<string, ToolDef> = {
       const protectedName = isProtectedPath(abs);
       if (protectedName) {
         return `错误：目标路径位于受保护区域（${protectedName}），拒绝修改`;
+      }
+      // v3.3 补 24：项目 .infu 数据目录写保护（同 write_file）
+      const projProtected = isProtectedProjectPath(ctx.root, abs);
+      if (projProtected) {
+        return `错误：目标路径位于受保护区域（${projProtected}）——.infu 是 InFu 自身数据目录，Agent 不能修改`;
       }
       // v3 默认会话根目录只读（自由会话容器）
       const roBlock = sessionRootReadOnlyBlock(ctx);

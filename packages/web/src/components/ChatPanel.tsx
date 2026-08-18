@@ -283,7 +283,12 @@ function EgressPill() {
 
   const apply = async (minutes: number | null) => {
     const sid = activeSessionId ?? "";
-    if (!sid) return;
+    if (!sid) {
+      // v5.1 补 3：无活动会话时不再静默——明确提示（此前点击无任何反应 = 「点不了」）
+      useStore.getState().addError("临时联网需要先打开一个会话——请先在侧栏点击一个会话（新建会话后可用）");
+      setMenuOpen(false);
+      return;
+    }
     try {
       if (minutes === null) {
         await egressDisallow(sid);
@@ -299,6 +304,7 @@ function EgressPill() {
   };
 
   const active = !!egressUntil && remaining > 0;
+  const hasSession = !!activeSessionId;
   const label = active ? `联网中 ${Math.ceil(remaining / 60)} 分` : "临时联网";
   return (
     <span className="relative shrink-0" ref={ref}>
@@ -306,13 +312,24 @@ function EgressPill() {
         className={`flex h-7 cursor-pointer items-center gap-1 rounded-lg border px-2 text-[12px] font-medium transition-colors ${
           active
             ? "border-success/50 bg-success/10 text-success"
-            : "border-line text-sub hover:bg-hover hover:text-text"
+            : hasSession
+              ? "border-line text-sub hover:bg-hover hover:text-text"
+              : "cursor-not-allowed border-line/50 text-caption/70 hover:bg-transparent hover:text-caption/70"
         }`}
-        onClick={() => setMenuOpen(!menuOpen)}
+        onClick={() => {
+          // v5.1 补 3：无活动会话 → 直接提示（不开菜单，药丸置灰可感知）
+          if (!hasSession) {
+            useStore.getState().addError("临时联网需要先打开一个会话——请先在侧栏点击一个会话");
+            return;
+          }
+          setMenuOpen(!menuOpen);
+        }}
         title={
-          active
-            ? `本会话临时联网（还剩 ${Math.ceil(remaining / 60)} 分钟）——npm install 等外传命令放行，命令审计照常。点击可关闭或调整时长`
-            : "临时允许本会话联网（外传命令不再被断网策略拦截；到期自动失效；命令审计照常）"
+          !hasSession
+            ? "临时联网按会话生效——请先在侧栏打开一个会话"
+            : active
+              ? `本会话临时联网（还剩 ${Math.ceil(remaining / 60)} 分钟）——npm install 等外传命令放行，命令审计照常。点击可关闭或调整时长`
+              : "临时允许本会话联网（外传命令不再被断网策略拦截；到期自动失效；命令审计照常）"
         }
       >
         <Globe className="h-3 w-3" />

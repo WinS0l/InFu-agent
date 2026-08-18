@@ -1333,17 +1333,17 @@ export function StatsPane() {
 
   // v3.0 UI 审查批 2：横向条形图归一化基准 = 各日总量最大值（byModel 真实数据优先）
   const maxDayTotal = Math.max(1, ...(stats?.dailyTrend.map((d) => Math.max(d.tokens, d.byModel.reduce((s, m) => s + m.tokens, 0))) ?? [1]));
-  // v3.3 补 11：Y 轴上限取「比最大值大的友好刻度」（1/2/5×10ⁿ，Recharts niceTicks 同款）——
-  // 最高柱不顶满、顶部留白（原实现 value/max 100% 顶满——单日独大时柱子顶到卡片顶端，用户反馈）
-  const niceCeil = (v: number): number => {
-    if (v <= 0) return 1;
-    const exp = Math.pow(10, Math.floor(Math.log10(v)));
-    for (const m of [1, 2, 5, 10]) {
-      if (v <= m * exp) return m * exp;
-    }
-    return 10 * exp;
+  // v3.3 补 12（用户拍板）：统一标尺 8.5 亿 tokens = 100%——按天趋势 Y 轴上限固定
+  // 8.5 亿（不再随数据浮动），热力图色阶同样按 8.5 亿的比例分档（口径一致）：
+  // 日常消耗（几万-几十万 ≈ 0.1% 以下）落在最浅档，真·重度（>1.7 亿）才深色
+  const TOKEN_Y_MAX = 850_000_000;
+  /** 热力图档位说明（i = 档位+1：i 1-5 对应 8.5 亿的 0-20%/20-40%/40-60%/60-80%/80-100%；i 0 = 无） */
+  const LEVEL_HINTS = (i: number): string => {
+    if (i === 0) return "无";
+    const lo = fmtTokens((TOKEN_Y_MAX * ((i - 1) * 20)) / 100);
+    const hi = i === 5 ? "∞" : fmtTokens((TOKEN_Y_MAX * (i * 20)) / 100);
+    return `${lo} - ${hi}（${(i - 1) * 20}-${Math.min(100, i * 20)}%）`;
   };
-  const yMax = niceCeil(maxDayTotal);
   // 图例模型列表（去重，保持出现顺序，最多 6 个——ZCode 同款）
   const allModels = [...new Set(stats?.dailyTrend.flatMap((d) => d.byModel.map((m) => m.model)) ?? [])].slice(0, 6);
   const hasEstimated = stats?.dailyTrend.some((d) => d.estimated) ?? false;
@@ -1390,7 +1390,7 @@ export function StatsPane() {
                   key={a}
                   className="size-3.5 cursor-default rounded-[4px] border border-line transition-transform hover:scale-125"
                   style={{ background: `rgba(34,197,94,${a})` }}
-                  title={`当日 Token：${["1-5 万", "5-20 万", "20-50 万", "50 万+", "50 万+"][i]}`}
+                  title={`当日 Token：${LEVEL_HINTS(i + 1)}`}
                 />
               ))}
               <span className="ml-0.5">多</span>
@@ -1411,24 +1411,15 @@ export function StatsPane() {
                 const d = new Date(start.getFullYear(), start.getMonth(), start.getDate() + i);
                 return { date: d, tokens: byDate.get(fmtDate(d)) ?? 0, row: (d.getDay() + 6) % 7 };
               });
-              // v3.3 补 10：色阶改绝对档位（对齐主流用量直觉）——原实现是相对分级
-              // （当日/30 天窗口最大值），数据稀疏时单日 13.6 万就顶满最深色（用户反馈「才
-              // 13.6 万就满」）；主流大模型会话（1M 上下文）单日数十万 tokens 很常见，
-              // 改绝对区间：<5万=轻 / 5-20万=中 / 20-50万=较多 / >50万=重，不受数据密度影响
-              const LEVEL_STEPS: Array<[number, number]> = [
-                [1, 50_000],
-                [50_000, 200_000],
-                [200_000, 500_000],
-                [500_000, Infinity],
-              ];
+              // v3.3 补 12：色阶与按天趋势同标尺（8.5 亿 = 100% 等分 5 档）——
+              // level = floor(当日 / 8.5亿 × 5)：日常消耗（几十万 ≈ 0.1% 以下）落最浅档，
+              // 重度（>1.7 亿 = 20%）逐档加深；口径与趋势图 Y 轴一致（用户拍板）
               const levelBg = (tokens: number) => {
                 if (tokens <= 0) return null;
-                const lvl = LEVEL_STEPS.findIndex(([lo, hi]) => tokens >= lo && tokens < hi);
-                return `rgba(34,197,94,${[0.15, 0.35, 0.55, 0.75, 0.95][lvl < 0 ? 0 : lvl]})`;
+                const lvl = Math.min(4, Math.floor((tokens / TOKEN_Y_MAX) * 5));
+                return `rgba(34,197,94,${[0.15, 0.35, 0.55, 0.75, 0.95][lvl]})`;
               };
-              // 图例 hover 档位说明（title 展示各档区间）
-              const LEVEL_HINTS = ["无", "1-5 万", "5-20 万", "20-50 万", "50 万+"];
-              return <HeatmapGrid days={daysArr} levelBg={levelBg} fmtDate={fmtDate} levelHints={LEVEL_HINTS} />;
+              return <HeatmapGrid days={daysArr} levelBg={levelBg} fmtDate={fmtDate} />;
             })()}
           </div>
         </div>
@@ -1456,13 +1447,13 @@ export function StatsPane() {
               return (
                 <>
                   <div className="relative h-60">
-                    {/* 水平网格虚线（0/25/50/75/100%——相对 Y 轴上限 yMax） */}
+                    {/* 水平网格虚线（0/25/50/75/100%——相对固定上限 8.5 亿） */}
                     {[0, 0.25, 0.5, 0.75, 1].map((f) => (
                       <div key={f} className="absolute inset-x-0 border-t border-dashed border-line/50" style={{ bottom: `${f * 100}%` }} />
                     ))}
-                    {/* v3.3 补 11：Y 轴上限刻度小标（对齐 Recharts niceTicks 语义——柱不顶满留白） */}
+                    {/* v3.3 补 12：Y 轴上限固定 8.5 亿（用户拍板）刻度小标 */}
                     <div className="absolute right-0 top-0 z-10 rounded bg-ink/80 px-1 text-[10px] leading-4 text-caption">
-                      ≈{fmtTokens(yMax)} tokens
+                      100% = {fmtTokens(TOKEN_Y_MAX)}
                     </div>
                     {/* 柱区：槽位 = 范围天数均分（30 天细柱 / 7 天粗柱），有数据的天出柱 */}
                     <div className={`absolute inset-0 flex items-end px-1 ${gapCls}`}>
@@ -1478,7 +1469,7 @@ export function StatsPane() {
                           <div key={date} className="flex h-full min-w-0 flex-1 flex-col justify-end" title={tip}>
                             <div
                               className="flex w-full flex-col overflow-hidden rounded-t-[3px]"
-                              style={{ height: `${Math.max(0.5, (dayTotal / yMax) * 100)}%` }}
+                              style={{ height: `${Math.max(0.5, (dayTotal / TOKEN_Y_MAX) * 100)}%` }}
                             >
                               {models.map((m, i) => (
                                 <div
@@ -1557,12 +1548,10 @@ export function StatsPane() {
 
 /** 热力图矩阵（用户定稿：30 列 × 7 行铺满卡片——列 = 天（从左到右 = 旧 → 新，今天最右），
  *  行 = 星期几；左端星期标签；当天格子 = 数据格（绿色深浅 / 空框），同列其余 6 格 = 浅底占位） */
-function HeatmapGrid({ days, levelBg, fmtDate, levelHints }: {
+function HeatmapGrid({ days, levelBg, fmtDate }: {
   days: Array<{ date: Date; tokens: number; row: number }>;
   levelBg: (tokens: number) => string | null;
   fmtDate: (d: Date) => string;
-  /** v3.3 补 10：5 级档位文字（图例/格子 hover 提示；[无, 轻, 中, 较多, 重]） */
-  levelHints?: string[];
 }) {
   const weekdays = ["一", "二", "三", "四", "五", "六", "日"];
   return (

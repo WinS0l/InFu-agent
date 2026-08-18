@@ -32,10 +32,11 @@ function check(name: string, cond: boolean, detail = "") {
 const tmpData = mkdtempSync(join(tmpdir(), "infu-e2e-data-"));
 setDataDirForTest(tmpData);
 // 服务端配置 appearance.theme=light——验证「服务端配置 → 前端主题」管线
-// （App 启动 fetchConfig 会以服务端 appearance 覆盖 localStorage 主题，这是产品设计）
+// （App 启动 fetchConfig 会以服务端 appearance 覆盖 localStorage 主题，这是产品设计）；
+// approvalPolicy=smart——非 full 档下 🌐 临时联网按钮才显示（full 档断网本就放行）
 writeFileSync(
   join(tmpData, "config.json"),
-  JSON.stringify({ version: 1, appearance: { theme: "light" } }),
+  JSON.stringify({ version: 1, appearance: { theme: "light" }, approvalPolicy: { mode: "smart" } }),
   "utf-8"
 );
 
@@ -164,6 +165,22 @@ try {
       await page.waitForTimeout(300);
       const pillClosed = await page.locator("text=联网中").count() === 0;
       check("欢迎界面可关闭临时联网", pillClosed, "");
+      // v5.1 补 5：full 档（全权放行）下断网本就放行 → 🌐 临时联网按钮隐藏
+      const modeBtn = page.locator('button[title="全局审批档位（写入设置，即时生效）"]');
+      await modeBtn.click().catch(() => {});
+      await page.waitForTimeout(200);
+      await page.locator("button", { hasText: "全权放行" }).first().click().catch(() => {});
+      await page.waitForTimeout(400);
+      const pillHiddenInFull = await page.locator("button", { hasText: "临时联网" }).count() === 0;
+      check("full 档下临时联网按钮隐藏", pillHiddenInFull, `pill=${await page.locator("button", { hasText: "临时联网" }).count()}`);
+      // 切回非 full 档 → 按钮恢复
+      await modeBtn.click().catch(() => {});
+      await page.waitForTimeout(200);
+      await page.locator("button", { hasText: "全自动" }).first().click().catch(() => {});
+      await page.waitForTimeout(400);
+      const modeLabel = await page.locator('button[title="全局审批档位（写入设置，即时生效）"]').innerText().catch(() => "?");
+      const pillBack = await page.locator("button", { hasText: "临时联网" }).count() > 0;
+      check("切回非 full 档后临时联网按钮恢复", pillBack, `pill=${await page.locator("button", { hasText: "临时联网" }).count()} mode=${modeLabel.trim()}`);
       await page.evaluate(() => localStorage.removeItem("infu-chat"));
     } finally {
       await browser.close().catch(() => {});

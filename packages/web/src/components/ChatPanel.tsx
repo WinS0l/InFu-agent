@@ -255,7 +255,7 @@ function useContextEstimate() {
  */
 const EGRESS_DURATIONS = [5, 10, 30, 60, 120];
 function EgressPill() {
-  const { egressUntil, egressMinutes, setEgress, activeSessionId } = useStore();
+  const { egressUntil, egressMinutes, setEgress, activeSessionId, approvalMode } = useStore();
   const [menuOpen, setMenuOpen] = useState(false);
   const ref = useRef<HTMLSpanElement>(null);
   const [, forceTick] = useState(0);
@@ -280,6 +280,10 @@ function EgressPill() {
     document.addEventListener("mousedown", onDoc);
     return () => document.removeEventListener("mousedown", onDoc);
   }, [menuOpen]);
+  // v5.1 补 5（用户提出）：full 档（全权放行）下断网策略本就放行，临时联网按钮失去
+  // 意义——隐藏。⚠ 必须放在**所有 hooks 之后**（hooks 无条件执行——放 hooks 前会
+  // 造成「Rendered fewer hooks」→ React 卸载整棵树，E2E 实证）
+  if (approvalMode === "full") return null;
 
   const apply = async (minutes: number | null) => {
     const sid = activeSessionId ?? "";

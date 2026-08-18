@@ -126,6 +126,34 @@ if (existsSync(logPath)) {
 // 4. egressBlockedMessage 文案
 check("拦截文案含工具名与放行指引", egressBlockedMessage("curl").includes("curl") && egressBlockedMessage("curl").includes("network=true"));
 
+// 5. v5.1：full 档（最大审批权限）下外传命令不再被断网策略拦截
+// （v3.9 只放行 network=true 路径；未显式请求联网的 egress 命令此前仍被拦——
+//  run_test 早已同款放行，run_command 补齐；审计 egress-allowed-full 照常）
+console.log("\n▶ full 档断网策略放行");
+{
+  writeFileSync(
+    join(tmpData, "config.json"),
+    JSON.stringify({ version: 2, approvalPolicy: { mode: "full" } })
+  );
+  // 用无害的 egress 命令（echo curl 命中工具整词但无真实网络 I/O）
+  const rf = await TOOLS.run_command.execute({ command: "echo curl test" }, mkCtx(true));
+  check("full 档 egress 命令直接执行（不再拦截）", rf.includes("curl test") && !rf.includes("断网策略拦截"), rf.slice(0, 200));
+  const rt = await TOOLS.run_test.execute({ command: "echo curl test" }, mkCtx(true));
+  check("full 档 run_test egress 同样放行", rt.includes("curl test") && !rt.includes("断网策略拦截"), rt.slice(0, 200));
+  // 审计标记 egress-allowed-full 落库
+  if (existsSync(logPath)) {
+    const log = readFileSync(logPath, "utf-8");
+    check("full 档放行写入审计（egress-allowed-full）", (log.match(/sandbox=egress-allowed-full/g) ?? []).length >= 2, log.slice(-300));
+  } else {
+    check("commands.log 存在（full 档）", false, logPath);
+  }
+  // 恢复 smart 档（loadConfig 热读取——后续无断言依赖，仍恢复保持套件语义一致）
+  writeFileSync(
+    join(tmpData, "config.json"),
+    JSON.stringify({ version: 2, approvalPolicy: { mode: "smart" } })
+  );
+}
+
 rmSync(proj, { recursive: true, force: true });
 // 清理临时数据目录（v3.6：只删测试自己的临时目录，绝不动用户 ~/.infu）
 try { rmSync(tmpData, { recursive: true, force: true }); } catch { /* 忽略 */ }

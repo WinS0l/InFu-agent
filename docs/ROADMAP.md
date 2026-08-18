@@ -26,6 +26,7 @@
 - **D3 增量构建**——agent/web/shared tsconfig 加 incremental + tsBuildInfoFile（node_modules/.cache，不入库）
 - **验证**：**44/44 套件全绿 1341 断言 0 失败**（e2e-prod 12 断言新入链；startServer 返回 httpServer 供 E2E close）+ agent/web/desktop tsc + vite build + cargo check 全过；真实 E2E 与 /api/audit 探针实测
 - **未做（产品决策/成本项）**：B3 computer-use UI 树读取（高成本已拆分）、B5 OCR 兜底、C5 中英文统一（需产品方向决策）、D1 tokenizer 精估（破坏零依赖哲学）
+- ⚠️ **补 1（2026-08-18 用户提出）**：full 档下外传命令也不再被断网机制拦截——v3.9 只放行了 `network=true` 路径，未显式请求联网的 egress 命令（如直接 `npm install`）在 full 档仍被拦（模型多一轮重试，与「全自主零弹窗」不符；run_test 早已同款放行，run_command 是缺口）。修复：run_command 初始 egress 拦截分支补 full 档放行（审计 `egress-allowed-full` 照常；非 full 档语义不变：仍拦截 + 临时联网开关/network=true 审批两通道）；工具描述同步。验证：win-sandbox-net 新增 3 断言（full 档 run_command/run_test 放行 + 审计标记）34/0，全量 44 套件 1344 断言全绿
 
 
 

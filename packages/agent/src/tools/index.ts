@@ -367,7 +367,7 @@ export const TOOLS: Record<string, ToolDef> = {
   run_command: {
     name: "run_command",
     description:
-      "在项目内执行 shell 命令（终端执行）。可运行构建、安装依赖、启动服务、查看环境等。高风险命令（删除/强制操作）需确认。需要网络（如 npm install）时设 network=true，须人工审批放行（默认断网执行）。background=true 时后台运行（立即返回 job id 不阻塞，job_list/job_output/job_kill 管理，任务结束时自动终止）。persistent=true 时用持久 shell 会话执行（跨调用保留 cwd/env，如 cd 后下一轮命令仍在同一目录；⚠ 持久会话脱离沙箱）。",
+      "在项目内执行 shell 命令（终端执行）。可运行构建、安装依赖、启动服务、查看环境等。高风险命令（删除/强制操作）需确认。需要网络（如 npm install）时设 network=true，须人工审批放行（默认断网执行；full 档全权放行与用户开启的「临时联网」下外传命令直接放行，命令审计照常）。background=true 时后台运行（立即返回 job id 不阻塞，job_list/job_output/job_kill 管理，任务结束时自动终止）。persistent=true 时用持久 shell 会话执行（跨调用保留 cwd/env，如 cd 后下一轮命令仍在同一目录；⚠ 持久会话脱离沙箱）。",
     risk: "medium",
     schema: z.object({
       command: z.string().describe("要执行的命令"),
@@ -382,9 +382,15 @@ export const TOOLS: Record<string, ToolDef> = {
       // 断网策略（M6 软控制）：外传命令必须 network=true 且审批放行，否则拦截（默认断网语义）
       const egress = detectEgress(command);
       if (egress && !wantNetwork) {
-        // v5.0（C1）：会话级临时联网开关——用户开启后本会话 egress 命令直接放行
-        // （审计标记 egress-allowed-temp），到期自动失效；未开启走原拦截路径
-        if (isEgressAllowed(ctx.sessionId ?? "")) {
+        // v5.1：full 档（最大审批权限）同样放行——v3.9 只放行了 network=true 路径，
+        // 未显式请求联网的 egress 命令仍被断网策略拦截（full 档下模型需多一轮
+        // network=true 重试，与「全自主零弹窗」语义不符）；run_test 早已同款放行。
+        // 审计照常（egress-allowed-full 标记），数据安全硬闸（受保护路径/SSRF 等）不受影响
+        if (currentApprovalPolicy().mode === "full") {
+          auditCommand(ctx.root, command, true, "full 档全自主：断网策略放行", "egress-allowed-full");
+        } else if (isEgressAllowed(ctx.sessionId ?? "")) {
+          // v5.0（C1）：会话级临时联网开关——用户开启后本会话 egress 命令直接放行
+          // （审计标记 egress-allowed-temp），到期自动失效
           auditCommand(ctx.root, command, true, "会话级临时联网放行", "egress-allowed-temp");
         } else {
           const msg = egressBlockedMessage(egress);

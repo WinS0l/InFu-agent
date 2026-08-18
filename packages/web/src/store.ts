@@ -298,9 +298,11 @@ interface StoreState {
   setWorktree: (wt: { name: string; path: string } | null) => void;
   addWorktreeNote: (note: string) => void;
   clearWorktree: () => void;
-  // v5.0（C1）：会话级临时联网到期时间戳（null = 未开启；composer 🌐 药丸展示/控制）
+  // v5.0（C1）：会话级临时联网（null = 未开启；composer 🌐 药丸展示/控制）
   egressUntil: number | null;
-  setEgressUntil: (ts: number | null) => void;
+  /** 本次开启的时长（分钟）——下拉菜单高亮当前档位 */
+  egressMinutes: number | null;
+  setEgress: (v: { until: number; minutes: number } | null) => void;
   /** 当前编排阶段（phase-start 事件更新，新消息按此打标；默认单一循环无阶段） */
   currentPhase: PhaseId | null;
   setPhase: (ev: Extract<AgentEvent, { type: "phase-start" }>) => void;
@@ -624,6 +626,7 @@ export const useStore = create<StoreState>()(
   useWorktree: true,
   worktree: null,
   egressUntil: null,
+  egressMinutes: null,
   worktreeNote: "",
   currentPhase: null,
   plan: null,
@@ -1306,7 +1309,7 @@ export const useStore = create<StoreState>()(
       return out;
     }),
   setWorktree: (wt) => set({ worktree: wt, worktreeNote: "" }),
-  setEgressUntil: (ts) => set({ egressUntil: ts }),
+  setEgress: (v) => set(v ? { egressUntil: v.until, egressMinutes: v.minutes } : { egressUntil: null, egressMinutes: null }),
   addWorktreeNote: (note) => set({ worktreeNote: note }),
   clearWorktree: () => set({ worktree: null, worktreeNote: "" }),
 

@@ -248,12 +248,16 @@ function useContextEstimate() {
 }
 
 /**
- * v5.0（C1）：会话级临时联网药丸——点击开启 10 分钟临时联网（本会话 egress 命令放行），
- * 再点关闭；到期自动失效。断网策略是硬闸，此开关是用户的轻量出口（npm install 等
- * 高频外传命令不再每次被拦），命令审计照常落库（egress-allowed-temp）。
+ * v5.0（C1）+ v5.1：会话级临时联网下拉——点击展开时长菜单（5/10/30/60/120 分钟），
+ * 选定后本会话 egress 命令放行（倒计时展示），可随时关闭；到期自动失效。
+ * 断网策略是硬闸，此开关是用户的轻量出口（npm install 等高频外传命令不再每次被拦），
+ * 命令审计照常落库（egress-allowed-temp）。
  */
+const EGRESS_DURATIONS = [5, 10, 30, 60, 120];
 function EgressPill() {
-  const { egressUntil, setEgressUntil, activeSessionId } = useStore();
+  const { egressUntil, egressMinutes, setEgress, activeSessionId } = useStore();
+  const [menuOpen, setMenuOpen] = useState(false);
+  const ref = useRef<HTMLSpanElement>(null);
   const [, forceTick] = useState(0);
   const remaining = egressUntil ? Math.max(0, Math.round((egressUntil - Date.now()) / 1000)) : 0;
   // 倒计时刷新（仅开启时）
@@ -264,21 +268,31 @@ function EgressPill() {
   }, [egressUntil, remaining]);
   // 到期自动清除本地状态
   useEffect(() => {
-    if (egressUntil && remaining <= 0) setEgressUntil(null);
+    if (egressUntil && remaining <= 0) setEgress(null);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [remaining]);
+  // 菜单外点击关闭（与模型下拉同款）
+  useEffect(() => {
+    if (!menuOpen) return;
+    const onDoc = (e: MouseEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) setMenuOpen(false);
+    };
+    document.addEventListener("mousedown", onDoc);
+    return () => document.removeEventListener("mousedown", onDoc);
+  }, [menuOpen]);
 
-  const toggle = async () => {
+  const apply = async (minutes: number | null) => {
     const sid = activeSessionId ?? "";
     if (!sid) return;
     try {
-      if (egressUntil && remaining > 0) {
+      if (minutes === null) {
         await egressDisallow(sid);
-        setEgressUntil(null);
+        setEgress(null);
       } else {
-        await egressAllow(sid, 10);
-        setEgressUntil(Date.now() + 10 * 60000);
+        await egressAllow(sid, minutes);
+        setEgress({ until: Date.now() + minutes * 60000, minutes });
       }
+      setMenuOpen(false);
     } catch (e) {
       useStore.getState().addError(`临时联网操作失败：${(e as Error).message}`);
     }
@@ -287,22 +301,49 @@ function EgressPill() {
   const active = !!egressUntil && remaining > 0;
   const label = active ? `联网中 ${Math.ceil(remaining / 60)} 分` : "临时联网";
   return (
-    <button
-      className={`flex h-7 shrink-0 cursor-pointer items-center gap-1 rounded-lg border px-2 text-[12px] font-medium transition-colors ${
-        active
-          ? "border-success/50 bg-success/10 text-success"
-          : "border-line text-sub hover:bg-hover hover:text-text"
-      }`}
-      onClick={() => void toggle()}
-      title={
-        active
-          ? `本会话临时联网（还剩 ${Math.ceil(remaining / 60)} 分钟）——npm install 等外传命令放行，命令审计照常。点击关闭`
-          : "临时允许本会话联网 10 分钟（npm install 等外传命令不再被断网策略拦截；到期自动失效；命令审计照常）"
-      }
-    >
-      <Globe className="h-3 w-3" />
-      <span className="hidden min-[400px]:inline">{label}</span>
-    </button>
+    <span className="relative shrink-0" ref={ref}>
+      <button
+        className={`flex h-7 cursor-pointer items-center gap-1 rounded-lg border px-2 text-[12px] font-medium transition-colors ${
+          active
+            ? "border-success/50 bg-success/10 text-success"
+            : "border-line text-sub hover:bg-hover hover:text-text"
+        }`}
+        onClick={() => setMenuOpen(!menuOpen)}
+        title={
+          active
+            ? `本会话临时联网（还剩 ${Math.ceil(remaining / 60)} 分钟）——npm install 等外传命令放行，命令审计照常。点击可关闭或调整时长`
+            : "临时允许本会话联网（外传命令不再被断网策略拦截；到期自动失效；命令审计照常）"
+        }
+      >
+        <Globe className="h-3 w-3" />
+        <span className="hidden min-[400px]:inline">{label}</span>
+        <ChevronDown className={`h-3 w-3 transition-transform ${menuOpen ? "rotate-180" : ""}`} />
+      </button>
+      {menuOpen && (
+        <div className="absolute bottom-9 right-0 z-50 min-w-[168px] rounded-xl border border-line bg-elevated p-1 shadow-lv3">
+          {active && (
+            <button
+              className="flex w-full cursor-pointer items-center gap-2 rounded-lg px-2.5 py-1.5 text-left text-[13px] text-danger transition-colors hover:bg-danger-soft"
+              onClick={() => void apply(null)}
+            >
+              <X className="h-3.5 w-3.5" />
+              关闭临时联网
+            </button>
+          )}
+          <div className="px-2.5 pb-0.5 pt-1.5 text-[11px] font-medium text-caption">联网时长</div>
+          {EGRESS_DURATIONS.map((m) => (
+            <button
+              key={m}
+              className="flex w-full cursor-pointer items-center gap-2 rounded-lg px-2.5 py-1.5 text-left text-[13px] text-text transition-colors hover:bg-hover"
+              onClick={() => void apply(m)}
+            >
+              <span className="min-w-0 flex-1">{m < 60 ? `${m} 分钟` : `${m / 60} 小时`}</span>
+              {active && egressMinutes === m && <Check className="h-3.5 w-3.5 shrink-0 text-info" />}
+            </button>
+          ))}
+        </div>
+      )}
+    </span>
   );
 }
 

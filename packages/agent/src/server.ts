@@ -42,7 +42,7 @@ import { clearTodos } from "./tools/task-tools.js";
 import { listTopics as _listTopics, readMemory as _readMemory, globalMemoryDir as _globalMemoryDir, projectMemoryDir as _projectMemoryDir } from "./memory/store.js";
 import { findInstructionFile as _findInstructionFile } from "./memory/infu.js";
 import { buildInfuPrompt, buildMemoryPrompt, findInstructionFile, parseScopeRules, sedimentTask } from "./memory/index.js";
-import { listProjects, createProject, removeProject, resolveProjectByName } from "./projects.js";
+import { listProjects, createProject, removeProject, resolveProjectByName, ensureGitIgnore } from "./projects.js";
 import { listAgents, buildAgentsPrompt, writeAgentFile, deleteAgentFile } from "./agent/agents.js";
 import { abortBackgroundAgentsByDepth } from "./agent/subagent.js";
 import { abortJobsByDepth } from "./tools/jobs.js";
@@ -1504,8 +1504,16 @@ const pendingQuestions = new Map<string, { sessionId: string; resolve: (answer: 
     const name = `infu-task-${Date.now().toString(36)}`;
     const wtPath = path.join(root, ".infu", "worktrees", name);
     try {
+      // v3.3 补 26：无基线仓库（git init 后从未提交）先自动建基线——
+      // 否则 worktree add 从空 HEAD 检出，副本里没有项目文件（Agent 在空副本干活、
+      // 代码界面只剩 .infu——用户实测）；git add -A 提交全部文件为基线
+      const head = await gitQuiet(root, ["rev-parse", "--verify", "HEAD"]).catch(() => "");
+      if (!head.trim()) {
+        await git(root, ["add", "-A"]);
+        await git(root, ["commit", "-m", "init: InFu 自动建立 git 基线"]);
+      }
       await git(root, ["worktree", "add", wtPath, "-b", name]);
-      return c.json({ ok: true, name, path: wtPath, branch: name });
+      return c.json({ ok: true, name, path: wtPath, branch: name, baseline: !head.trim() });
     } catch (e) {
       return c.json({ ok: false, message: `创建工作树失败: ${(e as Error).message}` }, 500);
     }

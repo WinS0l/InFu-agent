@@ -92,12 +92,25 @@ export function createProject(root: string, name?: string): { ok: boolean; proje
   if (!isGitRepoDir(r)) {
     try {
       execFileSync("git", ["init"], { cwd: r, stdio: "ignore", windowsHide: true });
+      ensureGitIgnore(r); // v3.3 补 26：.infu/ 是 InFu 自身数据，不跟踪（否则嵌套 worktree 无法 add）
       initNote = "（已自动初始化 git 仓库——代码改动与审查立即可用）";
     } catch {
       /* git 不可用/初始化失败——静默降级（审查功能不可用但不阻塞） */
     }
   }
   return { ok: true, project, message: `已创建项目「${project.name}」${initNote}` };
+}
+
+/** v3.3 补 26：确保 .gitignore 包含 .infu/（InFu 自身数据不跟踪——嵌套 worktree
+ *  目录无法被 git add 索引，不加会导致基线提交失败/污染） */
+export function ensureGitIgnore(dir: string): void {
+  try {
+    const gi = path.join(dir, ".gitignore");
+    const has = fs.existsSync(gi) && fs.readFileSync(gi, "utf-8").split(/\r?\n/).some((l) => l.trim() === ".infu/");
+    if (!has) fs.appendFileSync(gi, (fs.existsSync(gi) ? "\n" : "") + ".infu/\n", "utf-8");
+  } catch {
+    /* 写失败静默（不影响主流程） */
+  }
 }
 
 /** v3.3 补 23：目录是否为 git 仓库（.git 存在 + git 命令可用；worktree 的 .git 是指针文件） */

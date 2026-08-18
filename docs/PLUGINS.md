@@ -1,6 +1,6 @@
 # InFu 插件系统 v1 + 钩子 + skill（v2.3 批 2）
 
-> 版本：v2.3 批 2 ｜ 日期：2026-08-13 ｜ 依据：ROADMAP v2.3「插件系统架构 v1（插件 = 可注册工具/命令/技能/钩子的包）+ 钩子系统（PreToolUse/PostToolUse）+ skill 加载机制（SKILL.md 社区标准兼容）」
+> 版本：v2.3 批 2（v3.8 修订同步） ｜ 日期：2026-08-13 ｜ 依据：ROADMAP v2.3「插件系统架构 v1（插件 = 可注册工具/命令/技能/钩子的包）+ 钩子系统（PreToolUse/PostToolUse）+ skill 加载机制（SKILL.md 社区标准兼容）」
 
 ## 一、设计来源
 
@@ -36,7 +36,7 @@ export default {
 
 - 工具 `risk` 缺失默认 **medium**（审批兜底，防注入投毒）；跨插件重名自动加插件 id 前缀
 - 加载失败（坏导出/import 抛错）→ emit 提示后**跳过，不阻塞任务**
-- 只注入 **Executor 阶段与直接模式**（Planner/Reviewer 架构级只读不暴露；suggestOnly 不加载）
+- 只注入 **Executor 阶段与直接模式**（Planner/Reviewer 架构级只读不暴露）
 
 ## 三、钩子协议（函数式）
 
@@ -96,5 +96,5 @@ Agent：write_file 写 <root>/.infu/skills/<name>/SKILL.md（工具边界内）
 
 ## 七、验证
 
-- `npm test` 全绿（新增 tests/plugin.test.ts 61 项：加载器/钩子链/skill 解析/config schema/API/工具层）
+- `npm test` 全绿（新增 tests/plugin.test.ts 78 项：加载器/钩子链/skill 解析/config schema/API/工具层）
 - 端到端实测：示例插件（注册工具 + preToolUse 拦截钩子）→ CLI 添加 → 任务中工具调用 + 钩子生效；SKILL.md 放入项目 → 任务中模型 use_skill 读取执行

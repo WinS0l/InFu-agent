@@ -227,8 +227,9 @@ async function* requestOnce(opts: {
         resetIdle();
         buf += decoder.decode(value, { stream: true });
 
-        // SSE 按空行分帧
-        const frames = buf.split("\n\n");
+        // SSE 按空行分帧（v3.7：兼容 \r\n\r\n 分帧端点——自定义网关/代理常返回 CRLF，
+        // 原只认 \n\n 时帧永不命中 → buf 无限累积 + 整轮零产出直到空闲超时）
+        const frames = buf.split(/\r?\n\r?\n/);
         buf = frames.pop() ?? "";
         for (const frame of frames) {
           const dataLine = frame.split("\n").find((l) => l.startsWith("data:"));

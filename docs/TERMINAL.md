@@ -30,7 +30,7 @@ packages/agent/src/terminal/
    在写入前拦截（未确认不写入 PTY），前端弹 Dark OLED 确认框，人工批准后带 `confirmed: true`
    重发才执行。**命令白名单不豁免终端**（白名单是给 Agent 的 run_command 用的；用户输入即用户
    意图，危险操作仍二次确认——安全红线与 run_command 一致）。
-2. **全量审计**：每条命令 `auditCommand` 落盘 `~/.infu/logs/commands.log`（`sandbox=terminal` 标签）。
+2. **全量审计**：每条命令 `auditCommand` 落盘 `logs/commands.log`（默认 `~/.infu/logs/`，数据目录迁移后跟随重定向目录；`sandbox=terminal` 标签，5MB×3 轮转）。
 
 ### 沙箱边界
 

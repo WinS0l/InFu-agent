@@ -56,11 +56,15 @@ function DiffView({ diff }: { diff: string }) {
 }
 
 export default function ReviewPane() {
-  // v3.3 补 19/20：审查/代码界面目录 = 工作树模式**开启时**才用 worktree.path
+  // v3.3 补 19/20/21：审查/代码界面目录 = 工作树模式**开启时**才用 worktree.path
     // （Agent 改动在 .infu/worktrees/<name>，主项目根 git diff 为空 → 界面全空）；
-    // 注意 worktree 状态是 persist 的（刷新不消失）——模式关闭后残留的旧路径
-    // （可能已合并/丢弃被删）必须忽略，否则界面查无效目录变空（用户反馈）
-    const root = useStore((s) => (s.useWorktree && s.worktree ? s.worktree.path : s.root));
+    // 注意 worktree 状态是 persist 的（刷新不消失）——残留的旧路径（已合并/丢弃被删、
+    // 旧格式 .infu-worktrees/、或任务创建失败回退）必须忽略，否则界面查无效目录变空。
+    // 补 21：worktree 路径请求失败（root 无效）→ 回退项目根重试（用户实测根因）
+    const rawRoot = useStore((s) => s.root);
+    const useWorktree = useStore((s) => s.useWorktree);
+    const worktree = useStore((s) => s.worktree);
+    const root = useWorktree && worktree ? worktree.path : rawRoot;
   const { messages } = useStore();
   const lastTest = [...messages]
     .reverse()
@@ -69,6 +73,8 @@ export default function ReviewPane() {
 
   // v2.9：审查文件列表 + 选中文件 diff（审查式）
   const [files, setFiles] = useState<ReviewFileInfo[] | null>(null);
+  // v3.3 补 21：项目是否为 git 仓库（非 git → 显示提示而非静默空）
+  const [isGit, setGitRepo] = useState(true);
   const [sel, setSel] = useState<string | null>(null);
   const [diff, setDiff] = useState("");
   const [loading, setLoading] = useState(false);
@@ -83,11 +89,28 @@ export default function ReviewPane() {
     if (!root) return;
     // v2.9：初始只加载文件列表（不自动选中任何文件——点击文件后才显示其更改）
     // v3.0 审计：失败不再永久卡「加载中」——降级为空列表 + 错误提示
-    fetchReviewFiles(root)
-      .then((f) => setFiles(f))
+    // v3.3 补 21：worktree 残留路径无效（root 400）→ 回退项目根重试
+    const load = (r: string) => fetchReviewFiles(r);
+    load(root)
+      .then((f) => {
+        setFiles(f.files);
+        setGitRepo(f.git !== false); // 非 git 项目 → 前端提示（无 diff 可看）
+      })
       .catch(() => {
-        setFiles([]);
-        useStore.getState().addError("审查文件列表加载失败（服务未就绪或目录不可读）");
+        if (root !== rawRoot) {
+          load(rawRoot)
+            .then((f) => {
+              setFiles(f.files);
+              setGitRepo(f.git !== false);
+            })
+            .catch(() => {
+              setFiles([]);
+              useStore.getState().addError("审查文件列表加载失败（服务未就绪或目录不可读）");
+            });
+        } else {
+          setFiles([]);
+          useStore.getState().addError("审查文件列表加载失败（服务未就绪或目录不可读）");
+        }
       });
   }, [root]);
 
@@ -97,7 +120,7 @@ export default function ReviewPane() {
     setLoading(true);
     setDiff("");
     try {
-      const d = await fetchReviewFileDiff(root, path);
+      const d = await fetchReviewFileDiff(root, path).catch(() => (root !== rawRoot ? fetchReviewFileDiff(rawRoot, path) : Promise.reject(new Error("diff 加载失败"))));
       if (seq === diffSeq.current) setDiff(d);
     } catch (e) {
       if (seq === diffSeq.current) setDiff(`加载 diff 失败：${(e as Error).message}`);
@@ -168,8 +191,10 @@ export default function ReviewPane() {
                 </div>
               )
             ) : files.length === 0 ? (
-              <div className="py-1 text-[13px] text-caption">
-                暂无改动{root && !files.length && "（非 git 仓库或工作区干净）"}
+              <div className="py-1 text-[13px] leading-5 text-caption">
+                {isGit
+                  ? "暂无改动（工作区干净）"
+                  : "该项目不是 git 仓库，无法显示改动 diff——审查依赖 git；可在项目目录执行 git init 后重新使用"}
               </div>
             ) : (
               <div className="space-y-0.5">

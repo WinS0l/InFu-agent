@@ -2,7 +2,7 @@
 
 软件工程智能体平台 — 让 AI 从"代码补全工具"升级为能理解项目、规划任务并执行工程工作的开发伙伴。
 
-> 状态：v3.5（Agent 核心 + Web UI + Windows 桌面端 + 嵌入式浏览器均可用；40 套测试套件全绿）
+> 状态：v3.8（Agent 核心 + Web UI + Windows 桌面端 + 嵌入式浏览器均可用；43 套测试套件 1286 断言全绿）
 > 相关文档：[技术选型方案](docs/TECHNICAL-SELECTION.md)、[路线图](docs/ROADMAP.md)
 
 ## 核心能力
@@ -105,15 +105,11 @@ npm run infu -- "分析这个项目的技术栈和结构" --root .
 # 修改代码（-y 自动批准所有操作）
 npm run infu -- "把 README 的标题改成 InFu" --root . -y
 
-# 方案模式（v2.3：只读分析 + 测试，绝不修改文件）
-npm run infu -- "优化这个函数" --root . --suggest
-
-# 模板任务（M4 小白引导，默认开启 Planner→Reviewer 分层编排）
+# 模板任务（M4 小白引导）
 npm run infu -- --template fix-tests --root . -y        # 一键修复测试失败
 npm run infu -- --template init-project --root . -y     # 一键初始化新项目
 
-# 编排控制
-npm run infu -- "任务" --root . -y --no-orchestrate     # 关闭分层编排（单 Agent 直跑）
+# 编排控制（默认：Planner→计划确认→Executor→Reviewer 分层编排，可关）
 npm run infu -- "任务" --root . -y --no-plan-approval   # 不要求确认计划，直接执行
 
 # 会话（v2.1+ 持久化，v2.2 消息级重建续跑）

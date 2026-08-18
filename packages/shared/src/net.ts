@@ -110,6 +110,11 @@ export function parseIpv6Groups(input: string): number[] | null {
  * 返回内嵌的 IPv4 四段；非内嵌形式返回 null。
  */
 export function ipv6EmbeddedV4(groups: number[]): number[] | null {
+  // v3.8 审计修复：IPv6 回环（::1 及完整形式 0:0:0:0:0:0:0:1）低 32 位为 1，
+  // 位模式上命中 IPv4-compatible 分支——但语义是 IPv6 回环地址而非内嵌 IPv4，
+  // 必须排除（原实现使 net.test.ts「::1 非内嵌」断言失败，套件自创建起一直红）。
+  // 消费者 isPrivateIpv6/isLoopbackHostText 均先查回环再查内嵌，此特判不改变行为。
+  if (isLoopbackIpv6(groups)) return null;
   const v4 = (g6: number, g7: number): number[] => [
     (g6 >>> 8) & 0xff, g6 & 0xff,
     (g7 >>> 8) & 0xff, g7 & 0xff,

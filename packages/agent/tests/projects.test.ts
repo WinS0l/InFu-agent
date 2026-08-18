@@ -50,7 +50,9 @@ console.log("\n── 创建 ──");
   }
   check("注册表落盘", existsSync(REAL));
   const raw = JSON.parse(readFileSync(REAL, "utf-8"));
-  check("注册表格式 {version, projects}", raw.version === 1 && Array.isArray(raw.projects) && raw.projects.length === 1);
+  // v3.8 修复：v3.6 新增「名称缺省用文件夹名」用例（projBlank 注册成功）后此处 length
+  // 仍写 1——该断言自 v3.6 起一直失败（20 通过 1 失败，退出码 1），npm test 全链红
+  check("注册表格式 {version, projects}", raw.version === 1 && Array.isArray(raw.projects) && raw.projects.length === 2);
 
   check("重复创建拒绝（同 root）", createProject(proj1)?.ok === false);
   check("目录不存在拒绝", createProject("E:\\no-such-dir-xyz")?.ok === false);

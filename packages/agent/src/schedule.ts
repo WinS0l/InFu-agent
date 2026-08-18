@@ -93,14 +93,21 @@ export function cronMatches(cron: string, date: Date): boolean {
     return nums.some((n) => n === value);
   };
   const dowVal = date.getDay(); // 0=周日
+  const domOk = match(dom, date.getDate());
+  // v3.1 审计修复：cron 周字段 `7` 也代表周日；v3.5 补：`0`（标准周日写法）此前被
+  // 映射成 7 后恒不匹配——两种写法都接受
+  const dowOk = match(dow, dowVal) || (dowVal === 0 && match(dow, 7));
+  // v3.7 审计修复：标准 cron（Vixie）语义——日字段与周字段**均受限**时互为 OR
+  // （`0 9 1 * 1` = 每月 1 号**或**周一）；仅一方受限时则双方都须匹配。
+  // 原实现恒 AND：`1 号且周一` 的月份大多不执行，任务静默缺席。
+  const domRestricted = dom !== "*";
+  const dowRestricted = dow !== "*";
+  const dayOk = domRestricted && dowRestricted ? domOk || dowOk : domOk && dowOk;
   return (
     match(min, date.getMinutes()) &&
     match(hour, date.getHours()) &&
-    match(dom, date.getDate()) &&
-    match(mon, date.getMonth() + 1) &&
-    // v3.1 审计修复：cron 周字段 `7` 也代表周日；v3.5 补：`0`（标准周日写法）此前被
-    // 映射成 7 后恒不匹配——两种写法都接受
-    (match(dow, dowVal) || (dowVal === 0 && match(dow, 7)))
+    dayOk &&
+    match(mon, date.getMonth() + 1)
   );
 }
 
@@ -113,7 +120,7 @@ export function validCronSyntax(cron: string): boolean {
     if (field === "*") return true;
     const [lo, hi] = ranges[i];
     return field.split(",").every((tok) => {
-      const stepM = /^\*\/\d+$/.exec(tok);
+      const stepM = /^\*\/(\d+)$/.exec(tok);
       if (stepM) return parseInt(stepM[1], 10) >= 1;
       if (!/^\d+$/.test(tok)) return false;
       const n = parseInt(tok, 10);
@@ -134,7 +141,7 @@ export function nextCronRun(cron: string, now = new Date()): Date | null {
 export function addSchedule(cron: string, prompt: string, root: string): { ok: boolean; message: string; entry?: ScheduleEntry } {
   const t = new Date();
   if (!validCronSyntax(cron)) {
-    return { ok: false, message: `cron 表达式无效：${cron}（格式：分 时 日 月 周，如 "*/30 * * * *" 每 30 分钟、"0 9 * * 1-5" 工作日 9 点——当前仅支持 * / 逗号数字，不支持区间 -）` };
+    return { ok: false, message: `cron 表达式无效：${cron}（格式：分 时 日 月 周，如 "*/30 * * * *" 每 30 分钟、"0 9 * * 1,2,3,4,5" 工作日 9 点——当前仅支持 * / 逗号数字，不支持区间 -）` };
   }
   const entry: ScheduleEntry = {
     id: `s${randomUUID().slice(0, 8)}`,
@@ -205,6 +212,10 @@ export function startScheduler(run: ScheduleRunner): void {
       // 同一分钟防重复执行（lastRun 分钟内已跑过则跳过）
       if (entry.lastRun && new Date(entry.lastRun).getTime() > now.getTime() - 60000) continue;
       runningIds.add(entry.id);
+      // v3.7 审计修复：调度即预留 lastRun——原实现只在**完成后**写入，服务重启时
+      // runningIds 内存丢失且 lastRun 未写 → 同分钟 cron 再次命中 → 同一任务执行两轮。
+      // 预留后本分钟内不再命中（含重启后）；完成回调再覆写为真实结果。
+      markScheduleRun(entry.id, "started");
       run(entry)
         .then((r) => markScheduleRun(entry.id, r.ok ? "ok" : "error"))
         .catch(() => markScheduleRun(entry.id, "error"))

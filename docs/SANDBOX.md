@@ -161,9 +161,9 @@ Agent 要执行命令
 1. 前沿产品几乎都首选 **OS 原生原语**而非 Docker——轻量、快、零依赖。我们的 L1 方向正确，且借鉴点明确：
    - ✅ 已实现：借鉴 Codex 的"保护路径始终只读"（我们已做：~/.ssh、~/.infu 等，可扩展 .git、凭据文件）
    - ✅ 已实现：借鉴 Codex Windows 方案：**restricted tokens + job objects**（M5，Rust 原生模块 `packages/sandbox-rs/`，见"三·五"节）
-   - ⏳ 网络默认断：受限令牌不拦网络，是 L1.5 最大真实缺口（防 prompt 注入外传）——已升为高优先级待办（见 ROADMAP：WFP 进程级防火墙 / 引导 Docker 断网）
+   - ⏳ 网络默认断：受限令牌不拦网络，是 L1.5 最大真实缺口（防 prompt 注入外传）——**命令级断网策略已落地**（M6：外传命令 curl/wget/nc/ssh 等默认拦截 + `network=true` 人工审批 + egress-blocked 审计；OS 级进程断网受本机加固环境限制不可行，见 ROADMAP「网络出站软控制」）；OS 级断网的正确姿势 = Docker L2 `--network none` 或未来 microVM
 2. Docker 定位为"可选增强"档（对应 Claude 的 Docker microVM 档）——我们的 L2 设计方向一致。
-3. ✅ 已实现：借鉴 Cursor 的 **/worktree 模式**（M4）+ **/best-of-n 并行尝试**（M5，CLI `--best-of-n`）。
+3. ✅ 已实现：借鉴 Cursor 的 **/worktree 模式**（M4）；**/best-of-n 并行尝试（M5）已于 v2.5 按用户评审整体移除**（同任务多路竞速多余，真并发 = delegate_task 不同任务并行）。
 
 ## 六、参考资料
 
@@ -175,13 +175,6 @@ Agent 要执行命令
 - OpenAI Codex 沙箱架构（官方文档）: https://github.com/openai/codex/blob/main/docs/sandbox.md ｜ https://learn.chatgpt.com/docs/agent-approvals-security
 - simonw — Codex 沙箱逆向研究: https://github.com/simonw/research/blob/main/codex-sandbox-investigation/notes.md
 - Anthropic — Making Claude Code more secure with sandboxing（2025.10）
-- Wiz — GhostApproval: https://www.wiz.io/blog/ghost-approval-vulnerability-ai-coding-assistants
-- Pillar Security — sandbox escape research（CVE-2026-48124）
-- 社区实现：nono（WSL2 Landlock）、isol8、ccairgap、sandfence- Tembo — AI Agent Sandbox: Secure Execution: https://www.tembo.io/blog/ai-agent-sandbox
-- Northflank — How to sandbox AI agents in 2026: https://northflank.com/blog/how-to-sandbox-ai-agents
-- Qovery — Claude Code sandbox guide: https://www.qovery.com/blog/claude-code-sandbox-guide
-- Zylos Research — AI Agent Sandboxing: https://zylos.ai/research/2026-04-04-ai-agent-sandboxing-security-isolation
-- awesome-ai-coding-sandboxes（安全姿态排名）: https://github.com/fhiltscher/awesome-ai-coding-sandboxes
 - Wiz — GhostApproval: https://www.wiz.io/blog/ghost-approval-vulnerability-ai-coding-assistants
 - Pillar Security — sandbox escape research（CVE-2026-48124）
 - 社区实现：nono（WSL2 Landlock）、isol8、ccairgap、sandfence

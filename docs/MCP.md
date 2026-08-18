@@ -1,10 +1,10 @@
 # InFu MCP 客户端（v2.3 批 1）— 扩展机制的第一个插件类型
 
-> 版本：v2.3 批 1 ｜ 日期：2026-08-13 ｜ 依据：ROADMAP v2.3「MCP 客户端作为第一个插件类型（`infu mcp add <server>`，工具动态注入 Agent 循环，审批/审计覆盖）」
+> 版本：v2.3 批 1（v3.8 修订同步） ｜ 日期：2026-08-13 ｜ 依据：ROADMAP v2.3「MCP 客户端作为第一个插件类型（`infu mcp add <server>`，工具动态注入 Agent 循环，审批/审计覆盖）」
 
 ## 一、这是什么
 
-MCP（Model Context Protocol）是 AI 工具生态的事实标准——社区有大量现成 MCP 服务器（文件系统、数据库、浏览器、GitHub、文档处理等）。InFu v2.3 落地 **MCP 客户端**：配置一台 MCP 服务器后，它的工具自动注入 Agent 执行阶段，与内置 10 工具并列可用。这是插件系统架构 v1 的**第一个实例**（批 2 再反推抽象插件协议）。
+MCP（Model Context Protocol）是 AI 工具生态的事实标准——社区有大量现成 MCP 服务器（文件系统、数据库、浏览器、GitHub、文档处理等）。InFu v2.3 落地 **MCP 客户端**：配置一台 MCP 服务器后，它的工具自动注入 Agent 执行阶段，与内置 52 工具并列可用。这是插件系统架构 v1 的**第一个实例**（批 2 再反推抽象插件协议）。
 
 **一句话：`infu mcp add <名称>` → 任务执行阶段自动多出该服务器的全部工具。**
 
@@ -24,7 +24,6 @@ listTools() → 每个 MCP 工具 → ToolDef 适配器（src/mcp/tools.ts）
         ▼
 注入 Agent 循环（仅 Executor 阶段与直接模式）
         │  · Planner/Reviewer 不注入（架构级只读保证不被破坏）
-        │  · suggestOnly 不注入；/best-of-n 并行模式不注入（v1 边界）
         ▼
 调用时：审批（默认 medium，人工确认）→ callTool 转发 → 结果文本化回模型
         · tool-start / tool-result 事件全量落库 = 审计（会话回放即审计）
@@ -42,7 +41,7 @@ npm run infu -- mcp remove <id>                # 删除
 npm run infu -- mcp status [id]                # 探测连接 + 工具列表 + 风险级别
 ```
 
-Web UI：顶栏「MCP」按钮 → 管理弹窗（添加/启停/探测工具/风险覆盖/删除），与 CLI 操作同一份配置。
+Web UI：设置弹窗 → 「Agent 能力 → MCP 服务器」Tab（添加/启停/探测工具/风险覆盖/删除），与 CLI 操作同一份配置。
 
 ## 四、风险策略（防 prompt 注入投毒）
 
@@ -121,6 +120,6 @@ Agent：read_file 参考示例 → write_file 编写 server → （可选 run_te
 
 ## 八、验证
 
-- `npm test` 全绿（新增 tests/mcp.test.ts 58 项：schema 转换 / 风险解析 / 适配器审批 / 加载合并去重 / config schema / API CRUD+探测 / 续跑推断）
+- `npm test` 全绿（新增 tests/mcp.test.ts 72 项：schema 转换 / 风险解析 / 适配器审批 / 加载合并去重 / config schema / API CRUD+探测 / 续跑推断）
 - CLI 端到端：真实 stdio MCP 服务器（greet/add_note）——工具注入、`infu mcp status` 探测（风险徽标）、任务中模型调用、medium 审批拒绝（返回拒绝文本给模型）与批准（文件落盘）、事件落库可回放
 - Web 端到端：MCP 管理弹窗（添加/启停/探测工具+风险徽标/删除）+ 任务中「MCP 服务器已连接」事件 + 模型调用 greet → 审批弹窗批准 → 回复回填与交付报告

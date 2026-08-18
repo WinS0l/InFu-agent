@@ -782,6 +782,9 @@ export async function sendChat(
       effectiveRoot = wt.path;
     } catch (e) {
       st.addWorktreeNote(`工作树创建失败（${(e as Error).message}），已在原目录执行`);
+      // v3.3 补 21：失败时清残留 worktree 状态——否则 persist 的旧路径（可能已删除）
+      // 继续劫持代码/审查界面（查无效目录 → 空）
+      st.setWorktree(null);
     }
   }
 
@@ -946,11 +949,12 @@ export interface ReviewFileInfo {
 }
 
 /** 审查文件列表（改动文件 + 增删行数；含未跟踪新文件） */
-export async function fetchReviewFiles(root: string): Promise<ReviewFileInfo[]> {
+// v3.3 补 21：返回 { files, git }——git=false（非 git 仓库）供前端提示「无 diff 可看」
+export async function fetchReviewFiles(root: string): Promise<{ files: ReviewFileInfo[]; git: boolean }> {
   const res = await apiFetch(`/api/review/files?root=${encodeURIComponent(root)}`);
   const data = await res.json();
-  if (!res.ok || data.ok === false) return [];
-  return data.files ?? [];
+  if (!res.ok || data.ok === false) return { files: [], git: false };
+  return { files: data.files ?? [], git: data.git !== false };
 }
 
 /** 单文件 unified diff 文本（未跟踪文件 = 全新增行） */

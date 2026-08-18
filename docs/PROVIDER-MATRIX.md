@@ -24,11 +24,11 @@
 2. **思考字段**：`reasoning_content`（DeepSeek 原生）/ `reasoning`（部分兼容网关）都识别；其他模型无该字段则忽略（不报错）。重建消息时保留 `reasoning_content` 供 DeepSeek 续传。
 3. **工具调用**：
    - 模型不发 `tool_calls` → Agent 正常收尾输出文本（等价"不调用工具"），不视为错误。
-   - 若某 provider 实测**完全不支持工具调用**：用 `--suggest`（方案模式）或提示词降级为"建议模式"（当前 `inferCapabilities.toolCalling` 恒 true，实测发现不支持者在此文档标注并改该模型 `capabilities.toolCalling=false`）。
+   - 若某 provider 实测**完全不支持工具调用**：提示词降级为"建议模式"（当前循环不做能力探测——工具调用按 OpenAI 协议假设；实测发现不支持者在此文档标注，并在 `resolveRoleThinking`/系统提示词层规避）。
    - 工具调用增量按 `index` 聚合（流式分片 arguments 拼接），坏帧跳过。
 4. **错误语义**：非 2xx 统一抛 `ModelApiError{status, retryable}`——429/5xx/408 可重试（指数退避），其他 4xx 不重试；主模型重试耗尽走 `fallbackModelIds` 降级链。
 5. **上下文窗口**：按模型 `contextWindow`（显式配置 > 模型名匹配表 > provider 默认 > 128k）触发压缩；实测可据此校准 `MODEL_CONTEXT_WINDOWS`（`packages/agent/src/providers/registry.ts`）。
-6. **长文本/中文**：SSE 分帧对 UTF-8 安全（TextDecoder 流式解码），中文无需特殊处理；长输出时注意 `timeoutMs`（默认 120s，长生成可能超时——命中重试/降级属预期行为）。
+6. **长文本/中文**：SSE 分帧对 UTF-8 安全（TextDecoder 流式解码），中文无需特殊处理；长输出时注意**两段式超时**（v3.5）：首帧前 min(timeoutMs, 60s) 无数据判「等待响应超时」、首帧后 timeoutMs（默认 300s）无数据判「响应中断」——长思考链/长输出不会因总时长被误杀，服务端挂起才会中止（命中重试/降级属预期行为）。
 
 ## 新增 provider 的接入清单
 

@@ -7,6 +7,7 @@ import path from "node:path";
 import { TOOLS } from "../src/tools/index.js";
 import { READONLY_TOOLS } from "../src/agent/agents.js";
 import { isMutatingTool } from "../src/agent/loop.js";
+import { setDataDirForTest } from "../src/data-dir.js";
 import type { ToolContext } from "@infu/shared";
 
 let pass = 0, fail = 0;
@@ -92,11 +93,20 @@ ok("project_tree 非写工具", !isMutatingTool("project_tree"));
   ok("任意项目内目标放行（node_modules 非保护）", typeof r10 === "string" && r10.includes("已复制"));
   fs.rmSync(path.join(root, "node_modules", "x.md"), { force: true });
 
-  const ctxHome: ToolContext = { ...ctx, root: os.homedir() } as unknown as ToolContext;
+  // v3.8 审计修复：写保护测试改隔离目录——原用 os.homedir() 作 root，写保护若回归失效，
+  // 断言失败前会真实删除 ~/.infu/config.json（用户凭据）。isProtectedPath 是纯路径匹配
+  // （.ssh 正则全局生效；.infu 保护跟随 resolveDataDir()），用数据目录重定向 + 临时目录
+  // 验证同一套逻辑，安全等价。
+  const tmpData = path.join(tmp, "infu-data");
+  fs.mkdirSync(tmpData, { recursive: true });
+  fs.writeFileSync(path.join(tmpData, "config.json"), "{}");
+  setDataDirForTest(tmpData);
+  const ctxHome: ToolContext = { ...ctx, root: tmpData } as unknown as ToolContext;
   const r11 = await TOOLS.file_ops.execute({ op: "mkdir", path: ".ssh" }, ctxHome);
   ok("~/.ssh 写保护拦截", typeof r11 === "string" && r11.includes("受保护"));
-  const r12 = await TOOLS.file_ops.execute({ op: "rm", path: ".infu/config.json" }, ctxHome);
+  const r12 = await TOOLS.file_ops.execute({ op: "rm", path: "config.json" }, ctxHome);
   ok("~/.infu 写保护拦截", typeof r12 === "string" && r12.includes("受保护"));
+  ok("~/.infu/config.json 未被删除", fs.existsSync(path.join(tmpData, "config.json")));
 
   const r13 = await TOOLS.file_ops.execute({ op: "badop", path: "README.md" }, ctx);
   ok("未知 op 报错", typeof r13 === "string" && r13.includes("未知操作"));

@@ -53,6 +53,8 @@ check("::ffff:7f00:1 → 127.0.0.1", JSON.stringify(ipv6EmbeddedV4(parseIpv6Grou
 check("::7f00:1 → 127.0.0.1", JSON.stringify(ipv6EmbeddedV4(parseIpv6Groups("::7f00:1")!)) === JSON.stringify([127, 0, 0, 1]));
 check("::ffff:8.8.8.8 → 8.8.8.8", JSON.stringify(ipv6EmbeddedV4(parseIpv6Groups("::ffff:8.8.8.8")!)) === JSON.stringify([8, 8, 8, 8]));
 check("::1 非内嵌", ipv6EmbeddedV4(parseIpv6Groups("::1")!) === null);
+check("完整形式回环 0:0:0:0:0:0:0:1 非内嵌", ipv6EmbeddedV4(parseIpv6Groups("0:0:0:0:0:0:0:1")!) === null);
+check("::ffff:0:1 → 0.0.0.1（mapped 保持）", JSON.stringify(ipv6EmbeddedV4(parseIpv6Groups("::ffff:0:1")!)) === JSON.stringify([0, 0, 0, 1]));
 check("fe80::1 非内嵌", ipv6EmbeddedV4(parseIpv6Groups("fe80::1")!) === null);
 
 // ── isPrivateHostText：私有/本机判定（SSRF 语义）──

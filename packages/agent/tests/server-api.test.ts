@@ -114,6 +114,78 @@ console.log("\n▶ 本地令牌鉴权");
   check("index.html 注入 window.__INFU_TOKEN__", /window\.__INFU_TOKEN__="[0-9a-f]{32}"/.test(html));
 }
 
+// ── 4. 终端双字段旁路回归（v3.7）：command 与 data 并存时 data 段同样过高危检测 ──
+console.log("\n▶ 终端双字段高危检测（command + data 并存）");
+{
+  const t = await app.fetch(new Request("http://localhost/api/terminal", { method: "POST" }));
+  const tj = (await t.json()) as { ok?: boolean; id?: string };
+  if (!tj.ok || !tj.id) {
+    check("终端会话创建（前置）", false, JSON.stringify(tj));
+  } else {
+    const tid = tj.id;
+    // 此前漏洞：{command:"echo ok", data:"rm -rf C:\r\n"} 时 data 段跳过检测 → 200 直写
+    const r = await app.fetch(new Request(`http://localhost/api/terminal/${tid}/input`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ command: "echo ok", data: "rm -rf C:\r\n" }),
+    }));
+    const j = (await r.json()) as { requireApproval?: boolean; risk?: string };
+    check("command+data 并存时 data 高危 → requireApproval", r.status === 200 && j.requireApproval === true && j.risk === "high", JSON.stringify(j));
+
+    const r2 = await app.fetch(new Request(`http://localhost/api/terminal/${tid}/input`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ command: "rm -rf C:", data: "rm -rf C:\r\n", confirmed: true }),
+    }));
+    const j2 = (await r2.json()) as { ok?: boolean };
+    check("confirmed:true 后放行", j2.ok === true, JSON.stringify(j2));
+
+    const r3 = await app.fetch(new Request(`http://localhost/api/terminal/${tid}/input`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ command: "echo ok", data: "" }),
+    }));
+    const j3 = (await r3.json()) as { ok?: boolean; requireApproval?: boolean };
+    check("command-only 也过检测（echo ok 放行）", j3.ok === true, JSON.stringify(j3));
+
+    const r4 = await app.fetch(new Request(`http://localhost/api/terminal/${tid}/input`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ command: "del /s /q C:", data: "" }),
+    }));
+    const j4 = (await r4.json()) as { requireApproval?: boolean };
+    check("command-only 高危 → requireApproval", j4.requireApproval === true, JSON.stringify(j4));
+
+    await app.fetch(new Request(`http://localhost/api/terminal/${tid}`, { method: "DELETE" }));
+  }
+}
+
+// ── 5. rewind 运行中拒绝回归（v3.7）：running 会话回滚 → 400 ──
+console.log("\n▶ rewind 运行中拒绝");
+{
+  const store = getStore();
+  const proj = mkdtempSync(join(tmpdir(), "infu-sa-rewind-"));
+  const sid = store.createSession({ title: "rewind 竞态测试", root: proj });
+  store.appendEvent(sid, { type: "user-message", text: "t" });
+  store.updateStatus(sid, "running");
+  const r = await app.fetch(new Request(`http://localhost/api/sessions/${sid}/rewind`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ seq: 0 }),
+  }));
+  const j = (await r.json()) as { ok?: boolean; message?: string };
+  check("running 会话回滚 → 400 + 提示先停止", r.status === 400 && j.ok !== true && (j.message ?? "").includes("运行"), JSON.stringify(j));
+  // 停止后可回滚（原链路不破坏）
+  store.updateStatus(sid, "stopped");
+  const r2 = await app.fetch(new Request(`http://localhost/api/sessions/${sid}/rewind`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ seq: 0 }),
+  }));
+  const j2 = (await r2.json()) as { ok?: boolean };
+  check("停止后回滚正常（原链路保留）", j2.ok === true, JSON.stringify(j2));
+}
+
 // 清理
 try { rmSync(tmpData, { recursive: true, force: true }); } catch { /* 忽略 */ }
 console.log(`\n=== 结果：${passed} 通过 / ${failed} 失败 ===`);

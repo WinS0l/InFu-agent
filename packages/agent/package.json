@@ -9,7 +9,8 @@
     "build": "tsc -p tsconfig.json && node -e \"const fs=require('fs');fs.cpSync('src/plugin/browser/skills','dist/plugin/browser/skills',{recursive:true});fs.cpSync('skills','dist/skills',{recursive:true});\"",
     "dev": "tsx watch src/cli.ts",
     "cli": "tsx src/cli.ts",
-    "start": "tsx src/server.ts"
+    "start": "tsx src/server.ts",
+    "test": "npx tsx ../../scripts/test-runner.ts"
   },
   "dependencies": {
     "@ai-sdk/anthropic": "^3.0.110",

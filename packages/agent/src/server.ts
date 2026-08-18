@@ -745,7 +745,7 @@ const pendingQuestions = new Map<string, { sessionId: string; resolve: (answer: 
     if (!root || !fs.existsSync(root) || !fs.statSync(root).isDirectory()) {
       return c.json({ ok: false, message: "root 无效" }, 400);
     }
-    if (!(await isGitRepo(root))) return c.json({ ok: true, files: [] }); // 非 git 仓库无审查
+    if (!(await isGitRepo(root))) return c.json({ ok: true, files: [], git: false }); // 非 git 仓库无审查（v3.3 补 21：git 标志供前端提示）
     const files: Array<{ path: string; added: number; removed: number }> = [];
     const numstat = await gitQuiet(root, ["diff", "--numstat", "HEAD"]);
     for (const line of numstat.split("\n")) {
@@ -766,7 +766,7 @@ const pendingQuestions = new Map<string, { sessionId: string; resolve: (answer: 
       if (added < 0) added = 0;
       files.push({ path: p, added, removed: 0 });
     }
-    return c.json({ ok: true, files });
+    return c.json({ ok: true, files, git: true });
   });
 
   // 单文件 diff（unified 文本；前端行级着色）；未跟踪文件 = 全新增行
@@ -941,27 +941,27 @@ const pendingQuestions = new Map<string, { sessionId: string; resolve: (answer: 
     const body = await c.req.json().catch(() => ({}));
     const data = typeof body.data === "string" ? body.data : "";
     const command = typeof body.command === "string" ? body.command.trim() : "";
-    if (!data) return c.json({ ok: true });
+    if (!data && !command) return c.json({ ok: true });
     // v3.5 审计修复：command 字段缺失时从 data 逐行推导完整命令行（防直连 API
     // 绕过高危审批与审计）——前端只在回车时发送 data（整行命令 + \r），逐行检测安全
-    const dataLines: string[] = command
-      ? []
-      : data
-          .split(/\r?\n/)
-          .map((l: string) => l.trim())
-          .filter(Boolean);
+    // v3.7 审计修复：command 与 data 并存时 data 段不再跳过检测/审计——此前
+    // `{command:"echo ok", data:"rm -rf C:\r\n"}` 的 data 段可无审批无痕迹执行。
+    const dataLines: string[] = data
+      .split(/\r?\n/)
+      .map((l: string) => l.trim())
+      .filter(Boolean);
     const derivedDangerous = dataLines.find((l) => detectDangerousTerminalCommand(l));
     if (command && detectDangerousTerminalCommand(command) && body.confirmed !== true) {
       // 高危命令：拦截 + 要求人工确认（安全红线，与 run_command 一致）
       return c.json({ ok: false, requireApproval: true, risk: "high", description: `执行高风险命令：${command}` });
     }
-    if (!command && derivedDangerous && body.confirmed !== true) {
+    if (derivedDangerous && body.confirmed !== true) {
       return c.json({ ok: false, requireApproval: true, risk: "high", description: `执行高风险命令：${derivedDangerous}` });
     }
     if (session.exited) return c.json({ ok: false, message: "终端会话已退出" }, 400);
     writeInput(session, data);
     if (command) auditTerminalCommand(session.cwd, command);
-    else for (const l of dataLines) auditTerminalCommand(session.cwd, l);
+    for (const l of dataLines) auditTerminalCommand(session.cwd, l);
     return c.json({ ok: true });
   });
 
@@ -1741,6 +1741,13 @@ const pendingQuestions = new Map<string, { sessionId: string; resolve: (answer: 
     const body = await c.req.json().catch(() => ({}));
     const seq = parseInt(String(body.seq ?? ""), 10);
     if (!Number.isInteger(seq) || seq < 0) return c.json({ ok: false, message: "seq 必须是 >= 0 的整数" }, 400);
+    // v3.7 审计修复：运行中回滚 → 拒绝——正在跑的任务继续 appendEvent（seq 从回滚点
+    // 重新增长）会与截断后的事件流产生混合状态；且收尾 done 被 stopped 终态拒绝覆盖，
+    // 会话显示 stopped 实际仍在执行。先停止任务再回滚。
+    const sess = getStore().getSession(id);
+    if (sess?.status === "running") {
+      return c.json({ ok: false, message: "会话正在运行，请先停止任务再回滚" }, 400);
+    }
     // v2.14 批 10：marker=false = 编辑截断（不落回滚标记，AI 无需感知）；默认 true = 回滚（AI 感知）
     if (!getStore().rewind(id, seq, { marker: body.marker !== false })) return c.json({ ok: false, message: "会话不存在" }, 404);
     return c.json({ ok: true });

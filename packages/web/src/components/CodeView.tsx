@@ -55,11 +55,15 @@ function ChangeBadge({ f }: { f: FsTreeFile }) {
 }
 
 export default function CodeView() {
-  // v3.3 补 19/20：审查/代码界面目录 = 工作树模式**开启时**才用 worktree.path
+  // v3.3 补 19/20/21：审查/代码界面目录 = 工作树模式**开启时**才用 worktree.path
     // （Agent 改动在 .infu/worktrees/<name>，主项目根 git diff 为空 → 界面全空）；
-    // 注意 worktree 状态是 persist 的（刷新不消失）——模式关闭后残留的旧路径
-    // （可能已合并/丢弃被删）必须忽略，否则界面查无效目录变空（用户反馈）
-    const root = useStore((s) => (s.useWorktree && s.worktree ? s.worktree.path : s.root));
+    // 注意 worktree 状态是 persist 的（刷新不消失）——残留的旧路径（已合并/丢弃被删、
+    // 旧格式 .infu-worktrees/、或任务创建失败回退）必须忽略，否则界面查无效目录变空。
+    // 补 21：worktree 路径请求失败（root 无效）→ 回退项目根重试（用户实测根因）
+    const rawRoot = useStore((s) => s.root);
+    const useWorktree = useStore((s) => s.useWorktree);
+    const worktree = useStore((s) => s.worktree);
+    const root = useWorktree && worktree ? worktree.path : rawRoot;
   const codeViewFile = useStore((s) => s.codeViewFile);
   const [files, setFiles] = useState<FsTreeFile[] | null>(null);
   const [collapsed, setCollapsed] = useState<Record<string, boolean>>({});
@@ -75,20 +79,30 @@ export default function CodeView() {
     setContent(null);
     if (!root) return;
     // v3.6：加载失败提示（原未处理 rejection——文件树失败静默）
-    fetchFsTree(root).then((f) => {
-      setFiles(f);
-      // 默认展开含改动文件的顶层目录（其余折叠）
-      const changed = new Set<string>();
-      for (const x of f) {
-        if (x.untracked || x.added > 0 || x.removed > 0) {
-          const idx = x.path.indexOf("/");
-          if (idx > 0) changed.add(x.path.slice(0, idx));
+    // v3.3 补 21：worktree 残留路径无效（root 400）→ 回退项目根重试
+    const load = (r: string) =>
+      fetchFsTree(r).then((f) => {
+        setFiles(f);
+        // 默认展开含改动文件的顶层目录（其余折叠）
+        const changed = new Set<string>();
+        for (const x of f) {
+          if (x.untracked || x.added > 0 || x.removed > 0) {
+            const idx = x.path.indexOf("/");
+            if (idx > 0) changed.add(x.path.slice(0, idx));
+          }
         }
+        setCollapsed(Object.fromEntries([...changed].map((k) => [k, false])));
+      });
+    load(root).catch(() => {
+      const fail = (e: unknown) => {
+        setFiles([]);
+        setContent({ content: `文件树加载失败：${(e as Error).message}` });
+      };
+      if (root !== rawRoot) {
+        load(rawRoot).catch(fail);
+      } else {
+        fail(new Error("root 无效"));
       }
-      setCollapsed(Object.fromEntries([...changed].map((k) => [k, false])));
-    }).catch((e) => {
-      setFiles([]);
-      setContent({ content: `文件树加载失败：${(e as Error).message}` });
     });
   }, [root]);
 

@@ -2237,12 +2237,19 @@ const pendingQuestions = new Map<string, { sessionId: string; resolve: (answer: 
       ".ttf": "font/ttf",
       ".map": "application/json; charset=utf-8",
     };
-    // v3.1：令牌注入（index.html 唯一载体）——前端 apiFetch 读取 window.__INFU_TOKEN__
-    const injectToken = (html: string): string => {
-      if (!localToken) return html;
-      const script = `<script>window.__INFU_TOKEN__="${localToken}";</script>`;
-      return html.includes("</head>") ? html.replace("</head>", script + "</head>") : script + html;
-    };
+      // v3.1：令牌注入（index.html 唯一载体）——前端 apiFetch 读取 window.__INFU_TOKEN__
+      // v4.0 补 1（CSP 回归修复）：CSP `script-src 'self'` 会拦截**内联脚本**——令牌注入
+      // 脚本本身就是内联的（v4.0 审计批加 CSP 头后，生产页面重启即全部 API 401「缺少
+      // 本地令牌」）。修复：每次响应生成随机 nonce——CSP 头带 `'nonce-<n>'`、注入脚本带
+      // `nonce="<n>"`，强策略与令牌注入共存（主题恢复脚本已外置 /theme-init.js 走 'self'）
+      const injectToken = (html: string, nonce: string): string => {
+        if (!localToken) return html;
+        const script = `<script nonce="${nonce}">window.__INFU_TOKEN__="${localToken}";</script>`;
+        return html.includes("</head>") ? html.replace("</head>", script + "</head>") : script + html;
+      };
+      /** CSP（index.html 带响应级 nonce 放行令牌脚本；其余资源无内联脚本，严格策略） */
+      const buildCsp = (withNonce: boolean, nonce = "") =>
+        `default-src 'self'; script-src 'self'${withNonce ? ` 'nonce-${nonce}'` : ""}; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'`;
     app.get("*", async (c) => {
       const url = new URL(c.req.url);
       if (c.req.method !== "GET" && c.req.method !== "HEAD") return c.notFound();
@@ -2261,15 +2268,17 @@ const pendingQuestions = new Map<string, { sessionId: string; resolve: (answer: 
           // v3.5 审计修复：令牌只注入 index.html（注释声称"唯一载体"但实现注入所有
           // .html——未来任何多页 .html 都会带上可读令牌；窄化注入面）
           const isIndexHtml = ext === ".html" && path.basename(filePath) === "index.html";
-          const injected = isIndexHtml ? Buffer.from(injectToken(body.toString("utf-8")), "utf-8") : body;
+          const nonce = randomUUID().replace(/-/g, "");
+          const injected = isIndexHtml ? Buffer.from(injectToken(body.toString("utf-8"), nonce), "utf-8") : body;
           return c.body(injected, 200, {
             "content-type": MIME[ext] ?? "application/octet-stream",
             "cache-control": cacheable ? "public, max-age=31536000, immutable" : "no-cache",
             // v4.0 审计修复（M12）：安全响应头——X-Frame-Options 防 iframe 点击劫持
             // （webview 内恶意页 iframe 嵌入 InFu UI 的路径）、CSP frame-ancestors 同防、
             // nosniff 防 MIME 嗅探、no-referrer 防 URL 泄漏（token 在 query 的场景）
+            // v4.0 补 1：index.html 的 CSP 带响应级 nonce（放行令牌注入脚本）
             "x-frame-options": "DENY",
-            "content-security-policy": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'",
+            "content-security-policy": buildCsp(isIndexHtml, nonce),
             "x-content-type-options": "nosniff",
             "referrer-policy": "no-referrer",
           });
@@ -2279,10 +2288,11 @@ const pendingQuestions = new Map<string, { sessionId: string; resolve: (answer: 
       if (!pathname.includes(".")) {
         try {
           const html = readFileSync(join(opts.staticDir!, "index.html"));
-          return c.html(injectToken(html.toString("utf-8")), 200, {
+          const nonce = randomUUID().replace(/-/g, "");
+          return c.html(injectToken(html.toString("utf-8"), nonce), 200, {
             "cache-control": "no-cache",
             "x-frame-options": "DENY",
-            "content-security-policy": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'",
+            "content-security-policy": buildCsp(true, nonce),
             "x-content-type-options": "nosniff",
             "referrer-policy": "no-referrer",
           });

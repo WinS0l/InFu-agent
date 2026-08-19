@@ -189,6 +189,8 @@ export interface DelegationContext {
   /** 全量工具注册表（白名单解析；不含 MCP/插件——子智能体 v1 仅内置工具） */
   tools: Record<string, ToolDef>;
   root: string;
+  /** Project identity remains stable when the execution root is a worktree. */
+  projectRoot?: string;
   emit: (e: AgentEvent) => void;
   requestApproval: ToolContext["requestApproval"];
   modelConfig?: RuntimeModelInfo;
@@ -393,6 +395,7 @@ export async function runSubagent(spec: SubagentSpec, ctx: DelegationContext): P
       prompt: spec.prompt,
       tools: p.tools,
       root: p.subRoot,
+      projectRoot: ctx.projectRoot,
       emit: p.taggedEmit,
       // 内部工具权限（v2.5 返工）：allow（默认）= 父批准委派后继承授权（requireExplicit 安全红线仍转发）；
       // ask = 内部工具仍逐条走父级审批（agent 文件 permission: ask）
@@ -539,6 +542,7 @@ export function startBackgroundSubagent(spec: SubagentSpec, ctx: DelegationConte
         prompt: spec.prompt,
         tools: p.tools,
         root: p.subRoot,
+        projectRoot: ctx.projectRoot,
         emit: p.taggedEmit,
         requestApproval: p.agentDef?.permission === "ask" ? ctx.requestApproval : makeSubagentApproval(ctx),
         maxSteps: p.maxSteps,

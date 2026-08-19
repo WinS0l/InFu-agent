@@ -97,6 +97,13 @@
 - **修复**——追踪面板的 `selected` 是 session-local seq，切换会话时若保留同一数值可能错误命中新会话事件；在 `activeSessionId` 改变时显式清空选中详情。
 - **验证**——web tsc + vite build 通过。
 
+### ✅ v6.19 审计高优先级修复批（2026-08-19）
+- **命令/出站安全**——DANGEROUS 收口 `del/s/q`/`rd/s/q`/`erase/s` 无空格开关、`cmd /c` 内层命令、`node -e"..."`/`python -c"..."` 无空格载荷；egress 检测先规范 cmd caret 转义与带引号可执行名，`c^url`/`"curl"` 不再绕过。
+- **凭据与检索**——受保护路径补 Kubernetes/Azure、home `.config/.m2/.gradle`、`.pypirc/.gitconfig`；semantic_search 不论索引是否存在均执行 isProtectedPath 过滤。
+- **预算/工作树/恢复**——跨阶段剩余预算在 `remaining <= 0` 时传 -1 哨兵；计划裁判与自动提炼 usage 纳入真实账本；执行 root 与项目归属 root 分离，worktree 下项目记忆/沉淀/清理回归主项目，主/同步子 Agent/后台子 Agent 全链路继承；recovery 服务启动全局 TTL 清扫并限制单条副本 512MB。
+- **桌面/Rust**——guest 补 `will-frame-navigate` 同策略门禁；Rust abort_run 在 registry 锁内 terminate，消除 Job 句柄关闭/复用 TOCTOU。
+- **验证**——根 build、shared/agent/desktop tsc、web vite build、cargo check、lint 0 error、全量 **51/51、1554 断言 0 失败**。
+
 ### ✅ v5.0 产品增强批（2026-08-18，审计建议清单全量落地——A1-A5/B1/B2/B4/C1-C4/A4/D3）
 - **A1 页面级 E2E 套件（补测试盲区）**——新 `tests/e2e-prod.test.ts`：真实服务器（staticDir=web/dist）+ playwright chromium 加载生产页面——API 层断言 CSP nonce 与注入脚本匹配 / 无令牌 401 / 带令牌 200 / 主题脚本与资源可加载；浏览器层断言页面零 401（CSP 回归的直接判据——v4.0 补 1 那类回归从此被自动拦截）/ 零 CSP 违规 / React 真实渲染 / theme-init.js 在 CSP 下执行（阻断 bundle 两阶段）/ 服务端配置主题管线。12 断言，入 npm test（43→44 套件）；startServer 补返回 httpServer（可 close）
 - **A2 命令审计 UI**——GET /api/audit（commands.log 尾段解析：时间/结果/cwd/命令/详情/沙箱档位，倒序 + 搜索 + 仅失败过滤）+ 设置「数据与统计 → 命令审计」Tab（AuditPane，过期响应守卫）

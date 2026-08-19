@@ -30,6 +30,13 @@ export interface RefineOptions {
   emit: (e: AgentEvent) => void;
 }
 
+export interface RefineUsage {
+  cacheHit: number;
+  cacheMiss: number;
+  promptTokens: number;
+  completionTokens: number;
+}
+
 const ALLOWED_TOPICS = new Set(["conventions", "lessons", "preferences"]);
 
 /** 解析提炼输出（容忍围栏/前后噪声），返回 [{topic, entry}]；解析失败返回 []（导出供测试） */
@@ -54,7 +61,7 @@ export function parseEntries(raw: string): Array<{ topic: string; entry: string 
 /**
  * 任务完成后自动提炼项目记忆。失败/未配置静默返回。
  */
-export async function refineMemory(opts: RefineOptions): Promise<void> {
+export async function refineMemory(opts: RefineOptions): Promise<RefineUsage | undefined> {
   const { root, prompt, result, emit } = opts;
   if (result.toolCount <= 0) return; // 寒暄/纯文本回复不提炼
   const cfg = loadConfig();
@@ -77,6 +84,7 @@ export async function refineMemory(opts: RefineOptions): Promise<void> {
   const taskHint = prompt.replace(/\s+/g, " ").slice(0, 200);
   const resultHint = result.text.replace(/\s+/g, " ").slice(0, 2000);
   const out: string[] = [];
+  const usage: RefineUsage = { cacheHit: 0, cacheMiss: 0, promptTokens: 0, completionTokens: 0 };
   for await (const delta of streamChatWithFailover({
     chain,
     timeoutMs: 60000,
@@ -92,13 +100,30 @@ export async function refineMemory(opts: RefineOptions): Promise<void> {
       { role: "user", content: `任务指令：${taskHint}\n\n任务结果：${resultHint}` },
     ],
   })) {
-    if (delta.text) out.push(delta.text);
+      if (delta.text) out.push(delta.text);
+      if (delta.usage) {
+        usage.cacheHit += delta.usage.cacheHit;
+        usage.cacheMiss += delta.usage.cacheMiss;
+        usage.promptTokens += delta.usage.promptTokens;
+        usage.completionTokens += delta.usage.completionTokens;
+      }
   }
 
   const entries = parseEntries(out.join(""));
-  if (!entries.length) return;
+  if (usage.promptTokens || usage.completionTokens) {
+    emit({
+      type: "model-call",
+      model: rt.model,
+      promptTokens: usage.promptTokens,
+      completionTokens: usage.completionTokens,
+      cacheHit: usage.cacheHit,
+      cacheMiss: usage.cacheMiss,
+    });
+  }
+  if (!entries.length) return usage;
   for (const e of entries) {
     const w = writeMemory("project", e.topic, `- ${e.entry}`, "append", root);
     if (w.ok) emit({ type: "memory-sediment", path: `${root}/.infu/memory/${e.topic}.md`, summary: e.entry });
   }
+  return usage;
 }

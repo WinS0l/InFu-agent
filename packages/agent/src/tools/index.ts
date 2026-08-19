@@ -710,6 +710,7 @@ export const TOOLS: Record<string, ToolDef> = {
         const delegationCtx = {
           tools: TOOLS,
           root: ctx.root,
+          projectRoot: ctx.projectRoot,
           emit: ctx.emit,
           requestApproval: ctx.requestApproval,
           modelConfig: ctx.modelConfig,
@@ -1160,11 +1161,12 @@ export const TOOLS: Record<string, ToolDef> = {
     async execute(args, ctx) {
       const scope = (args.scope as "project" | "global" | undefined) ?? "project";
       const topic = typeof args.topic === "string" ? args.topic : undefined;
+      const memoryRoot = ctx.projectRoot ?? ctx.root;
       // v3 自由会话（默认会话根目录只读容器）只能读全局记忆
-      if (scope === "project" && isReadOnlySessionRoot(ctx.root)) {
+      if (scope === "project" && isReadOnlySessionRoot(memoryRoot)) {
         return "错误：自由会话只能读取全局记忆（默认会话根目录为只读容器）——请用 scope=global，或先在侧栏选择/创建项目";
       }
-      const { text } = readMemory(scope, topic, ctx.root);
+      const { text } = readMemory(scope, topic, memoryRoot);
       return clip(text, MAX_OUTPUT);
     },
   },
@@ -1187,12 +1189,13 @@ export const TOOLS: Record<string, ToolDef> = {
       const topic = String(args.topic ?? "").trim();
       const content = String(args.content ?? "");
       const mode = (args.mode as "append" | "replace" | undefined) ?? "append";
+      const memoryRoot = ctx.projectRoot ?? ctx.root;
       // 写保护精确化：全局记忆位于 ~/.infu（受保护）——本工具是唯一合法写入通道；
       // 非法 topic（路径穿越/后缀逃逸）直接拒绝
       const err = validateTopic(topic);
       if (err) return `错误：${err}`;
       // v3 自由会话（默认会话根目录只读容器）不能写项目记忆
-      if (scope === "project" && isReadOnlySessionRoot(ctx.root)) {
+      if (scope === "project" && isReadOnlySessionRoot(memoryRoot)) {
         return "错误：自由会话不能写入项目记忆（默认会话根目录为只读容器）——请用 scope=global，或先在侧栏选择/创建项目";
       }
       const desc = `${mode === "replace" ? "覆盖" : "追加到"}${scope === "global" ? "全局" : "项目"}记忆 ${topic}.md：\n${content.slice(0, 200)}`;
@@ -1202,7 +1205,7 @@ export const TOOLS: Record<string, ToolDef> = {
       // 覆盖用户长期建立的约定。项目 append 保持 low（项目内正常沉淀，主流同款）
       const memRisk: RiskLevel = scope === "global" || mode === "replace" ? "medium" : "low";
       if (!(await guard(ctx, "memory_write", memRisk, desc))) return "用户拒绝：未写入";
-      const r = writeMemory(scope, topic, content, mode, ctx.root);
+      const r = writeMemory(scope, topic, content, mode, memoryRoot);
       return r.ok ? r.message : `错误：${r.message}`;
     },
   },
@@ -1290,9 +1293,10 @@ export const TOOLS: Record<string, ToolDef> = {
       if (!q.trim()) return "错误：query 必填";
       const max = (args.max_results as number | undefined) || 10;
       const idx = loadIndex(ctx.root);
-      const files = idx
-        ? idx.files.map((f) => path.resolve(ctx.root, f.file)).filter((f) => !isProtectedPath(f))
-        : walkFiles(ctx.root);
+      const files = (idx
+        ? idx.files.map((f) => path.resolve(ctx.root, f.file))
+        : walkFiles(ctx.root)
+      ).filter((f) => !isProtectedPath(f));
       const hits = semanticSearch(q, files, ctx.root, max);
       if (!hits.length) return `未找到与 "${q}" 相关的内容`;
       return `找到 ${hits.length} 处相关：\n` + hits.map((h) => `${h.file}:${h.line}: ${h.text}`).join("\n");

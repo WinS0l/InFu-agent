@@ -91,14 +91,17 @@ function escapeRe(s: string): string {
  * 如 `git push` 不受影响（无 curl 等工具名），`echo curl` 会命中（保守）。
  */
 export function detectEgress(command: string): string | null {
+  // cmd.exe permits caret escaping (`c^url`) and quoted executable names.
+  // Normalize only those shell spellings before applying conservative detection.
+  const normalized = command.replace(/\^(.)/g, "$1").replace(/["']/g, "");
   for (const tool of EGRESS_TOOLS) {
     if (tool === "openssl") continue; // 仅组合模式（本地密钥操作不应误伤）
     // 整词 + 排除工具变体前缀（ssh-keygen/ssh-add 等）：词尾不能紧跟连字符
     const re = new RegExp(`(^|[\\s&|;>([])${escapeRe(tool)}\\b(?!-)`, "i");
-    if (re.test(command)) return tool;
+    if (re.test(normalized)) return tool;
   }
   for (const p of EGRESS_PATTERNS) {
-    if (p.test(command)) return `模式 ${p.source.slice(0, 60)}`;
+    if (p.test(normalized)) return `模式 ${p.source.slice(0, 60)}`;
   }
   return null;
 }

@@ -93,6 +93,8 @@ export interface OrchestratedRunOptions {
   roleThinking?: Partial<Record<PhaseId, number>>;
   /** 项目根目录（工具操作边界） */
   root: string;
+  /** 项目归属根目录（worktree 执行时保存项目记忆、历史并清理 worktree） */
+  projectRoot?: string;
   emit: (event: AgentEvent) => void;
   requestApproval: (description: string, risk: RiskLevel) => Promise<boolean>;
   maxSteps?: number;
@@ -162,7 +164,7 @@ const ABORTED_MSG = "任务已停止（用户中止）";
  */
 export async function runOrchestratedTask(opts: OrchestratedRunOptions): Promise<OrchestratedResult> {
   const {
-    modelConfig, fallbackModelConfigs, roleModelConfigs, initialMessages, prompt, root, emit, requestApproval,
+    modelConfig, fallbackModelConfigs, roleModelConfigs, initialMessages, prompt, root, projectRoot = root, emit, requestApproval,
     maxSteps, abortSignal, planApproval = true, orchestrate = false,
     confirmPlan, templateId, thinkingLevel, roleThinking, executorTools, startPhase, resumePlanText,
     hooks, skillsPrompt, agentsPrompt, infuPrompt, memoryPrompt, scopeRules, askUser,
@@ -191,8 +193,11 @@ const usageAgg = { cacheHit: 0, cacheMiss: 0, promptTokens: 0, completionTokens:
   // v6.0（S4）+ 审计修复：跨阶段预算扣减——每阶段下发「剩余预算」，阶段内用尽即停。
   // 已耗尽时返回 -1 哨兵（loop 守卫对负值立即停）——原 Math.max(0, 剩余) 使剩余 0
   // 时 runAgent 判「预算未启用 = 不限制」，任一阶段耗尽后后续阶段无限额跑模型。
-  const remainBudget = () =>
-    taskTokenBudget > 0 ? Math.max(-1, taskTokenBudget - (usageAgg.promptTokens + usageAgg.completionTokens)) : 0;
+  const remainBudget = () => {
+    if (taskTokenBudget <= 0) return 0;
+    const remaining = taskTokenBudget - (usageAgg.promptTokens + usageAgg.completionTokens);
+    return remaining <= 0 ? -1 : remaining;
+  };
   // 累计真实用量已 ≥ 预算（编排层据此跳过后续阶段——Executor 摘要不该带着预算用尽
   // 消息白跑一轮 Reviewer，autoRefine 也不该在预算外发起模型调用）
   const budgetExhausted = () =>
@@ -244,6 +249,7 @@ const usageAgg = { cacheHit: 0, cacheMiss: 0, promptTokens: 0, completionTokens:
       tools: executorTools ? withMcpTools(TOOLS, executorTools) : TOOLS,
       hooks,
       root,
+      projectRoot,
       emit,
       requestApproval,
       maxSteps: execMaxSteps,
@@ -264,7 +270,6 @@ const usageAgg = { cacheHit: 0, cacheMiss: 0, promptTokens: 0, completionTokens:
     const worked = exec.toolCount > 0;
     // 真实干活（调过工具）才任务沉淀；纯文本回复直接 done（对齐 v2.6.2 寒暄短路语义）
     accUsage(exec);
-    emit({ type: "done", text: exec.text, toolCount: exec.toolCount, steps: exec.steps, usage: usageAgg });
     let commitNote = "";
     if (worked) {
       // v3.5：自动 git 提交（可选）+ 记忆自动提炼（默认开，失败静默）
@@ -272,13 +277,13 @@ const usageAgg = { cacheHit: 0, cacheMiss: 0, promptTokens: 0, completionTokens:
       // 审计修复：预算耗尽后 autoRefine 仍发起无限额模型调用（streamChatWithFailover
       // 完整调用一次、不计入 usageAgg）——预算用尽路径跳过提炼
       if (!budgetExhausted()) {
-        try { await tryAutoRefine(root, prompt, exec, emit); } catch { /* 忽略 */ }
+        try { accUsage({ usage: await tryAutoRefine(projectRoot, prompt, exec, emit) }); } catch { /* 忽略 */ }
       }
     }
     if (worked && loadConfig()?.memory?.autoSediment !== false) {
       try {
         const sed = sedimentTask({
-          root,
+          root: projectRoot,
           prompt,
           result: exec,
           reviewText: "",
@@ -290,7 +295,10 @@ const usageAgg = { cacheHit: 0, cacheMiss: 0, promptTokens: 0, completionTokens:
         emit({ type: "error", message: `任务沉淀失败（不影响交付）：${(e as Error).message}` });
       }
     }
-    return { text: exec.text + commitNote, steps: exec.steps, toolCount: exec.toolCount, approvals: exec.approvals, toolLogs: exec.toolLogs, planText: "", reviewText: "" };
+    try { await discardCleanWorktrees(projectRoot); } catch { /* 忽略 */ }
+    const finalText = exec.text + commitNote;
+    emit({ type: "done", text: finalText, toolCount: exec.toolCount, steps: exec.steps, usage: usageAgg });
+    return { text: finalText, steps: exec.steps, toolCount: exec.toolCount, approvals: exec.approvals, toolLogs: exec.toolLogs, planText: "", reviewText: "", usage: usageAgg };
   }
 
   // ① Planner：只读规划（v2.2 按角色路由模型；v2.3 阶段级续跑 startPhase=executor
@@ -314,6 +322,7 @@ const usageAgg = { cacheHit: 0, cacheMiss: 0, promptTokens: 0, completionTokens:
       prompt: `${attachText(prompt)}\n\n请先分析项目并制定执行计划，不要修改任何文件。`,
       tools: getReadOnlyTools(),
       root,
+      projectRoot,
       emit,
       requestApproval,
       maxSteps: 12,
@@ -376,6 +385,15 @@ const usageAgg = { cacheHit: 0, cacheMiss: 0, promptTokens: 0, completionTokens:
           planText,
           signal: abortSignal,
         });
+        if (judged.usage) {
+          usageAgg.cacheHit += judged.usage.cacheHit;
+          usageAgg.cacheMiss += judged.usage.cacheMiss;
+          usageAgg.promptTokens += judged.usage.promptTokens;
+          usageAgg.completionTokens += judged.usage.completionTokens;
+          if (judged.usage.promptTokens || judged.usage.completionTokens) {
+            emit({ type: "model-call", model: feedbackCandidates[0]?.model ?? modelConfig.model, ...judged.usage });
+          }
+        }
 
         if (judged.action === "abort") {
           // 用户要求暂缓/停止：任务中止（不执行、不审查），进度与计划保留可继续
@@ -396,6 +414,7 @@ const usageAgg = { cacheHit: 0, cacheMiss: 0, promptTokens: 0, completionTokens:
             prompt: `${attachText(prompt)}\n\n【原计划】（用户要求修改）\n${planText}\n\n【用户修改意见】\n${judged.instruction ?? "请调整计划"}\n\n请按修改意见重新制定执行计划，不要修改任何文件。`,
             tools: getReadOnlyTools(),
             root,
+            projectRoot,
             emit,
             requestApproval,
             maxSteps: 12,
@@ -453,6 +472,7 @@ const usageAgg = { cacheHit: 0, cacheMiss: 0, promptTokens: 0, completionTokens:
     tools: executorTools ? withMcpTools(TOOLS, executorTools) : TOOLS,
     hooks,
     root,
+    projectRoot,
     emit,
     requestApproval,
     maxSteps: execMaxSteps,
@@ -485,6 +505,7 @@ const usageAgg = { cacheHit: 0, cacheMiss: 0, promptTokens: 0, completionTokens:
       prompt: `请审查以下开发任务的执行结果：\n\n【任务】${attachText(prompt)}\n\n【执行摘要】\n${exec.text.slice(0, 4000)}\n\n请用 git_diff / read_file / run_test 等工具核实改动与测试结果，然后输出审查意见。不要修改任何文件。`,
       tools: getReviewerTools(),
       root,
+      projectRoot,
       emit,
       requestApproval,
       maxSteps: 10,
@@ -503,15 +524,13 @@ const usageAgg = { cacheHit: 0, cacheMiss: 0, promptTokens: 0, completionTokens:
   }
 
   // ⑤ 收尾（v3.1 交付报告已移除）：任务完成事件 + 自动沉淀（L4 项目历史）
-  emit({ type: "done", text: exec.text, toolCount: exec.toolCount, steps: exec.steps, usage: usageAgg });
-
   // v3.5：自动 git 提交（可选）+ 记忆自动提炼（默认开，失败静默）
   let commitNote = "";
   if (exec.text !== ABORTED_MSG && exec.toolCount > 0) {
     try { commitNote = await tryAutoCommit(root, prompt); } catch { /* 忽略 */ }
     // 审计修复：预算耗尽后 autoRefine 仍发起无限额模型调用——跳过
     if (!budgetExhausted()) {
-      try { await tryAutoRefine(root, prompt, exec, emit); } catch { /* 忽略 */ }
+      try { accUsage({ usage: await tryAutoRefine(projectRoot, prompt, exec, emit) }); } catch { /* 忽略 */ }
     }
   }
 
@@ -519,7 +538,7 @@ const usageAgg = { cacheHit: 0, cacheMiss: 0, promptTokens: 0, completionTokens:
   // server/cli 创建、仅用户手动 merge/discard——无改动任务永久残留）。有改动的保留
   // （用户可能 review / merge）；失败静默不影响交付。
   try {
-    await discardCleanWorktrees(root);
+    await discardCleanWorktrees(projectRoot);
   } catch { /* 忽略 */ }
 
   // v2.6 任务自动沉淀（L4 项目历史）：结构化元数据归档 .infu/history/YYYY-MM-DD.md。
@@ -528,7 +547,7 @@ const usageAgg = { cacheHit: 0, cacheMiss: 0, promptTokens: 0, completionTokens:
   try {
     if (loadConfig()?.memory?.autoSediment === false) throw new Error("__skip_sediment__");
     const sed = sedimentTask({
-      root,
+      root: projectRoot,
       prompt,
       result: exec,
       reviewText,
@@ -542,7 +561,9 @@ const usageAgg = { cacheHit: 0, cacheMiss: 0, promptTokens: 0, completionTokens:
     }
   }
 
-  return { text: exec.text + commitNote, steps: exec.steps, toolCount: exec.toolCount, approvals: exec.approvals, toolLogs: exec.toolLogs, planText, reviewText };
+  const finalText = exec.text + commitNote;
+  emit({ type: "done", text: finalText, toolCount: exec.toolCount, steps: exec.steps, usage: usageAgg });
+  return { text: finalText, steps: exec.steps, toolCount: exec.toolCount, approvals: exec.approvals, toolLogs: exec.toolLogs, planText, reviewText, usage: usageAgg };
 }
 
 const execFileAsync = promisify(execFile);
@@ -577,12 +598,12 @@ export async function tryAutoCommit(root: string, prompt: string, enabled = load
  * 补齐「Agent 不主动写 memory」的缺口（对齐 Codex 会话后自动总结）。
  * 只读校验：仅 Executor 模型配置（避免额外角色模型缺失）；失败静默。
  */
-async function tryAutoRefine(root: string, prompt: string, result: RunResult, emit: (e: AgentEvent) => void): Promise<void> {
+async function tryAutoRefine(root: string, prompt: string, result: RunResult, emit: (e: AgentEvent) => void): Promise<RunResult["usage"] | undefined> {
   try {
     const cfg = loadConfig();
     if (cfg?.memory?.autoRefine === false) return;
     const { refineMemory } = await import("../memory/refine.js");
-    await refineMemory({ root, prompt, result, emit });
+    return await refineMemory({ root, prompt, result, emit });
   } catch { /* 提炼失败静默 */ }
 }
 

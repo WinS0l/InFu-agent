@@ -19,7 +19,7 @@
  */
 
 export const DANGEROUS =
-  /(^|[^a-z])(rm|rmdir|rd|del|erase)\s+[^\n]*?((-\S*[rfvq]\S*)|(--recursive|--force|--silent|--quiet)|\/[sqfr]+(\s+\/[sqfr]+)*)|\b(Remove-Item|ri)\b|\b(format\s+|mkfs|dd\s+if=)|\bgit clean\b[^\n]*?(-f|--force)/i;
+  /(^|[^a-z])(rm|rmdir|rd|del|erase)(?:\s+|(?=\/))[^\n]*?((-\S*[rfvq]\S*)|(--recursive|--force|--silent|--quiet)|\/[sqfr]+(?:\s*\/[sqfr]+)*)|\b(Remove-Item|ri)\b|\b(format\s+|mkfs|dd\s+if=)|\bgit clean\b[^\n]*?(-f|--force)/i;
 
 /**
  * 审计修复：语言运行时绕过——DANGEROUS 只匹配 shell 级语法，
@@ -29,7 +29,7 @@ export const DANGEROUS =
  * 识别解释器内嵌执行（-e/-c/-Command/-r 等）后扫描破坏性调用载荷；
  * `-EncodedCommand`（Base64）无法静态验证载荷 → 一律高危。
  */
-const INTERPRETER_RUN = /\b(node|nodejs|python|python3|py|perl|ruby|php|powershell|pwsh|sh|bash|cmd|deno|bun)\s+(-e|-c|-Command|-command|-r|-R|-EncodedCommand|-enc)\s+/i;
+const INTERPRETER_RUN = /\b(node|nodejs|python|python3|py|perl|ruby|php|powershell|pwsh|sh|bash|cmd|deno|bun)\s+(-e|-c|\/c|-Command|-command|-r|-R|-EncodedCommand|-enc)\s*/i;
 const DESTRUCTIVE_CALLS =
   /rmSync\s*\(|rmdirSync\s*\(|promises?\.rm\s*\(|removeSync\s*\(|unlinkSync\s*\(|shutil\.rmtree\s*\(|os\.remove\s*\(|Remove-Item|Remove-Folder|rm\s+-rf|del\s+\/s|rd\s+\/s|drop\s+(table|database)/i;
 

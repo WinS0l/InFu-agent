@@ -73,6 +73,10 @@ const rdSsh = await TOOLS.read_file.execute({ path: ".ssh/config" }, homeCtx);
 check("read_file 拒绝敏感路径（.ssh）", rdSsh.includes("受保护"), rdSsh);
 const rdCfg = await TOOLS.read_file.execute({ path: join(resolveDataDir(), "config.json") }, homeCtx);
 check("read_file 拒绝数据目录配置（config.json）", rdCfg.includes("受保护"), rdCfg);
+const rdKube = await TOOLS.read_file.execute({ path: ".kube/config" }, homeCtx);
+check("read_file 拒绝 Kubernetes 凭据", rdKube.includes("受保护"), rdKube);
+const rdGitConfig = await TOOLS.read_file.execute({ path: ".gitconfig" }, homeCtx);
+check("read_file 拒绝 git 全局配置", rdGitConfig.includes("受保护"), rdGitConfig);
 // v4.0 审计修复（H2）：批量通道 read_files 与单文件同款防护（此前漏 isProtectedPath——
 // 同一会话换工具名即可绕过，整批读出 SSH 私钥/凭据）
 const rdFilesSsh = await TOOLS.read_files.execute({ paths: [".ssh/config", "x.txt"] }, homeCtx);
@@ -87,6 +91,10 @@ check("附件白名单豁免（extraReadDirs）", rdAttach.includes("受保护")
 console.log("\n▶ search_code");
 const sr = await run("search_code", { pattern: "TODO" });
 check("搜索命中", /src[\\/]app\.ts:2/.test(sr), sr);
+mkdirSync(join(proj, ".SSH"), { recursive: true });
+writeFileSync(join(proj, ".SSH", "id_rsa"), "PRIVATE-SEMANTIC-SECRET");
+const semanticProtected = await run("semantic_search", { query: "PRIVATE-SEMANTIC-SECRET" });
+check("semantic_search 无索引分支过滤 .SSH 变体", !semanticProtected.toLowerCase().includes(".ssh"), semanticProtected);
 
 // 5. write_file + 越界防护
 console.log("\n▶ write_file");

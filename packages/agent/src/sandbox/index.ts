@@ -69,6 +69,8 @@ const PROTECTED_PATTERNS: Array<{ name: string; match: (abs: string) => boolean 
     },
   },
   { name: "AWS 凭据目录", match: (a) => /(^|[\\/])\.aws([\\/]|$)/.test(a) },
+  { name: "Kubernetes 凭据目录", match: (a) => /(^|[\\/])\.kube([\\/]|$)/.test(a) },
+  { name: "Azure 凭据目录", match: (a) => /(^|[\\/])\.azure([\\/]|$)/.test(a) },
   { name: "GnuPG 密钥目录", match: (a) => /(^|[\\/])\.gnupg([\\/]|$)/.test(a) },
   { name: "Docker 配置", match: (a) => /(^|[\\/])\.docker([\\/]|$)/.test(a) },
   // v4.0 审计修复（M15）：home 凭据文件——.npmrc 含 registry _authToken、.git-credentials
@@ -80,7 +82,15 @@ const PROTECTED_PATTERNS: Array<{ name: string; match: (abs: string) => boolean 
     match: (a) => {
       const home = (process.platform === "win32" ? os.homedir().toLowerCase() : os.homedir()).replace(/[\\/]+$/, "");
       if (a !== home && !a.startsWith(home + path.sep)) return false;
-      return /(^|[\\/])(\.npmrc|\.git-credentials|\.netrc)$/.test(a);
+      return /(^|[\\/])(\.npmrc|\.git-credentials|\.netrc|\.pypirc|\.gitconfig)$/.test(a);
+    },
+  },
+  {
+    name: "home 工具凭据目录",
+    match: (a) => {
+      const home = (process.platform === "win32" ? os.homedir().toLowerCase() : os.homedir()).replace(/[\\/]+$/, "");
+      if (a !== home && !a.startsWith(home + path.sep)) return false;
+      return /(^|[\\/])\.(config|m2|gradle)([\\/]|$)/.test(a);
     },
   },
   { name: "浏览器凭据", match: (a) => /(^|[\\/])(AppData|Application Data)([\\/])/.test(a) && /(Login Data|Cookies|Local State)/i.test(a) },

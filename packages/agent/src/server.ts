@@ -28,7 +28,7 @@ import { resolveDataDir, defaultDataDir, migrateDataDir } from "./data-dir.js";
 import { autoNameSession } from "./session-naming.js";
 import { parseInfuConfig, approvalPolicySchema, sandboxConfigSchema, generalConfigSchema, appearanceConfigSchema, browserConfigSchema, memoryConfigSchema } from "@infu/shared";
 import { TOOLS, clearObservedFiles } from "./tools/index.js";
-import { clearRecovery } from "./tools/recovery.js";
+import { clearRecovery, cleanupRecovery } from "./tools/recovery.js";
 import { clearApprovalMemory, clearSessionBypass, setSessionBypass, isSessionBypassed } from "./approval/cache.js";
 import { setEgressAllow, clearEgressAllow, isEgressAllowed, egressAllowRemaining } from "./egress-allow.js";
 import { isPathInside } from "./tools/util.js";
@@ -1552,6 +1552,7 @@ const pendingQuestions = new Map<string, { sessionId: string; resolve: (answer: 
             thinkingLevel,
             prompt,
             root: execRoot,
+            projectRoot: root,
             emit,
             requestApproval,
             abortSignal: controller.signal,
@@ -2531,6 +2532,7 @@ export function startServer(opts: ServerOptions = {}) {
   } catch {
     /* DB 未就绪忽略 */
   }
+  try { cleanupRecovery(); } catch { /* recovery 目录未就绪忽略 */ }
   // v3.5 常规设置：自动归档旧会话（general.autoArchive + archiveRetentionDays，默认关/7 天）
   // 启动时执行一次——超期未活动的非归档会话移入归档（不删除，侧栏「归档」可恢复）
   try {

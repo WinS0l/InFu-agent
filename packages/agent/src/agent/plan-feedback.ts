@@ -21,6 +21,8 @@ export interface PlanFeedbackResult {
   action: PlanFeedbackAction;
   /** execute 时的附加指示 / revise 时的修改意见 */
   instruction?: string;
+  /** Intent judge API usage, retained for the task budget accounting. */
+  usage?: { cacheHit: number; cacheMiss: number; promptTokens: number; completionTokens: number };
 }
 
 /** 判断提示词（要求输出单行 JSON） */
@@ -56,6 +58,7 @@ export async function interpretPlanFeedback(opts: {
   try {
     const chain = new ModelChain(candidates);
     const out: string[] = [];
+    const usage = { cacheHit: 0, cacheMiss: 0, promptTokens: 0, completionTokens: 0 };
     for await (const delta of streamChatWithFailover({
       chain,
       messages: [
@@ -71,6 +74,12 @@ export async function interpretPlanFeedback(opts: {
       retry: { maxAttempts: 2, baseDelayMs: 500 },
     })) {
       if (delta.text) out.push(delta.text);
+      if (delta.usage) {
+        usage.cacheHit += delta.usage.cacheHit;
+        usage.cacheMiss += delta.usage.cacheMiss;
+        usage.promptTokens += delta.usage.promptTokens;
+        usage.completionTokens += delta.usage.completionTokens;
+      }
     }
     const raw = out.join("").trim();
     // 提取 JSON（模型可能带 ```json 围栏或前后废话）
@@ -81,9 +90,9 @@ export async function interpretPlanFeedback(opts: {
       const instruction = typeof parsed.instruction === "string" && parsed.instruction.trim()
         ? parsed.instruction.trim()
         : undefined;
-      return { action, instruction };
+      return { action, instruction, usage };
     }
-    return fallback;
+    return { ...fallback, usage };
   } catch {
     return fallback; // 判断失败：保守执行
   }

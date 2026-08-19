@@ -480,6 +480,8 @@ export interface RuntimeModelInfo {
 export interface ToolContext {
   /** 项目根目录（工具操作边界） */
   root: string;
+  /** 项目归属根目录（worktree 执行时用于项目记忆/历史；缺省等同 root） */
+  projectRoot?: string;
   /** 当前工作目录 */
   cwd: string;
   /**

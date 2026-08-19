@@ -366,6 +366,11 @@ function registerBrowserWebContents(wc: WebContents) {
   wc.on("will-navigate", (e, url) => {
     if (!guardNav(url)) e.preventDefault();
   });
+  // Subframes do not trigger will-navigate. Apply the same URL policy so an
+  // untrusted page cannot use an iframe as a navigation side channel.
+  (wc as WebContents & { on(event: "will-frame-navigate", listener: (event: Electron.Event, url: string) => void): WebContents }).on("will-frame-navigate", (e: Electron.Event, url: string) => {
+    if (!guardNav(url)) e.preventDefault();
+  });
   wc.on("will-redirect", (e, url) => {
     if (!guardNav(url)) e.preventDefault();
   });

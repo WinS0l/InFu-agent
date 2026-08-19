@@ -6,6 +6,8 @@ import { resolveDataDir } from "../data-dir.js";
 import { isProtectedPath } from "../sandbox/index.js";
 
 export const RECOVERY_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+/** Keep recovery useful without allowing a single mutation to exhaust the data volume. */
+export const MAX_RECOVERY_ENTRY_BYTES = 512 * 1024 * 1024;
 
 interface RecoveryEntry {
   id: string;
@@ -49,10 +51,28 @@ export function cleanupRecovery(sessionId?: string, now = Date.now()): void {
   }
 }
 
+function recoverySize(abs: string, limit: number): number | null {
+  try {
+    const stat = fs.lstatSync(abs);
+    if (stat.isSymbolicLink()) return 0;
+    if (!stat.isDirectory()) return stat.size <= limit ? stat.size : null;
+    let total = 0;
+    for (const ent of fs.readdirSync(abs, { withFileTypes: true })) {
+      const child = recoverySize(path.join(abs, ent.name), limit - total);
+      if (child === null) return null;
+      total += child;
+    }
+    return total;
+  } catch {
+    return null;
+  }
+}
+
 /** Save an existing non-sensitive project path before it is overwritten or deleted. */
 export function backupForRecovery(root: string, abs: string, relativePath: string, sessionId?: string): string | null {
   if (!fs.existsSync(abs) || isProtectedPath(abs)) return null;
   cleanupRecovery(sessionId);
+  if (recoverySize(abs, MAX_RECOVERY_ENTRY_BYTES) === null) return null;
   const id = randomUUID();
   const target = entryPaths(sessionId, id);
   const now = Date.now();

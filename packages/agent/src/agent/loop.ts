@@ -62,6 +62,8 @@ export interface AgentRunOptions {
   tools: Record<string, ToolDef>;
   /** 项目根目录（工具操作边界） */
   root: string;
+  /** 项目归属根目录（worktree 执行时用于项目记忆/历史；缺省等同 root） */
+  projectRoot?: string;
   /** 事件推送（CLI/SSE） */
   emit: (event: AgentEvent) => void;
   /** 审批实现（CLI 自动批准；Web 挂 UI） */
@@ -386,7 +388,7 @@ export function isMutatingTool(name: string): boolean {
 
 export async function runAgent(opts: AgentRunOptions): Promise<RunResult> {
   const {
-    modelConfig, fallbackModelConfigs, system, prompt, tools, root,
+    modelConfig, fallbackModelConfigs, system, prompt, tools, root, projectRoot = root,
     emit, requestApproval, maxSteps = 30, abortSignal,
     phase, suppressFinal = false, initialMessages, thinkingLevel = 2, hooks,
     delegationDepth = 0, scopeRules, askUser, extraReadDirs, sessionId, agentChannel, sandboxMode,
@@ -404,6 +406,7 @@ export async function runAgent(opts: AgentRunOptions): Promise<RunResult> {
 
   const ctx: ToolContext = {
     root,
+    projectRoot,
     cwd: root,
     requestApproval,
     emit,

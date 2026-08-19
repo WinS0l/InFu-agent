@@ -244,7 +244,8 @@ export async function execLocal(
     return { ...r, sandbox: "off" };
   }
   if (mode === "restricted") {
-    const r = await runRestricted(command, cwd, timeoutMs, sanitizeEnv());
+    // 审计修复（H-2）：透传 AbortSignal——停止任务时 native abortRun 杀整树
+    const r = await runRestricted(command, cwd, timeoutMs, sanitizeEnv(), signal);
     if (r) return fmtRestricted(r);
     // native 异常 → 降级软沙箱（下面统一处理）
   }
@@ -264,11 +265,22 @@ export function sandboxTag(sandbox: string): string {
   }
 }
 
+/**
+ * 遍历/搜索/索引跳过清单（噪音目录 + 凭据目录）。
+ * 凭据目录（.ssh/.aws/.gnupg/.kube/.azure/.config/.gitconfig 等）：root=home 会话下
+ * search_code/semantic_search 曾可检索 ~/.ssh/id_rsa 等私钥正文进模型上下文
+ * （审计 H-1）——与 read_file 的 isProtectedPath 写保护语义对齐（项目内同名目录
+ * 亦无搜索价值，保守跳过）。执行层另有 isProtectedPath 兜底（防 .SSH 大小写变体）。
+ */
+export const SEARCH_SKIP_DIRS = new Set(["node_modules", ".git", "dist", "build", "out", ".next",
+  "coverage", "venv", ".venv", "__pycache__", ".cache", ".idea", ".vscode",
+  ".infu", ".infu-sandbox", "target", ".turbo", ".yarn", ".pnpm-store",
+  ".ssh", ".aws", ".gnupg", ".kube", ".azure", ".config", ".docker",
+  ".git-credentials", ".gitconfig", ".npmrc", ".netrc", ".m2", ".gradle", ".pypirc"]);
+
 /** 递归遍历（跳过常见噪音目录），返回匹配文件列表 */
 export function walkFiles(root: string, maxFiles = 2000): string[] {
-  const SKIP = new Set(["node_modules", ".git", "dist", "build", "out", ".next",
-    "coverage", "venv", ".venv", "__pycache__", ".cache", ".idea", ".vscode",
-    ".infu", ".infu-sandbox", "target", ".turbo", ".yarn", ".pnpm-store"]);
+  const SKIP = SEARCH_SKIP_DIRS;
   const results: string[] = [];
   const stack = [root];
   while (stack.length && results.length < maxFiles) {

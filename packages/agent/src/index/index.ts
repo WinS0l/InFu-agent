@@ -5,6 +5,8 @@ import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
 import { resolveDataDir } from "../data-dir.js";
+import { SEARCH_SKIP_DIRS } from "../tools/util.js";
+import { isProtectedPath } from "../sandbox/index.js";
 
 export interface IndexEntry { file: string; size: number; mtime: number; }
 export interface ProjectIndex { root: string; builtAt: number; files: IndexEntry[]; }
@@ -16,9 +18,8 @@ export interface IndexStatus {
   path: string | null;
 }
 
-const SKIP_DIRS = new Set(["node_modules", ".git", "dist", "build", "out", ".next",
-  "coverage", "venv", ".venv", "__pycache__", ".cache", ".idea", ".vscode",
-  ".infu", ".infu-sandbox", "target", ".turbo", ".yarn", ".pnpm-store"]);
+// 注意：勿在模块顶层拷贝 SEARCH_SKIP_DIRS——util.ts 与本文件存在间接循环依赖，
+// 顶层立即读取会 TDZ（ReferenceError）；改为函数体内引用（用时已初始化）
 
 function indexPath(root: string): string {
   const hash = crypto.createHash("sha1").update(path.resolve(root)).digest("hex").slice(0, 12);
@@ -40,8 +41,11 @@ export function collectFiles(root: string): IndexEntry[] {
       // v6.0 S6 加固：显式跳过符号链接/目录联接（junction）——防止外部目录被索引进项目清单
       if (ent.isSymbolicLink()) continue;
       if (ent.isDirectory()) {
-        if (!SKIP_DIRS.has(ent.name)) stack.push(full);
+        if (!SEARCH_SKIP_DIRS.has(ent.name)) stack.push(full);
       } else if (ent.isFile()) {
+        // 审计 H-1 兜底：SKIP 清单按目录名匹配大小写敏感（.SSH 变体可漏），
+        // isProtectedPath 已大小写归一——命中（.ssh/.aws/home 凭据文件等）一律不入索引
+        if (isProtectedPath(full)) continue;
         try {
           const st = fs.statSync(full);
           results.push({ file: path.relative(root, full).split(path.sep).join("/"), size: st.size, mtime: st.mtimeMs });

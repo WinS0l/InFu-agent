@@ -37,6 +37,7 @@ const SUITES: string[] = [
   "sandbox-config.test.ts",
   "settings-api.test.ts",
   "terminal.test.ts",
+  "smoke-core.test.ts",
   "plugin.test.ts",
   "subagent.test.ts",
   "memory.test.ts",

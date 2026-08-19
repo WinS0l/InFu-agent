@@ -8,15 +8,17 @@
  */
 
 import { auditCommand } from "../sandbox/index.js";
-import { DANGEROUS } from "../sandbox/dangerous.js";
+import { DANGEROUS, hasDestructiveRuntimePayload } from "../sandbox/dangerous.js";
 
 /** 高危命令正则（与 run_command 的 DANGEROUS 同一实现——v3.4 审计修复 M2：
- *  多分支覆盖 rm -fr/Remove-Item -Recurse/del /s /q 等变体） */
+ *  多分支覆盖 rm -fr/Remove-Item -Recurse/del /s /q 等变体；
+ *  审计修复：解释器载荷（node -e / python -c 等内嵌破坏性调用）同门槛） */
 export const DANGEROUS_TERMINAL = DANGEROUS;
 
 /** 检测终端命令是否高危（返回命中片段；未命中返回 null） */
 export function detectDangerousTerminalCommand(command: string): string | null {
   if (!command.trim()) return null;
+  if (hasDestructiveRuntimePayload(command)) return "运行时载荷";
   const m = DANGEROUS_TERMINAL.exec(command);
   return m ? m[0].trim() : null;
 }

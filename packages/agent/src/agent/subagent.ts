@@ -613,11 +613,18 @@ export async function delegateTasks(specs: SubagentSpec[], ctx: DelegationContex
   if (specs.length > slots) {
     return `错误：该会话子 Agent 已达上限 ${MAX_ACTIVE_SUBAGENTS_PER_SESSION} 个（当前 ${MAX_ACTIVE_SUBAGENTS_PER_SESSION - slots} 个运行中）——请等待现有子任务完成，或减少本次并行任务数（最多再开 ${slots} 个）`;
   }
-  const results = await Promise.all(specs.map((s) => runSubagent(s, ctx)));
-  const parts = results.map(
-    (r, i) =>
-      `\n${specs.length > 1 ? `【子任务 ${i + 1}】` : ""}${r.name}（${r.steps} 步 / ${r.toolCount} 次工具）：\n${r.text}`
-  );
+  // 审计修复（H-2）：Promise.all → allSettled 失败隔离——runSubagent 的同步段
+  // （深度超限/agent 定义缺失/工具不存在）会 throw 使整个 promise reject，
+  // 多任务并行时一个坏任务拖死全部（父 Agent 收到 error 中断，其余正常子任务
+  // 结果全部丢弃，任务失败重复试错）。失败条目降级为占位文本，其余照常回收。
+  const settled = await Promise.allSettled(specs.map((s) => runSubagent(s, ctx)));
+  const parts = settled.map((r, i) => {
+    if (r.status === "rejected") {
+      return `\n${specs.length > 1 ? `【子任务 ${i + 1}】` : ""}子智能体启动失败：${(r.reason as Error)?.message ?? String(r.reason)}`;
+    }
+    const res = r.value;
+    return `\n${specs.length > 1 ? `【子任务 ${i + 1}】` : ""}${res.name}（${res.steps} 步 / ${res.toolCount} 次工具）：\n${res.text}`;
+  });
   const joined = parts.join("\n").trim();
   return joined.length > MAX_SUBAGENT_RESULT
     ? `${joined.slice(0, MAX_SUBAGENT_RESULT)}\n\n…（结果已截断）`

@@ -12,6 +12,7 @@
     "config": "npm run cli -w @infu/agent -- config",
     "start": "npm run start -w @infu/agent",
     "test": "npx tsx scripts/test-runner.ts",
+    "lint": "eslint \"packages/*/src/**/*.{ts,tsx}\" \"packages/*/tests/**/*.ts\" --max-warnings 999999",
     "probe": "npx tsx scripts/probe.ts"
   },
   "engines": {
@@ -24,6 +25,11 @@
     "zod": "^4.4.3"
   },
   "devDependencies": {
-    "electron-builder": "^26.15.3"
+    "@eslint/js": "^10.0.1",
+    "electron-builder": "^26.15.3",
+    "eslint": "^10.8.1",
+    "eslint-plugin-react-hooks": "^7.1.1",
+    "globals": "^17.11.0",
+    "typescript-eslint": "^8.67.0"
   }
 }

@@ -700,5 +700,6 @@ if (!nativeBinding) {
 }
 
 module.exports = nativeBinding
+module.exports.abortRun = nativeBinding.abortRun
 module.exports.available = nativeBinding.available
 module.exports.runRestricted = nativeBinding.runRestricted

@@ -22,7 +22,7 @@
  *  - 关闭窗口 = 退出应用；托盘仅「显示主窗口/退出」入口
  */
 import { app, BrowserWindow, Tray, Menu, ipcMain, screen, nativeImage, nativeTheme, shell, dialog, powerSaveBlocker, Notification, type Rectangle } from "electron";
-import type { WebContents } from "electron";
+import type { IpcMainEvent, IpcMainInvokeEvent, WebContents } from "electron";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { existsSync, mkdirSync, readFileSync, writeFileSync, renameSync } from "node:fs";
@@ -828,17 +828,32 @@ public static class InFuWin {
 
 
 // ── IPC（渲染进程 preload 桥）──
+/**
+ * 审计修复（H-2）：IPC 调用方校验——全部 ipcMain 通道只接受主窗口 webContents。
+ * 此前无校验：嵌入式浏览器的 webview guest（内容来自任意网站，如示例 iframe/广告）与
+ * 未来任何渲染进程都能向主进程发 window:close / browser-view:navigate / open-external 等
+ * 控制类消息（guest 页面可注入 JS 调 ipcRenderer.send——webview 未加载 preload 时
+ * ipcRenderer 仍可达主进程通道）。preload 仅注入主窗口，信任面 = 应用自身页面。
+ */
+function isTrustedSender(e: IpcMainEvent | IpcMainInvokeEvent): boolean {
+  const wc = mainWindow?.webContents;
+  return !!wc && e.sender === wc;
+}
+
 function registerIpc() {
+  const trusted = isTrustedSender;
   // 窗口控制（无边框标题栏）
-  ipcMain.on("window:minimize", () => mainWindow?.minimize());
-  ipcMain.on("window:maximize-toggle", () => {
+  ipcMain.on("window:minimize", (e) => { if (!trusted(e)) return; mainWindow?.minimize(); });
+  ipcMain.on("window:maximize-toggle", (e) => {
+    if (!trusted(e)) return;
     if (!mainWindow) return;
     mainWindow.isMaximized() ? mainWindow.unmaximize() : mainWindow.maximize();
   });
-  ipcMain.on("window:close", () => mainWindow?.close());
+  ipcMain.on("window:close", (e) => { if (!trusted(e)) return; mainWindow?.close(); });
 
   // v3.0 批 12：附件「选择路径」——桌面版用系统对话框拿真实绝对路径（Web 版才被迫上传内容）
-  ipcMain.handle("dialog:select-paths", async (_e, opts: { directories?: boolean }) => {
+  ipcMain.handle("dialog:select-paths", async (e, opts: { directories?: boolean }) => {
+    if (!trusted(e)) return [];
     const w = BrowserWindow.getFocusedWindow() ?? mainWindow ?? undefined;
     const r = await dialog.showOpenDialog(w!, {
       title: opts?.directories ? "选择文件夹" : "选择文件",
@@ -849,31 +864,36 @@ function registerIpc() {
   });
 
   // 主题联动（设置页切换主题 → titleBarOverlay 原生按钮配色）
-  ipcMain.on("theme:set", (_e, theme: string) => {
+  ipcMain.on("theme:set", (e, theme: string) => {
+    if (!trusted(e)) return;
     if (mainWindow) applyThemeOverlay(mainWindow, theme);
   });
 
   // 嵌入式浏览器（v3.0 批 8：webview 元素——渲染进程管元素，主进程管注册表/CDP）
   // open：渲染进程告知面板已打开（无 tab 时主进程请求渲染进程新建）
-  ipcMain.on("browser-view:open", () => {
+  ipcMain.on("browser-view:open", (e) => {
+    if (!trusted(e)) return;
     if (!activeWc()) {
       mainWindow?.webContents.send("browser-view:open-request", null);
     } else {
       sendBrowserState();
     }
   });
-  ipcMain.on("browser-view:new-tab", () => {
+  ipcMain.on("browser-view:new-tab", (e) => {
+    if (!trusted(e)) return;
     mainWindow?.webContents.send("browser-view:open-request", null);
   });
   // 渲染进程 webview attach 完成 → 激活同步
-  ipcMain.on("browser-view:registered", (_e, wcId: number) => {
+  ipcMain.on("browser-view:registered", (e, wcId: number) => {
+    if (!trusted(e)) return;
     if (browserTabs.has(wcId)) {
       activeTabId = wcId;
       refreshGlobalMarkers();
       sendBrowserState();
     }
   });
-  ipcMain.on("browser-view:select", (_e, id: string | number) => {
+  ipcMain.on("browser-view:select", (e, id: string | number) => {
+    if (!trusted(e)) return;
     const n = Number(id);
     if (browserTabs.has(n)) {
       activeTabId = n;
@@ -881,7 +901,8 @@ function registerIpc() {
       sendBrowserState();
     }
   });
-  ipcMain.on("browser-view:close-tab", (_e, id: string | number) => {
+  ipcMain.on("browser-view:close-tab", (e, id: string | number) => {
+    if (!trusted(e)) return;
     const wc = browserTabs.get(Number(id));
     if (!wc || wc.isDestroyed()) return;
     browserTabs.delete(Number(id));
@@ -892,7 +913,8 @@ function registerIpc() {
     refreshGlobalMarkers();
     sendBrowserState();
   });
-  ipcMain.on("browser-view:close", () => {
+  ipcMain.on("browser-view:close", (e) => {
+    if (!trusted(e)) return;
     for (const id of [...browserTabs.keys()]) {
       const wc = browserTabs.get(id);
       if (wc && !wc.isDestroyed()) { try { wc.close(); } catch { /* 忽略 */ } }
@@ -902,7 +924,8 @@ function registerIpc() {
     refreshGlobalMarkers();
     sendBrowserState();
   });
-  ipcMain.on("browser-view:navigate", (_e, raw: string) => {
+  ipcMain.on("browser-view:navigate", (e, raw: string) => {
+    if (!trusted(e)) return;
     const wc = activeWc();
     if (!wc || wc.isDestroyed()) return;
     // v3.6 审计修复：程序化导航统一走 sanitizeBrowserUrl（含 loopback + InFu 服务端口
@@ -910,34 +933,40 @@ function registerIpc() {
     const url = sanitizeBrowserUrl(raw);
     if (url) wc.loadURL(url);
   });
-  ipcMain.on("browser-view:back", () => {
+  ipcMain.on("browser-view:back", (e) => {
+    if (!trusted(e)) return;
     const wc = activeWc();
     if (wc && !wc.isDestroyed() && wc.navigationHistory.canGoBack()) wc.navigationHistory.goBack();
   });
-  ipcMain.on("browser-view:forward", () => {
+  ipcMain.on("browser-view:forward", (e) => {
+    if (!trusted(e)) return;
     const wc = activeWc();
     if (wc && !wc.isDestroyed() && wc.navigationHistory.canGoForward()) wc.navigationHistory.goForward();
   });
-  ipcMain.on("browser-view:reload", () => {
+  ipcMain.on("browser-view:reload", (e) => {
+    if (!trusted(e)) return;
     const wc = activeWc();
     if (wc && !wc.isDestroyed()) wc.reload();
   });
-  ipcMain.on("browser-view:stop", () => {
+  ipcMain.on("browser-view:stop", (e) => {
+    if (!trusted(e)) return;
     const wc = activeWc();
     if (wc && !wc.isDestroyed()) wc.stop();
   });
   // DevTools 独立小窗（detach，同款）
-  ipcMain.on("browser-view:devtools", () => {
+  ipcMain.on("browser-view:devtools", (e) => {
+    if (!trusted(e)) return;
     const wc = activeWc();
     if (!wc || wc.isDestroyed()) return;
     try {
       if (wc.isDevToolsOpened()) wc.closeDevTools();
       else wc.openDevTools({ mode: "detach" });
-    } catch (e) {
-      console.log(`[infu-desktop] DevTools 失败: ${(e as Error).message}`);
+    } catch (err) {
+      console.log(`[infu-desktop] DevTools 失败: ${(err as Error).message}`);
     }
   });
-  ipcMain.on("browser-view:open-external", (_e, url: string) => {
+  ipcMain.on("browser-view:open-external", (e, url: string) => {
+    if (!trusted(e)) return;
     // v4.0 审计修复（M5）：本机回环地址不进系统浏览器——https://127.0.0.1:4317/（含
     // token 的 InFu UI）经此通道在外部浏览器打开，浏览器扩展/历史缓存可读取令牌；
     // isLoopbackHostText（IPv6 解包/简写 fail-closed）拦回环与 localhost，公网与
@@ -952,7 +981,8 @@ function registerIpc() {
   });
   // v3.5 修复：UI 视口（📄 预设/适应窗口）→ CDP Emulation 同步（与 Agent
   // browser_viewport 同一通道——此前只改元素 CSS，Agent 设过的设备度量残留 → 适应窗口无效）
-  ipcMain.handle("browser-view:set-viewport", async (_e, opts: { width?: number; height?: number; fit?: boolean }) => {
+  ipcMain.handle("browser-view:set-viewport", async (e, opts: { width?: number; height?: number; fit?: boolean }) => {
+    if (!trusted(e)) return;
     const wc = activeWc();
     if (!wc || wc.isDestroyed()) return;
     try {
@@ -966,8 +996,8 @@ function registerIpc() {
           mobile: false,
         });
       }
-    } catch (e) {
-      console.log(`[infu-desktop] viewport 同步失败: ${(e as Error).message}`);
+    } catch (err) {
+      console.log(`[infu-desktop] viewport 同步失败: ${(err as Error).message}`);
       return;
     }
     // 通知渲染进程保持状态一致（fit 清 freeSize）
@@ -1030,7 +1060,9 @@ function refreshTrayMenu() {
 }
 
 // 托盘打开会话 → 渲染进程（前端 onOpenSession 处理：加载会话 + 切换视图）
-ipcMain.on("session:open", (_e, id: string) => {
+// 审计修复（H-2）：与 registerIpc 同款 sender 校验——防非主窗口进程伪造调用
+ipcMain.on("session:open", (e, id: string) => {
+  if (e.sender !== mainWindow?.webContents) return;
   const sid = String(id ?? "");
   if (!sid || !mainWindow || mainWindow.webContents.isDestroyed()) return;
   mainWindow.webContents.send("session:open", sid);

@@ -26,12 +26,32 @@ function shellCmd(): { file: string; args: string[] } {
     : { file: "/bin/bash", args: ["--norc", "--noprofile", "-i"] };
 }
 
+/** 会话是否存活：proc.killed 只表示「已调用过 kill」——进程自然退出/崩溃时
+ *  killed=false 但 stdio 已关，向已死会话写 stdin 会 EPIPE（审计修复）；
+ *  kill 后即使进程已死 'exit' 事件也可能长期不触发（Windows libuv 收割延迟），
+ *  killed=true 一律视为不可复用（审计修复 H-2） */
+function sessionAlive(s: ShellSession): boolean {
+  return !s.proc.killed && s.proc.exitCode === null && s.proc.signalCode === null;
+}
+
+/** 审计修复（H-2）：kill 后显式销毁 stdio 管道 + unref——Windows 下 cmd 进程被
+ *  TerminateProcess 后 'exit' 事件可能长期不触发（libuv 收割延迟/幽灵句柄），
+ *  管道 Socket 与子进程句柄保持活跃 → Node 事件循环永不退出（CLI 任务跑完进程挂死、
+ *  常驻服务句柄累积）。unref() 让 Node 不再等待该子进程，destroy 释放管道句柄。 */
+function killSession(s: ShellSession): void {
+  try { s.proc.kill(); } catch { /* 忽略 */ }
+  try { s.proc.unref(); } catch { /* 忽略 */ }
+  for (const stream of [s.proc.stdin, s.proc.stdout, s.proc.stderr]) {
+    try { stream.destroy(); } catch { /* 忽略 */ }
+  }
+}
+
 /** 获取（或创建）会话；root 变化时自动重建（cwd 跟随项目） */
 export function getShellSession(sessionId: string, root: string): ShellSession {
   const existing = sessions.get(sessionId);
-  if (existing && existing.cwd === root && !existing.proc.killed) return existing;
+  if (existing && existing.cwd === root && sessionAlive(existing)) return existing;
   if (existing) {
-    try { existing.proc.kill(); } catch { /* 忽略 */ }
+    killSession(existing);
     sessions.delete(sessionId);
   }
   const { file, args } = shellCmd();
@@ -45,9 +65,15 @@ export function getShellSession(sessionId: string, root: string): ShellSession {
   const session: ShellSession = { proc, cwd: root, createdAt: Date.now() };
   // v3.1 审计修复：进程级退出清理只在创建时挂一次（原来每次 execPersistent 都挂 exit 监听，
   // 永不移除 → 长会话 N 次调用累积 N 个监听器 + 闭包持续 append 后续输出，内存无界增长）
+  // 审计修复（H-2）：exit 监听必须比对会话对象身份再删——kill 是异步的，旧会话进程
+  // 退出时新会话可能已存入同 id（close→重建竞态），按 id 盲删会把新会话误删，
+  // 致其永不 kill（残留健康 cmd.exe 拖住事件循环 + 目录句柄占用，实测复现）
   proc.once("exit", () => {
-    sessions.delete(sessionId);
+    if (sessions.get(sessionId) === session) sessions.delete(sessionId);
   });
+  // 审计修复：stdin EPIPE 事件必须有监听（无监听器即 throw 崩宿主进程）
+  proc.stdin.on("error", () => { /* stdin 已关闭 */ });
+  proc.on("error", () => { /* spawn 失败/进程异常，exit 清理兜底 */ });
   sessions.set(sessionId, session);
   return session;
 }
@@ -76,8 +102,9 @@ export function execPersistent(sessionId: string, root: string, command: string,
       // 命令继续运行且残留输出（含旧 marker）会混入下一次调用，导致结果错位。
       // 处理：销毁整个持久会话（下一次调用自动重建）——残留输出随进程消失，杜绝串扰；
       // 文案如实说明命令可能仍在运行（持久会话本就不受 L1.5 约束，孤儿进程由 OS 回收）。
-      try { session.proc.kill(); } catch { /* 忽略 */ }
-      sessions.delete(sessionId);
+      // 审计修复（H-2）：kill + destroy 管道（防幽灵句柄拖住事件循环）
+      killSession(session);
+      if (sessions.get(sessionId) === session) sessions.delete(sessionId);
       finish(new Error(`命令超时（${timeoutMs}ms）——已终止持久会话，命令可能仍在运行（输出已丢弃尾部）；输出：${out.slice(-500)}`));
     }, timeoutMs);
 
@@ -101,7 +128,19 @@ export function execPersistent(sessionId: string, root: string, command: string,
     session.proc.stderr.on("data", onErrData);
 
     // 命令 + 标记（换行结尾触发执行；cmd 与 bash 均支持）
-    session.proc.stdin.write(`${command}\necho ${marker}\n`);
+    // 审计修复：写前确认存活 + try/catch——会话在 getShellSession 与 write 之间
+    // 退出（进程自然退出/超时销毁）时，向已关 stdin 写入 = EPIPE 崩宿主进程
+    if (!sessionAlive(session)) {
+      sessions.delete(sessionId);
+      finish(new Error("持久 shell 会话已退出，请重试（已自动清除失效会话）"));
+      return;
+    }
+    try {
+      session.proc.stdin.write(`${command}\necho ${marker}\n`);
+    } catch {
+      sessions.delete(sessionId);
+      finish(new Error("持久 shell 会话写入失败（进程可能已退出），请重试"));
+    }
   });
 }
 
@@ -110,13 +149,13 @@ export function closeShellSession(sessionId?: string): void {
   if (sessionId) {
     const s = sessions.get(sessionId);
     if (s) {
-      try { s.proc.kill(); } catch { /* 忽略 */ }
+      killSession(s);
       sessions.delete(sessionId);
     }
     return;
   }
   for (const [id, s] of sessions) {
-    try { s.proc.kill(); } catch { /* 忽略 */ }
+    killSession(s);
     sessions.delete(id);
   }
 }

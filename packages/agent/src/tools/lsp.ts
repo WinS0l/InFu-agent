@@ -56,6 +56,11 @@ export function lspDiagnoseFile(fileAbs: string, timeoutMs = 20000): Promise<Lsp
     } catch {
       return resolvePromise([]);
     }
+    // 审计修复：tsserver 提前退出/崩溃时 proc 级 error 与 stdin EPIPE 无监听——
+    // EventEmitter 'error' 无监听器即 throw，server 模式（npm run start）无
+    // uncaughtException 兜底会整个服务进程崩溃。挂监听 + write 防御。
+    proc.on("error", () => finish([]));
+    proc.stdin.on("error", () => { /* stdin 已关闭（tsserver 退出） */ });
     let buf = "";
     let seq = 0;
     let settled = false;
@@ -73,7 +78,14 @@ export function lspDiagnoseFile(fileAbs: string, timeoutMs = 20000): Promise<Lsp
       const id = ++seq;
       return new Promise((res) => {
         pending.set(id, res);
-        proc.stdin.write(JSON.stringify({ seq: id, type: "request", command, arguments: args }) + "\n");
+        // 审计修复：write 前检查流可用性（tsserver 崩溃后写已关闭的 stdin = EPIPE 异常）
+        try {
+          if (!proc.stdin.writable) { pending.delete(id); res({ error: true }); return; }
+          proc.stdin.write(JSON.stringify({ seq: id, type: "request", command, arguments: args }) + "\n");
+        } catch {
+          pending.delete(id);
+          res({ error: true });
+        }
       });
     };
 
@@ -194,6 +206,8 @@ async function lspRun(
     });
     p.stderr!.on("data", () => { /* tsserver 日志 */ });
     p.stdin!.on("error", () => { /* 已关闭 */ });
+    // 审计修复：proc 级 error（spawn 失败/异常退出）无监听会 throw 崩掉宿主进程
+    p.on("error", () => { if (!settled) { settled = true; clearTimeout(timer); try { p.kill(); } catch { /* 忽略 */ } resolveReady(); } });
     const sendOne = (command: string, args: Record<string, unknown>): Promise<LspOutcome> => {
       const id = ++seq;
       return new Promise((res) => {

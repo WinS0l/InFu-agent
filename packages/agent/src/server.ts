@@ -2481,6 +2481,18 @@ function checkConfigHealth() {
 
 /** 启动服务（端口被占用时自动递增重试） */
 export function startServer(opts: ServerOptions = {}) {
+  // 审计修复：进程级异常兜底——此前全库无 uncaughtException/unhandledRejection
+  // 处理：lsp.ts 的 stdin EPIPE（tsserver 崩溃）等事件型错误会一击杀死整个服务进程
+  // （Node 24 下 unhandledRejection 默认抛异常退出）。挂兜底记录日志不退出——
+  // 业务错误各调用方均有 try/catch，此处仅拦截漏网的非致命异常（EPIPE/偶发 rejection）。
+  const crashLog = (type: string, err: unknown) => {
+    try {
+      const msg = err instanceof Error ? err.stack ?? err.message : String(err);
+      console.error(`[infu-agent] ${type}（已捕获，服务继续运行）: ${msg}`);
+    } catch { /* 兜底自身失败忽略 */ }
+  };
+  process.on("uncaughtException", (err) => crashLog("uncaughtException", err));
+  process.on("unhandledRejection", (reason) => crashLog("unhandledRejection", reason));
   const host = opts.host ?? "127.0.0.1";
   const basePort = opts.port ?? 4317;
   const app = createApp(opts);

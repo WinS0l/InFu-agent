@@ -51,12 +51,23 @@ export function resetContextCalibration(): void {
   CALIB.clear();
 }
 
+/** 图片 part 固定 token 成本（审计修复：base64 原文数百 KB 按 4 字符/token 计
+ *  会虚增 ~25 万 token——视觉会话每步误触发全量压缩、历史被整段清空、校准因子被
+ *  钳死 0.25 下限。视觉模型每图实际消耗 ~1000-2500 token，取 1500 近似） */
+export const IMAGE_PART_TOKENS = 1500;
+
 /** 单条消息内容提取（string 或 content 数组） */
 function contentText(msg: ChatMessageLike): string {
   if (typeof msg.content === "string") return msg.content;
   if (Array.isArray(msg.content)) {
     return msg.content
-      .map((p) => (typeof p?.text === "string" ? p.text : JSON.stringify(p)))
+      .map((p) => {
+        if (typeof p?.text === "string") return p.text;
+        // 图片 part：base64 正文不得按文本估算（长度由 estimateTokens 固定计），
+        // 摘要求序列化/裁剪等场景对图片原文也无意义
+        if (p && typeof p === "object" && (p as { type?: string }).type === "image") return "";
+        return JSON.stringify(p);
+      })
       .join("\n");
   }
   return "";
@@ -77,6 +88,12 @@ export function estimateTokens(messages: ChatMessageLike[]): number {
       else other++;
     }
     total += cn + Math.ceil(other / 4);
+    // 图片 part 固定计（base64 原文已排除，见 contentText）
+    if (Array.isArray(m.content)) {
+      for (const p of m.content) {
+        if (p && typeof p === "object" && (p as { type?: string }).type === "image") total += IMAGE_PART_TOKENS;
+      }
+    }
     // 消息结构开销（role/字段名等，粗估）
     total += 4;
     // v3.9 审计修复（C1）：tool_calls 的 arguments JSON 正文计入估算（原实现只计固定

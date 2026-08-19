@@ -15,7 +15,7 @@ import { registerMcpServer, type RegisterInput } from "../mcp/register.js";
 import { registerPlugin, type RegisterPluginInput } from "../plugin/register.js";
 import { listSkills, readSkillContent } from "../plugin/skills.js";
 import { listAgents, readAgentFile } from "../agent/agents.js";
-import { DANGEROUS } from "../sandbox/dangerous.js";
+import { DANGEROUS, isDangerousCommand } from "../sandbox/dangerous.js";
 import { delegateTasks, describeDelegation, isReadOnlyDelegation, startBackgroundSubagent,
   listBackgroundAgents, getBackgroundAgent, interruptBackgroundAgent, sendMessageToAgent, getAgentReport,
   availableSubagentSlots, MAX_ACTIVE_SUBAGENTS_PER_SESSION,
@@ -319,6 +319,8 @@ export const TOOLS: Record<string, ToolDef> = {
       const idx = loadIndex(ctx.root);
       const files = idx ? idx.files.map((f) => path.resolve(ctx.root, f.file)) : walkFiles(ctx.root);
       for (const file of files) {
+        // 审计 H-1 兜底：旧索引可能含凭据文件、.SSH 大小写变体可漏过 SKIP——命中拒绝
+        if (isProtectedPath(file)) continue;
         if (include && !include.some((ext) => file.endsWith(ext))) continue;
         if (hits.length >= max) break;
         try {
@@ -464,10 +466,10 @@ export const TOOLS: Record<string, ToolDef> = {
         if (
           isCommandAllowed(command, policy.commandAllowlist) &&
           !hasShellCombinators(command) &&
-          !DANGEROUS.test(command)
+          !isDangerousCommand(command)
         ) {
           /* 白名单命令：信任放行（组合符/高危均已排除，单条只读命令） */
-        } else if (DANGEROUS.test(command)) {
+        } else if (isDangerousCommand(command)) {
           // v3.1 审计修复：高危命令升级为 requireExplicit——CLI -y / 定时任务无人值守
           // 一律拒绝（此前无人值守自动放行 rm -rf 等，与「安全红线绝不自动放行」矛盾）
           // v3.9（CWE-451 轻量）：审批描述带真实 cwd，防「命令在此目录执行」歧义
@@ -1020,10 +1022,10 @@ export const TOOLS: Record<string, ToolDef> = {
         if (
           isCommandAllowed(explicit, policy.commandAllowlist) &&
           !hasShellCombinators(explicit) &&
-          !DANGEROUS.test(explicit)
+          !isDangerousCommand(explicit)
         ) {
           /* 白名单测试命令：信任放行 */
-        } else if (DANGEROUS.test(explicit)) {
+        } else if (isDangerousCommand(explicit)) {
           if (!(await guard(ctx, "run_test", "high", `执行高风险测试命令：${explicit}`, true))) {
             return "用户拒绝：高风险测试命令未执行";
           }
@@ -1291,7 +1293,9 @@ export const TOOLS: Record<string, ToolDef> = {
       if (!q.trim()) return "错误：query 必填";
       const max = (args.max_results as number | undefined) || 10;
       const idx = loadIndex(ctx.root);
-      const files = idx ? idx.files.map((f) => path.resolve(ctx.root, f.file)) : walkFiles(ctx.root);
+      const files = idx
+        ? idx.files.map((f) => path.resolve(ctx.root, f.file)).filter((f) => !isProtectedPath(f))
+        : walkFiles(ctx.root);
       const hits = semanticSearch(q, files, ctx.root, max);
       if (!hits.length) return `未找到与 "${q}" 相关的内容`;
       return `找到 ${hits.length} 处相关：\n` + hits.map((h) => `${h.file}:${h.line}: ${h.text}`).join("\n");

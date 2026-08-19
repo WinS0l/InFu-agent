@@ -28,6 +28,9 @@ pub struct RunOptions {
     pub process_memory_mb: Option<u32>,
     pub job_memory_mb: Option<u32>,
     pub active_process_limit: Option<u32>,
+    /// 审计修复（H-2）：运行 ID——JS 侧传自增 id，abort_run(id) 可随时终止
+    /// 该次运行的整棵进程树（Job terminate；阻塞等待随之返回）
+    pub run_id: Option<u32>,
 }
 
 #[napi(object)]
@@ -71,12 +74,21 @@ pub async fn run_restricted(command: String, opts: RunOptions) -> napi::Result<R
         active_process_limit: opts
             .active_process_limit
             .unwrap_or(runner::DEFAULT_ACTIVE_PROCESS_LIMIT),
+        run_id: opts.run_id,
     };
     let result = tokio::task::spawn_blocking(move || runner::run(&ro)).await;
     match result {
         Ok(r) => Ok(r.into()),
         Err(e) => Err(napi::Error::from_reason(format!("沙箱任务线程失败: {e}"))),
     }
+}
+
+/// 审计修复（H-2）：终止指定 run_id 的运行（Job terminate 杀整棵进程树）。
+/// 返回 false = 该 run 已结束/未注册（幂等，无害）。
+#[napi]
+#[cfg(target_os = "windows")]
+pub fn abort_run(run_id: u32) -> bool {
+    runner::abort_run(run_id)
 }
 
 impl From<runner::RunResult> for RunResult {

@@ -44,10 +44,16 @@ export const DEFAULT_COMMAND_ALLOWLIST: string[] = [
   // 跨平台白名单必须按最危险平台收口
   "ls*", "pwd", "date", "whoami", "id", "uname*", "hostname", "which*", "env", "echo*", "df -h", "du*",
   // git 只读（分支/配置写操作不放——git branch 创建删除、git config 写 ~/.gitconfig 均走审批）
+  // 审计修复：移除 `git config --list*`/`git config -l*`/`git config --get*`/`git config --global --get*`
+  // 与 `git remote -v*`——remote URL 可内嵌令牌（https://x-access-token:ghp_xxx@…）、
+  // config --list 可输出 http.<url>.extraheader 的 Authorization 头与 credential.helper 指向——
+  // 「低风险命令 + 高敏感数据」错配，任何档位（含 confirm）都免审批输出到模型上下文。
+  // 仅保留确定性单键查询（本地提交身份，无凭据面）。
   "git status*", "git diff*", "git log*", "git show*", "git branch -a*", "git branch -r*",
-  "git branch --show-current*", "git branch -l*", "git remote -v*", "git ls-files*",
+  "git branch --show-current*", "git branch -l*", "git ls-files*",
   "git rev-parse*", "git blame*", "git stash list*", "git tag -l*", "git check-ignore*",
-  "git config --get*", "git config --list*", "git config -l*", "git config --global --get*",
+  "git config --get user.name*", "git config --get user.email*",
+  "git config user.name*", "git config user.email*",
   // 版本查询（无网络/无副作用）
   "node --version*", "npm --version*", "pnpm --version*", "yarn --version*", "python --version*",
   "python3 --version*", "tsc --version*", "go version*", "cargo --version*", "rustc --version*", "java -version*",

@@ -188,9 +188,15 @@ const usageAgg = { cacheHit: 0, cacheMiss: 0, promptTokens: 0, completionTokens:
     usageAgg.promptTokens += r.usage.promptTokens;
     usageAgg.completionTokens += r.usage.completionTokens;
   };
-  // v6.0（S4）：跨阶段预算扣减——每阶段下发「剩余预算」，阶段内用尽即停
+  // v6.0（S4）+ 审计修复：跨阶段预算扣减——每阶段下发「剩余预算」，阶段内用尽即停。
+  // 已耗尽时返回 -1 哨兵（loop 守卫对负值立即停）——原 Math.max(0, 剩余) 使剩余 0
+  // 时 runAgent 判「预算未启用 = 不限制」，任一阶段耗尽后后续阶段无限额跑模型。
   const remainBudget = () =>
-    taskTokenBudget > 0 ? Math.max(0, taskTokenBudget - (usageAgg.promptTokens + usageAgg.completionTokens)) : 0;
+    taskTokenBudget > 0 ? Math.max(-1, taskTokenBudget - (usageAgg.promptTokens + usageAgg.completionTokens)) : 0;
+  // 累计真实用量已 ≥ 预算（编排层据此跳过后续阶段——Executor 摘要不该带着预算用尽
+  // 消息白跑一轮 Reviewer，autoRefine 也不该在预算外发起模型调用）
+  const budgetExhausted = () =>
+    taskTokenBudget > 0 && (usageAgg.promptTokens + usageAgg.completionTokens) >= taskTokenBudget;
 
   const aborted = () => abortSignal?.aborted === true;
 
@@ -263,7 +269,11 @@ const usageAgg = { cacheHit: 0, cacheMiss: 0, promptTokens: 0, completionTokens:
     if (worked) {
       // v3.5：自动 git 提交（可选）+ 记忆自动提炼（默认开，失败静默）
       try { commitNote = await tryAutoCommit(root, prompt); } catch { /* 忽略 */ }
-      try { await tryAutoRefine(root, prompt, exec, emit); } catch { /* 忽略 */ }
+      // 审计修复：预算耗尽后 autoRefine 仍发起无限额模型调用（streamChatWithFailover
+      // 完整调用一次、不计入 usageAgg）——预算用尽路径跳过提炼
+      if (!budgetExhausted()) {
+        try { await tryAutoRefine(root, prompt, exec, emit); } catch { /* 忽略 */ }
+      }
     }
     if (worked && loadConfig()?.memory?.autoSediment !== false) {
       try {
@@ -286,6 +296,13 @@ const usageAgg = { cacheHit: 0, cacheMiss: 0, promptTokens: 0, completionTokens:
   // ① Planner：只读规划（v2.2 按角色路由模型；v2.3 阶段级续跑 startPhase=executor
   //    时跳过——计划沿用上次确认的 resumePlanText）
   if (startPhase !== "executor") {
+    // 审计修复：预算已在执行前耗尽 → 跳过 Planner（不再发起模型调用，emit 明确文案）
+    if (budgetExhausted()) {
+      const msg = "任务 Token 预算已用尽，任务在此停止。已完成的工作已保存，可调整预算后发送「继续」接着干。";
+      emit({ type: "error", message: msg });
+      emit({ type: "done", text: msg, toolCount: 0, steps: 0, usage: usageAgg });
+      return { text: msg, steps: 0, toolCount: 0, approvals: { required: 0, approved: 0, denied: 0 }, toolLogs: [], planText: "", reviewText: "" };
+    }
     const rc = roleCfg("planner");
     const plan = await runAgent({
       modelConfig: rc.modelConfig,
@@ -455,7 +472,9 @@ const usageAgg = { cacheHit: 0, cacheMiss: 0, promptTokens: 0, completionTokens:
   accUsage(exec);
 
   // ④ Reviewer：只读审查（执行未中止；v2.2 按角色路由模型）
-  if (exec.text && exec.text !== ABORTED_MSG) {
+  // 审计修复：执行阶段已耗尽预算 → 跳过 Reviewer（exec.text 是预算用尽消息，
+  // 原实现拿它当执行摘要又白跑一轮审查模型调用）
+  if (exec.text && exec.text !== ABORTED_MSG && !budgetExhausted()) {
     const rc = roleCfg("reviewer");
     const review = await runAgent({
       modelConfig: rc.modelConfig,
@@ -490,7 +509,10 @@ const usageAgg = { cacheHit: 0, cacheMiss: 0, promptTokens: 0, completionTokens:
   let commitNote = "";
   if (exec.text !== ABORTED_MSG && exec.toolCount > 0) {
     try { commitNote = await tryAutoCommit(root, prompt); } catch { /* 忽略 */ }
-    try { await tryAutoRefine(root, prompt, exec, emit); } catch { /* 忽略 */ }
+    // 审计修复：预算耗尽后 autoRefine 仍发起无限额模型调用——跳过
+    if (!budgetExhausted()) {
+      try { await tryAutoRefine(root, prompt, exec, emit); } catch { /* 忽略 */ }
+    }
   }
 
   // v3.5 数据生命周期：任务收尾自动清理无改动的 worktree（.infu/worktrees/ 由

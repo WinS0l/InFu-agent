@@ -27,9 +27,12 @@ type NativeModule = {
       processMemoryMb?: number;
       jobMemoryMb?: number;
       activeProcessLimit?: number;
-      /** M6 网络出站控制：沙箱专用账号 "offline"（断网）/ "online"（联网） */
+      /** 审计修复（H-2）：运行 ID——abortRun(id) 可终止该次运行的整棵进程树 */
+      runId?: number;
     }
   ): Promise<RestrictedRunResult>;
+  /** 审计修复（H-2）：终止指定 run（Job terminate 杀整树）；未注册/已结束返回 false */
+  abortRun(runId: number): boolean;
 };
 
 export interface RestrictedRunResult {
@@ -104,25 +107,46 @@ export async function winRestrictedAvailable(): Promise<boolean> {
   return selfTest;
 }
 
+/** 自增运行 ID（进程级）；abort 通道用 */
+let nextRunId = 1;
+
 /**
  * 受限执行命令。返回 null 表示 native 不可用/异常（调用方应回退软沙箱）；
  * 返回结果但 ok=false 是正常语义（命令退出码非 0 / 超时 / 创建失败）。
+ * 审计修复（H-2）：支持 AbortSignal——中止时调用 native abortRun 杀整棵进程树
+ * （此前 run_command/run_test 的停止按钮对受限沙箱路径无效：Promise 不受 signal
+ * 影响，阻塞等待直到 timeout 兜底；软沙箱路径 runShell 一直支持 signal）。
  */
 export async function runRestricted(
   command: string,
   cwd: string,
   timeoutMs: number,
-  env: ProcessEnv
+  env: ProcessEnv,
+  signal?: AbortSignal
 ): Promise<RestrictedRunResult | null> {
   const m = loadNative();
   if (!m) return null;
+  const runId = nextRunId++;
+  let aborted = false;
+  const onAbort = () => {
+    if (aborted) return;
+    aborted = true;
+    try { m.abortRun(runId); } catch { /* 终止失败由 timeout 兜底 */ }
+  };
+  if (signal) {
+    if (signal.aborted) onAbort();
+    else signal.addEventListener("abort", onAbort, { once: true });
+  }
   try {
     return await m.runRestricted(command, {
       cwd,
       timeoutMs,
       env: pickEnv(env),
+      runId,
     });
   } catch {
     return null;
+  } finally {
+    if (signal && !signal.aborted) signal.removeEventListener("abort", onAbort);
   }
 }

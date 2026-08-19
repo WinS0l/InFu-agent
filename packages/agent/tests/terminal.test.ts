@@ -46,6 +46,17 @@ console.log("▶ detectDangerousTerminalCommand");
   check("git status 不命中", detectDangerousTerminalCommand("git status") === null);
   check("空命令不命中", detectDangerousTerminalCommand("") === null);
   check("大小写不敏感", detectDangerousTerminalCommand("RM -RF /tmp") === "RM -RF");
+  // 审计修复（#6）：语言运行时载荷——node -e / python -c 等内嵌破坏性调用同门槛
+  check("node -e rmSync 命中", detectDangerousTerminalCommand("node -e \"require('fs').rmSync('x',{recursive:true})\"") !== null);
+  check("node -e fs.rm 命中", detectDangerousTerminalCommand("node -e \"fs.rmSync('/tmp/x',{recursive:true,force:true})\"") !== null);
+  check("python -c shutil.rmtree 命中", detectDangerousTerminalCommand("python -c \"import shutil; shutil.rmtree('x')\"") !== null);
+  check("py -c shutil.rmtree 命中", detectDangerousTerminalCommand("py -c \"import shutil; shutil.rmtree('x')\"") !== null);
+  check("powershell -Command Remove-Item 命中", detectDangerousTerminalCommand("powershell -Command \"Remove-Item -Recurse -Force x\"") !== null);
+  check("node -e 无害代码不命中", detectDangerousTerminalCommand("node -e \"console.log('hi')\"") === null);
+  check("python -c 无害代码不命中", detectDangerousTerminalCommand("python -c \"print(1+1)\"") === null);
+  check("git clean -fd 命中", detectDangerousTerminalCommand("git clean -fd") !== null);
+  check("git clean 干跑不命中", detectDangerousTerminalCommand("git clean -nd") === null);
+  check("erase /s 命中", detectDangerousTerminalCommand("erase /s /q C:\\x") !== null);
 }
 
 // ── 2. 审计（logPath 注入）──

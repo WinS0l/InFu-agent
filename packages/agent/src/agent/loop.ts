@@ -602,11 +602,16 @@ export async function runAgent(opts: AgentRunOptions): Promise<RunResult> {
       emit({ type: "error", message: msg });
       return { text: msg, steps: step, toolCount, approvals, toolLogs, usage };
     }
-    // v6.0（S4）：任务级 Token 预算守卫——已达预算则优雅停止（不再产生任何模型调用）
-    if (taskTokenBudget > 0) {
+    // v6.0（S4）+ 审计修复：任务级 Token 预算守卫——已达预算则优雅停止（不再产生
+    // 任何模型调用）。负值 = 「预算已耗尽」哨兵（编排模式跨阶段剩余 0 时传 -1——
+    // 原 Math.max(0, 剩余) 使剩余 0 时本守卫判「预算未启用 = 不限制」，任一阶段
+    // 耗尽后后续阶段无限额跑模型）；0/缺省 = 不限制语义不变。
+    if (taskTokenBudget !== 0) {
       const spent = usage.promptTokens + usage.completionTokens;
-      if (spent >= taskTokenBudget) {
-        const msg = `任务 Token 预算已用尽（已用 ${spent.toLocaleString("en-US")} / 预算 ${taskTokenBudget.toLocaleString("en-US")}），任务在此停止。已完成的工作已保存，可调整预算后发送「继续」接着干。`;
+      if (taskTokenBudget < 0 || spent >= taskTokenBudget) {
+        const msg = taskTokenBudget < 0
+          ? `任务 Token 预算已用尽（编排阶段累计用量已超预算），任务在此停止。已完成的工作已保存，可调整预算后发送「继续」接着干。`
+          : `任务 Token 预算已用尽（已用 ${spent.toLocaleString("en-US")} / 预算 ${taskTokenBudget.toLocaleString("en-US")}），任务在此停止。已完成的工作已保存，可调整预算后发送「继续」接着干。`;
         emit({ type: "error", message: msg });
         if (!suppressFinal) emit({ type: "done", text: msg, toolCount, steps: step, usage });
         return { text: msg, steps: step, toolCount, approvals, toolLogs, usage };
@@ -946,6 +951,9 @@ export async function runAgent(opts: AgentRunOptions): Promise<RunResult> {
   messages.push({ role: "user", content: finalMsg });
   try {
     let summary = "";
+    // 审计修复：收尾总结调用此前丢弃 usage——不并入全局统计、不发 model-call 事件、
+    // 不被预算扣减（统计页漏记、--budget 可被最后一调用突破）。与主路径同款聚合。
+    const summaryUsage = { cacheHit: 0, cacheMiss: 0, promptTokens: 0, completionTokens: 0 };
     for await (const delta of streamChatWithFailover({
       chain,
       messages,
@@ -957,6 +965,26 @@ export async function runAgent(opts: AgentRunOptions): Promise<RunResult> {
         summary += delta.text;
         emit({ type: "text", text: delta.text });
       }
+      if (delta.usage) {
+        summaryUsage.cacheHit += delta.usage.cacheHit;
+        summaryUsage.cacheMiss += delta.usage.cacheMiss;
+        summaryUsage.promptTokens += delta.usage.promptTokens;
+        summaryUsage.completionTokens += delta.usage.completionTokens;
+      }
+    }
+    usage.cacheHit += summaryUsage.cacheHit;
+    usage.cacheMiss += summaryUsage.cacheMiss;
+    usage.promptTokens += summaryUsage.promptTokens;
+    usage.completionTokens += summaryUsage.completionTokens;
+    if (summaryUsage.promptTokens > 0 || summaryUsage.completionTokens > 0) {
+      emit({
+        type: "model-call",
+        model: chain.active.model,
+        promptTokens: summaryUsage.promptTokens,
+        completionTokens: summaryUsage.completionTokens,
+        cacheHit: summaryUsage.cacheHit,
+        cacheMiss: summaryUsage.cacheMiss,
+      });
     }
     if (!suppressFinal) emit({ type: "done", text: summary, toolCount, steps: maxSteps, usage });
     return { text: summary, steps: maxSteps, toolCount, approvals, toolLogs, usage };

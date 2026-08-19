@@ -59,6 +59,7 @@ export function Modal({
   showClose?: boolean;
 }) {
   const panelRef = useRef<HTMLDivElement>(null);
+  const restoreFocusRef = useRef<HTMLElement | null>(null);
   useEffect(() => {
     if (!escClose) return;
     const onKey = (e: KeyboardEvent) => {
@@ -67,22 +68,25 @@ export function Modal({
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [onClose, escClose]);
-  // v3.4 审计修复：焦点管理 + 背景滚动锁——① 打开时焦点移入弹窗（键盘 Tab 不会
+  // Keep keyboard focus inside the top-level dialog instead of merely focusing it once.
   // 逃逸到背景表单/按钮）；② 背景 wheel 滚动锁定（弹窗内滚动时聊天列表不再穿透滚动）；
   // 多弹窗层叠用「记录挂载前值、卸载恢复」自然嵌套
   useEffect(() => {
+    restoreFocusRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     const prevOverflow = document.body.style.overflow;
     document.body.style.overflow = "hidden";
     const t = setTimeout(() => panelRef.current?.focus(), 0);
     return () => {
       clearTimeout(t);
       document.body.style.overflow = prevOverflow;
+      restoreFocusRef.current?.focus();
     };
   }, []);
   return (
     <div
       className="fixed inset-0 z-50 flex items-center justify-center"
       style={{ background: "var(--mask)" }}
+      role="presentation"
       onMouseDown={(e) => {
         if (maskClosable && e.target === e.currentTarget) onClose();
       }}
@@ -90,6 +94,31 @@ export function Modal({
       <div
         ref={panelRef}
         tabIndex={-1}
+        role="dialog"
+        aria-modal="true"
+        aria-label={typeof title === "string" ? title : undefined}
+        onKeyDown={(e) => {
+          if (e.key !== "Tab") return;
+          const panel = panelRef.current;
+          if (!panel) return;
+          const focusable = [...panel.querySelectorAll<HTMLElement>(
+            'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'
+          )].filter((el) => !el.hasAttribute("hidden"));
+          if (!focusable.length) {
+            e.preventDefault();
+            panel.focus();
+            return;
+          }
+          const first = focusable[0];
+          const last = focusable.at(-1)!;
+          if (e.shiftKey && document.activeElement === first) {
+            e.preventDefault();
+            last.focus();
+          } else if (!e.shiftKey && document.activeElement === last) {
+            e.preventDefault();
+            first.focus();
+          }
+        }}
         className="flex max-h-[calc(100vh-48px)] flex-col overflow-hidden rounded-3xl border border-line bg-elevated shadow-lv3 outline-none"
         style={{ width: `min(${width}px, 92vw)`, ...(height ? { height } : {}) }}
       >

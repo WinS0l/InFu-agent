@@ -42,6 +42,17 @@ export function sanitizeEnv(env: NodeJS.ProcessEnv = process.env): NodeJS.Proces
   return out;
 }
 
+/** Sensitive command output must never enter an Agent context, event log, or output file. */
+const SENSITIVE_OUTPUT = /(sk-[A-Za-z0-9]{12,}|AKIA[0-9A-Z]{16}|ghp_[A-Za-z0-9]{20,}|xox[baprs]-[A-Za-z0-9-]{10,}|AIza[0-9A-Za-z_-]{20,}|ya29\.[0-9A-Za-z_-]+|eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}|BEGIN (?:RSA|OPENSSH|EC|DSA|PGP) PRIVATE KEY|Bearer [A-Za-z0-9._~+\/-]{16,}|api[_-]?key["']?\s*[:=]\s*["'][^"']{8,}["'])/gi;
+export function containsSensitiveOutput(text: string): boolean {
+  SENSITIVE_OUTPUT.lastIndex = 0;
+  return SENSITIVE_OUTPUT.test(text);
+}
+export function redactSensitiveOutput(text: string): string {
+  SENSITIVE_OUTPUT.lastIndex = 0;
+  return text.replace(SENSITIVE_OUTPUT, (match) => `${match.slice(0, 4)}…[已脱敏 ${match.length} 字符]`);
+}
+
 /** 敏感路径写保护清单（写这些路径没有合法场景，直接拦截） */
 const PROTECTED_PATTERNS: Array<{ name: string; match: (abs: string) => boolean }> = [
   { name: "SSH 密钥目录", match: (a) => /(^|[\\/])\.ssh([\\/]|$)/.test(a) },

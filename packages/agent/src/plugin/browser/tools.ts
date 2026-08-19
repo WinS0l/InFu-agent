@@ -12,13 +12,14 @@
  *  - browser_click：编号定位失败时自动重新快照（页面变化后编号失效）
  */
 import { z } from "zod";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import type { ToolDef, ToolContext } from "@infu/shared";
 import { isPrivateHostText } from "@infu/shared";
 import { guard, clip } from "../../tools/util.js";
 import { getPage, closeBrowser, desktopSetViewport, type BrowserTab } from "./runtime.js";
+import type { AxSnapshotResult } from "./ax.js";
 
 /** 技能目录（control-browser / web-gui-tester，随插件分发） */
 const skillDir = (name: string) => fileURLToPath(new URL(`./skills/${name}`, import.meta.url));
@@ -55,6 +56,8 @@ function ssrfBlockReason(url: string): string | null {
  * 页面快照（v3.0 批 5：AI 可访问性树 = 单一来源——交互节点带 [n] 编号，
  * click 编号与快照一致，根治编号错位；对齐 主流/InFu domSnapshot 工作流）
  */
+const snapshotHandles = new Map<string, AxSnapshotResult>();
+
 async function snapshot(tab: BrowserTab): Promise<string> {
   const [title, url, ax, bodyText] = await Promise.all([
     tab.title().catch(() => ""),
@@ -62,6 +65,8 @@ async function snapshot(tab: BrowserTab): Promise<string> {
     tab.axSnapshot(),
     tab.bodyText().catch(() => ""),
   ]);
+  if (ax) snapshotHandles.set(tab.id, ax);
+  else snapshotHandles.delete(tab.id);
   return (
     `标题：${title}
 URL：${url}
@@ -158,8 +163,10 @@ export const browserTools: ToolDef[] = [
         const tab = await getPage();
         let out: string;
         if (/^\d+$/.test(target.trim())) {
-          // 同一份 snapshot：编号展示与点击定位同源（动态页面两次快照编号会漂移）
-          const ax = await tab.axSnapshot();
+          // Use the exact AX handle shown by the most recent browser_snapshot.
+          // Rebuilding it here lets dynamic pages silently remap the same number.
+          const ax = snapshotHandles.get(tab.id);
+          if (!ax) return "错误：没有可用的 browser_snapshot 句柄，请先 browser_snapshot 获取当前编号";
           out = await tab.clickByIndex(Number(target.trim()), ax);
           // 编号失效（页面变化）→ 提示重新快照（不再静默失败导致 Agent 反复重试）
           if (out.startsWith("错误") || out.startsWith("点击失败")) {
@@ -172,6 +179,7 @@ export const browserTools: ToolDef[] = [
           }
         }
         await tab.waitForLoad(5000).catch(() => {});
+        snapshotHandles.delete(tab.id);
         return out + "\n\n" + (await snapshot(tab));
       } catch (e) {
         return `点击失败：${(e as Error).message}（请重新 browser_snapshot 确认编号/选择器）`;
@@ -230,7 +238,10 @@ export const browserTools: ToolDef[] = [
         if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
         // v3.5 数据生命周期：文件名带会话前缀（会话删除时联动清理该会话的浏览器截图）
         const sid = (ctx.sessionId ?? "cli").replace(/[^a-zA-Z0-9-]/g, "").slice(0, 8);
-        const name = (typeof args.name === "string" && args.name.trim() ? args.name.trim() : "shot") + "-" + Date.now().toString(36);
+        const requested = typeof args.name === "string" && args.name.trim() ? args.name.trim() : "shot";
+        // basename alone is insufficient on Windows because a POSIX host accepts backslashes.
+        const stem = basename(requested.replace(/\\/g, "/"), ".png").replace(/[^a-zA-Z0-9._-]/g, "_").slice(0, 80) || "shot";
+        const name = `${stem}-${Date.now().toString(36)}`;
         const file = join(dir, `${sid}-${name}.png`);
         const buf = await tab.screenshot();
         writeFileSync(file, buf);
@@ -243,12 +254,12 @@ export const browserTools: ToolDef[] = [
   {
     name: "browser_close",
     description:
-      "关闭浏览器。⚠️ 几乎不要调用：即使任务完成也绝不主动关闭（用户可能继续查看页面；嵌入式浏览器 tab 除非显式关闭永不销毁，对齐主流）；只有用户明确说出「关闭浏览器」时才使用。任务完成直接总结即可。",
+      "关闭当前浏览器标签页。⚠️ 几乎不要调用：即使任务完成也绝不主动关闭（用户可能继续查看页面）；只有用户明确说出「关闭浏览器/标签页」时才使用。桌面版只关闭当前活跃 tab，不影响其他 tab 或应用窗口。",
     risk: "low",
     schema: z.object({}),
     async execute() {
       await closeBrowser();
-      return "浏览器已关闭";
+      return "当前浏览器标签页已关闭";
     },
   },
   {

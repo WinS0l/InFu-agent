@@ -63,26 +63,27 @@ console.log("\n> screen_capture");
 const origElectron = process.versions.electron;
 (process.versions as Record<string, string>).electron = "43.0.0";
 let capCalls = 0;
-(globalThis as Record<string, unknown>).__infuScreenCapture = (dir: string) => {
+(globalThis as Record<string, unknown>).__infuScreenCapture = async (dir: string) => {
   capCalls++;
   const f = join(dir, `shot-${capCalls}.png`);
   fs.writeFileSync(f, PNG_1PX);
-  return f;
+  return { file: f, origin: { x: -1920, y: 0 } };
 };
 // 模拟 loop 的浅拷贝执行（H1 场景：拷贝上的 push 必须仍进入原 ctx）
 const sc = await TOOLS.screen_capture.execute({}, { ...ctx, callId: "c2" });
 check("截图注入成功", sc.includes("注入视觉上下文") && sc.includes("文件绝对路径"), sc);
 check("H1 回归：截图进入原 ctx 队列", ctx.visionQueue!.length === 2, String(ctx.visionQueue!.length));
 check("截图文件路径返回", sc.includes(".infu"), sc);
+check("截图返回相对坐标换算原点", sc.includes("虚拟桌面原点：(-1920, 0)"), sc);
 check("截图调用了一次桌面通道", capCalls === 1, String(capCalls));
 
 // 4. M7 回归：超大截图拒绝（不注入队列）
 console.log("\n> screen_capture 大小上限（M7）");
 const preLen = ctx.visionQueue!.length;
-(globalThis as Record<string, unknown>).__infuScreenCapture = (dir: string) => {
+(globalThis as Record<string, unknown>).__infuScreenCapture = async (dir: string) => {
   const f = join(dir, `huge-${Date.now()}.png`);
   fs.writeFileSync(f, Buffer.alloc(9 * 1024 * 1024, 0));
-  return f;
+  return { file: f, origin: { x: 0, y: 0 } };
 };const scBig = await TOOLS.screen_capture.execute({}, { ...ctx, callId: "c3" });
 check("超大截图拒绝并提示", scBig.includes("过大") && scBig.includes("8MB"), scBig.slice(0, 80));
 check("超大截图未注入队列", ctx.visionQueue!.length === preLen, String(ctx.visionQueue!.length));
@@ -111,7 +112,13 @@ check("非桌面拒绝 screen_tree", stWeb.includes("仅桌面版可用"), stWeb
 
 // 5. screen_click 审批拒绝/批准
 console.log("\n> screen_click 审批");
-(globalThis as Record<string, unknown>).__infuScreenInput = (action: string, ...params: Array<string | number>) => `OK:${action}:${params.join(",")}`;
+let receivedSignal: AbortSignal | undefined;
+let receivedInput: { action: string; params: Array<string | number> } | undefined;
+(globalThis as Record<string, unknown>).__infuScreenInput = async (action: string, params: Array<string | number>, signal?: AbortSignal) => {
+  receivedSignal = signal;
+  receivedInput = { action, params };
+  return `OK:${action}:${params.join(",")}`;
+};
 let denied = false;
 const denyCtx: ToolContext = { ...ctx, visionQueue: [], requestApproval: async () => { denied = true; return false; } };
 const deniedOut = await TOOLS.screen_click.execute({ x: 10, y: 20 }, { ...denyCtx, callId: "c4" });
@@ -119,6 +126,9 @@ check("拒绝时未点击", deniedOut.includes("用户拒绝"), deniedOut);
 check("medium 审批被触发", denied, "未触发审批");
 const okOut = await TOOLS.screen_click.execute({ x: 10, y: 20 }, { ...ctx, callId: "c5" });
 check("批准后点击成功", okOut.includes("已点击 (10, 20)"), okOut);
+const controller = new AbortController();
+await TOOLS.screen_move.execute({ x: -1910, y: 20 }, { ...ctx, callId: "absolute", abortSignal: controller.signal });
+check("桌面输入使用绝对坐标并透传取消信号", receivedSignal === controller.signal && receivedInput?.action === "move" && receivedInput.params[0] === -1910, JSON.stringify(receivedInput));
 
 // 6. 其余 screen_* 通道
 console.log("\n> screen_type / scroll / key / move / drag / windows");
@@ -132,7 +142,7 @@ const t4 = await TOOLS.screen_move.execute({ x: 5, y: 6 }, { ...ctx, callId: "c9
 check("move 成功", t4.includes("已移动到 (5, 6)"), t4);
 const t5 = await TOOLS.screen_drag.execute({ x1: 0, y1: 0, x2: 100, y2: 100 }, { ...ctx, callId: "c10" });
 check("drag 成功", t5.includes("已拖拽"), t5);
-(globalThis as Record<string, unknown>).__infuScreenWindows = (action: string) => "OK list";
+(globalThis as Record<string, unknown>).__infuScreenWindows = async (action: string) => "OK list";
 const t6 = await TOOLS.screen_windows.execute({ action: "list" }, { ...ctx, callId: "c11" });
 check("windows list 成功", t6.includes("OK"), t6);
 const t7 = await TOOLS.screen_windows.execute({ action: "activate", name: "notepad" }, { ...ctx, callId: "c12" });

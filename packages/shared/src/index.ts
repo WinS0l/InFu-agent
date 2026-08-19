@@ -5,6 +5,7 @@
 // ── v3.6 网络地址判定工具（SSRF / loopback 防护共享底座；agent webfetch 与
 //    desktop 浏览器导航守卫共用同一实现，agent 测试可覆盖两处）──
 export * from "./net.js";
+export * from "./sse.js";
 
 /** 模型供应商类型（InFu 支持任意大模型） */
 export type ProviderKind =

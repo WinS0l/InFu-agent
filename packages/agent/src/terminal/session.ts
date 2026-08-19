@@ -19,6 +19,8 @@ export const OUTPUT_BUFFER_MAX = 64 * 1024;
 
 export interface TerminalSession {
   id: string;
+  /** Persisted InFu session that owns this PTY. All terminal API access is scoped to it. */
+  sessionId: string;
   /** 工作目录（UI 当前项目根） */
   cwd: string;
   /** 可执行 shell 路径（cmd.exe / powershell.exe / bash） */
@@ -57,8 +59,10 @@ export function resolveShell(shell?: string): string {
 }
 
 /** 创建终端会话（cwd 不存在时回退 process.cwd()） */
-export function createTerminalSession(cwd?: string, shell?: string): TerminalSession {
-  const workDir = cwd && existsSync(cwd) && statSync(cwd).isDirectory() ? cwd : process.cwd();
+export function createTerminalSession(sessionId: string, cwd: string, shell?: string): TerminalSession {
+  if (!sessionId) throw new Error("终端会话缺少所属 InFu 会话");
+  if (!existsSync(cwd) || !statSync(cwd).isDirectory()) throw new Error("终端工作目录不存在或不是目录");
+  const workDir = cwd;
   const shellPath = resolveShell(shell);
   const proc = pty.spawn(shellPath, [], {
     name: "xterm-256color",
@@ -69,6 +73,7 @@ export function createTerminalSession(cwd?: string, shell?: string): TerminalSes
   });
   const session: TerminalSession = {
     id: randomUUID(),
+    sessionId,
     cwd: workDir,
     shell: shellPath,
     pid: proc.pid,
@@ -141,9 +146,9 @@ export function killTerminalSession(id: string): boolean {
 }
 
 /** 活动会话列表（状态展示用） */
-export function listTerminalSessions(): Array<{ id: string; cwd: string; shell: string; pid: number; createdAt: number }> {
+export function listTerminalSessions(): Array<{ id: string; sessionId: string; cwd: string; shell: string; pid: number; createdAt: number }> {
   return [...sessions.values()].map((s) => ({
-    id: s.id, cwd: s.cwd, shell: s.shell, pid: s.pid, createdAt: s.createdAt,
+    id: s.id, sessionId: s.sessionId, cwd: s.cwd, shell: s.shell, pid: s.pid, createdAt: s.createdAt,
   }));
 }
 

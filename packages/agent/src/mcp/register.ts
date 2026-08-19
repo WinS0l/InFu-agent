@@ -11,7 +11,7 @@
  */
 
 import { existsSync } from "node:fs";
-import type { InfuConfig, McpServerConfig, RiskLevel } from "@infu/shared";
+import { isPrivateHostText, type InfuConfig, type McpServerConfig, type RiskLevel } from "@infu/shared";
 import { configPath, saveConfig, loadConfig } from "../providers/registry.js";
 
 export interface RegisterInput {
@@ -41,6 +41,14 @@ export function registerMcpServer(input: RegisterInput): RegisterResult {
   if (!id) return { ok: false, message: "名称无法生成有效 id（需含字母/数字）" };
   if (input.type === "http") {
     if (!input.url?.trim()) return { ok: false, message: "http 类型需要 url" };
+    try {
+      const url = new URL(input.url);
+      if ((url.protocol !== "http:" && url.protocol !== "https:") || url.username || url.password || isPrivateHostText(url.hostname)?.private) {
+        return { ok: false, message: "http URL 必须是非私有网络的 http/https 端点，且不可内嵌凭据" };
+      }
+    } catch {
+      return { ok: false, message: "http URL 无效" };
+    }
   } else {
     if (!input.command?.trim()) {
       return { ok: false, message: "stdio 类型需要 command（Windows 下 npx 需写 npx.cmd）" };

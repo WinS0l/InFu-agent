@@ -28,6 +28,7 @@ import { resolveDataDir, defaultDataDir, migrateDataDir } from "./data-dir.js";
 import { autoNameSession } from "./session-naming.js";
 import { parseInfuConfig, approvalPolicySchema, sandboxConfigSchema, generalConfigSchema, appearanceConfigSchema, browserConfigSchema, memoryConfigSchema } from "@infu/shared";
 import { TOOLS, clearObservedFiles } from "./tools/index.js";
+import { clearRecovery } from "./tools/recovery.js";
 import { clearApprovalMemory, clearSessionBypass, setSessionBypass, isSessionBypassed } from "./approval/cache.js";
 import { setEgressAllow, clearEgressAllow, isEgressAllowed, egressAllowRemaining } from "./egress-allow.js";
 import { isPathInside } from "./tools/util.js";
@@ -54,6 +55,7 @@ import { rebuildMessages } from "./db/rebuild.js";
 import type { ChatMessageLike } from "./providers/chat.js";
 import { resolveApprovalPolicy, shouldAutoApprove } from "./approval/policy.js";
 import { dockerAvailable, maybeRotateLog, isProtectedPath, commandLogPath } from "./sandbox/index.js";
+import { validateHttpMcpUrl } from "./mcp/client.js";
 import { winRestrictedAvailable } from "./sandbox/win-restricted.js";
 import {
   createTerminalSession, getTerminalSession, subscribeOutput, writeInput, resizeSession,
@@ -131,12 +133,14 @@ export interface ServerOptions {
   /** 静态托管目录（桌面端传 web dist：同端口托管 → 前端相对路径 fetch 零改动；缺省不托管，Web/CLI 模式不变） */
   staticDir?: string;
   /** 监听成功回调（桌面端拿实际端口加载主窗口；端口冲突自动递增后回调真实端口） */
-  onListening?: (port: number) => void;
+  onListening?: (port: number, localToken: string) => void;
   /**
    * v3.5 事件钩子（桌面端任务完成通知/防休眠用）：Agent 会话每个事件（含 done/error）
    * 都回调一次（已落库之后）；sessionId 为当前会话。桌面端据此发系统通知 / 释放防休眠。
    */
   onEvent?: (sessionId: string, event: import("@infu/shared").AgentEvent) => void;
+  /** Internal only: share the generated local API bearer between createApp and startServer. */
+  localToken?: string;
 }
 
 /**
@@ -217,12 +221,20 @@ function maskSecret(s: string): string {
 
 export function createApp(opts: ServerOptions = {}) {
   const app = new Hono();
-  // v3.1 审计修复：本地令牌鉴权——托管前端（staticDir 存在）时启用：随机 token 注入
-  // index.html（window.__INFU_TOKEN__），前端 apiFetch 统一带 X-InFu-Token header；
-  // 无 staticDir（纯 API / vite dev）不启用（CORS + Host 白名单已构成 CSRF 防线）。
-  // 本机网页可读 token（同源页面自身），但任意来源网页无法预知随机 token → 无法
-  // 以浏览器会话为跳板操纵 Agent（防「浏览器打开恶意页面 → fetch 本机 API」）。
-  const localToken = opts.staticDir ? randomUUID().replace(/-/g, "") : null;
+  // Every local API request needs a per-process bearer. Static mode receives it through
+  // index.html; Vite/desktop development receives it through the existing launch query.
+  const localToken = opts.localToken ?? process.env.INFU_LOCAL_TOKEN ?? randomUUID().replace(/-/g, "");
+  const authorizedRoot = (raw: string): string | null => {
+    const root = raw.trim();
+    if (!root || !fs.existsSync(root) || !fs.statSync(root).isDirectory()) return null;
+    const abs = path.resolve(root);
+    if (isProtectedPath(abs)) return null;
+    const equivalent = (a: string, b: string) => isPathInside(a, b) && isPathInside(b, a);
+    const isDefault = (!!opts.defaultRoot && equivalent(path.resolve(opts.defaultRoot), abs)) || equivalent(process.cwd(), abs);
+    const registered = listProjects().some((p) => equivalent(p.root, abs));
+    const sessionOwned = getStore().listSessions(1000).some((s) => !!s.root && equivalent(s.root, abs));
+    return isDefault || registered || sessionOwned ? abs : null;
+  };
   // v3.0 桌面端：dev 模式前端（vite 5199）与后端（agent 端口）跨域 → 放开 CORS。
   // 安全边界（v3.0 审计修复）：仅放行本机来源（localhost/127.0.0.1/[::1] 任意端口），
   // 其余 Origin 一律 403——防止任意网页 fetch 本机 API 操纵 Agent（CSRF/远程执行）。
@@ -238,7 +250,7 @@ export function createApp(opts: ServerOptions = {}) {
     }
     if (c.req.method === "OPTIONS") {
       c.header("Access-Control-Allow-Methods", "GET,POST,PUT,PATCH,DELETE,OPTIONS");
-      c.header("Access-Control-Allow-Headers", "Content-Type");
+      c.header("Access-Control-Allow-Headers", "Content-Type, X-InFu-Token");
       return c.body(null, 204);
     }
     // Host 校验：防 DNS rebinding（本机服务只接受本机主机名）
@@ -248,16 +260,14 @@ export function createApp(opts: ServerOptions = {}) {
     }
     await next();
   });
-  if (localToken) {
-    app.use("/api/*", async (c, next) => {
+  app.use("/api/*", async (c, next) => {
       // v3.4 审计修复：接受 ?token= query（img 等浏览器原生资源加载无法带 header——
       // 截图预览此前在生产模式 401 全挂；token 为本机随机、随进程重建，query 暴露面可控）
       if (c.req.header("x-infu-token") !== localToken && c.req.query("token") !== localToken) {
         return c.json({ ok: false, message: "未授权：缺少本地令牌" }, 401);
       }
       await next();
-    });
-  }
+  });
   // v3.5 审计修复（H4）：挂起队列条目带 sessionId——任务结束只清**本会话**的挂起项
   // （原实现清全部：会话 B 结束会强杀会话 A 用户正在看的审批/提问/计划卡片）
   const pendingApprovals = new Map<string, { sessionId: string; resolve: (approved: boolean) => void }>();
@@ -737,8 +747,8 @@ const pendingQuestions = new Map<string, { sessionId: string; resolve: (answer: 
 
   /** 文件树：git 仓库 = 已跟踪 + 未跟踪 + 改动统计；非 git = 递归扫描（跳过大目录） */
   app.get("/api/fs/tree", async (c) => {
-    const root = String(c.req.query("root") ?? "");
-    if (!root || !fs.existsSync(root) || !fs.statSync(root).isDirectory()) {
+    const root = authorizedRoot(String(c.req.query("root") ?? ""));
+    if (!root) {
       return c.json({ ok: false, message: "root 无效" }, 400);
     }
     type F = { path: string; added: number; removed: number; untracked: boolean };
@@ -783,10 +793,10 @@ const pendingQuestions = new Map<string, { sessionId: string; resolve: (answer: 
 
   /** 文件内容（文本；超大/二进制提示；限 300KB 预览） */
   app.get("/api/fs/file", async (c) => {
-    const root = String(c.req.query("root") ?? "");
+    const root = authorizedRoot(String(c.req.query("root") ?? ""));
     const rel = String(c.req.query("path") ?? "");
-    const abs = path.resolve(root, rel);
-    if (!root || !fs.existsSync(root) || !isPathInside(root, abs)) {
+    const abs = root ? path.resolve(root, rel) : "";
+    if (!root || !isPathInside(root, abs) || isProtectedPath(abs)) {
       return c.json({ ok: false, message: "路径越界" }, 400);
     }
     try {
@@ -816,8 +826,8 @@ const pendingQuestions = new Map<string, { sessionId: string; resolve: (answer: 
 
   // 审查文件列表：git diff --numstat（改动文件 + 增删行数）+ 未跟踪新文件（全新增）
   app.get("/api/review/files", async (c) => {
-    const root = String(c.req.query("root") ?? "");
-    if (!root || !fs.existsSync(root) || !fs.statSync(root).isDirectory()) {
+    const root = authorizedRoot(String(c.req.query("root") ?? ""));
+    if (!root) {
       return c.json({ ok: false, message: "root 无效" }, 400);
     }
     if (!(await isGitRepo(root))) return c.json({ ok: true, files: [], git: false }); // 非 git 仓库无审查（v3.3 补 21：git 标志供前端提示）
@@ -846,10 +856,10 @@ const pendingQuestions = new Map<string, { sessionId: string; resolve: (answer: 
 
   // 单文件 diff（unified 文本；前端行级着色）；未跟踪文件 = 全新增行
   app.get("/api/review/file", async (c) => {
-    const root = String(c.req.query("root") ?? "");
+    const root = authorizedRoot(String(c.req.query("root") ?? ""));
     const rel = String(c.req.query("path") ?? "");
-    const abs = path.resolve(root, rel);
-    if (!root || !fs.existsSync(root) || !isPathInside(root, abs)) {
+    const abs = root ? path.resolve(root, rel) : "";
+    if (!root || !isPathInside(root, abs) || isProtectedPath(abs)) {
       return c.json({ ok: false, message: "路径越界" }, 400);
     }
     // 未跟踪（新文件）
@@ -894,9 +904,10 @@ const pendingQuestions = new Map<string, { sessionId: string; resolve: (answer: 
 
   // ── v3.0 computer-use：截图目录列表 + 文件（ComputerUsePane 实时扫描）──
   app.get("/api/screenshots", (c) => {
-    const root = String(c.req.query("root") ?? "");
+    const root = authorizedRoot(String(c.req.query("root") ?? ""));
+    if (!root) return c.json([]);
     const dir = join(root, ".infu", "screenshots");
-    if (!root || !existsSync(dir)) return c.json([]);
+    if (!existsSync(dir)) return c.json([]);
     try {
       return c.json(readdirSync(dir).filter((f) => f.endsWith(".png")).sort().reverse());
     } catch {
@@ -904,10 +915,10 @@ const pendingQuestions = new Map<string, { sessionId: string; resolve: (answer: 
     }
   });
   app.get("/api/screenshots/file", (c) => {
-    const root = String(c.req.query("root") ?? "");
+    const root = authorizedRoot(String(c.req.query("root") ?? ""));
     const name = String(c.req.query("name") ?? "");
-    const dir = join(root, ".infu", "screenshots");
-    const file = join(dir, name);
+    const dir = root ? join(root, ".infu", "screenshots") : "";
+    const file = dir ? join(dir, name) : "";
     if (!root || !name || !isPathInside(dir, file) || !existsSync(file)) return c.notFound();
     try {
       return c.body(readFileSync(file), 200, { "content-type": "image/png" });
@@ -946,7 +957,9 @@ const pendingQuestions = new Map<string, { sessionId: string; resolve: (answer: 
   app.get("/api/memory", (c) => {
     // v3.3 补 25：接受前端传的当前项目 root（原固定 defaultRoot/启动目录——
     // 项目记忆在 E:\InFu(test) 而界面查启动目录 → 显示空，与索引库面板同款错位）
-    const root = String(c.req.query("root") ?? "").trim() || opts.defaultRoot || process.cwd();
+    const requestedRoot = String(c.req.query("root") ?? "").trim() || (opts.defaultRoot && fs.existsSync(opts.defaultRoot) ? opts.defaultRoot : process.cwd());
+    const root = authorizedRoot(requestedRoot);
+    if (!root) return c.json({ ok: false, message: "root 未授权" }, 403);
     const global = _listTopics("global", root);
     const project = _listTopics("project", root);
     const instr = _findInstructionFile(root);
@@ -974,13 +987,15 @@ const pendingQuestions = new Map<string, { sessionId: string; resolve: (answer: 
   app.get("/api/index/status", async (c) => {
     const { indexStatus } = await import("./index/index.js");
     // v2.14 批 18：root 参数（前端传当前项目；缺省回退启动目录）——修复面板与实际项目错位
-    const root = String(c.req.query("root") ?? "") || opts.defaultRoot || process.cwd();
+    const root = authorizedRoot(String(c.req.query("root") ?? "") || (opts.defaultRoot && fs.existsSync(opts.defaultRoot) ? opts.defaultRoot : process.cwd()));
+    if (!root) return c.json({ ok: false, message: "root 未授权" }, 403);
     return c.json(indexStatus(root));
   });
   app.post("/api/index/rebuild", async (c) => {
     const { buildIndex } = await import("./index/index.js");
     const body = await c.req.json().catch(() => ({}));
-    const root = String(body.root ?? "") || opts.defaultRoot || process.cwd();
+    const root = authorizedRoot(String(body.root ?? "") || (opts.defaultRoot && fs.existsSync(opts.defaultRoot) ? opts.defaultRoot : process.cwd()));
+    if (!root) return c.json({ ok: false, message: "root 未授权" }, 403);
     try {
       const idx = buildIndex(root);
       return c.json({ ok: true, fileCount: idx.files.length, builtAt: idx.builtAt });
@@ -994,6 +1009,12 @@ const pendingQuestions = new Map<string, { sessionId: string; resolve: (answer: 
   // 创建终端会话（cwd = 项目根；shell 可选 cmd/powershell/bash）
   app.post("/api/terminal", async (c) => {
     const body = await c.req.json().catch(() => ({}));
+    const ownerSessionId = typeof body.sessionId === "string" ? body.sessionId : "";
+    const owner = ownerSessionId ? getStore().getSession(ownerSessionId) : null;
+    if (!owner) return c.json({ ok: false, message: "终端必须关联一个已存在的会话" }, 400);
+    if (!owner.root || !existsSync(owner.root) || !statSync(owner.root).isDirectory()) {
+      return c.json({ ok: false, message: "所属会话没有有效的项目根目录" }, 400);
+    }
     // v3.0 批 12：显式 shell > config.general.terminalShell > auto
     // auto = 优先 Git Bash（探测存在即用），找不到回退 cmd.exe（同语义）
     let shell = typeof body.shell === "string" && body.shell ? body.shell : undefined;
@@ -1003,10 +1024,7 @@ const pendingQuestions = new Map<string, { sessionId: string; resolve: (answer: 
       const bash = resolveShell("bash");
       shell = bash !== "bash" ? "bash" : undefined; // resolveShell("bash") 找不到时返回 "bash"（PATH 兜底）
     }
-    const session = createTerminalSession(
-      typeof body.cwd === "string" ? body.cwd : undefined,
-      shell
-    );
+    const session = createTerminalSession(ownerSessionId, owner.root, shell);
     return c.json({ ok: true, id: session.id, cwd: session.cwd, shell: session.shell, pid: session.pid });
   });
 
@@ -1016,6 +1034,7 @@ const pendingQuestions = new Map<string, { sessionId: string; resolve: (answer: 
     const session = getTerminalSession(c.req.param("id"));
     if (!session) return c.json({ ok: false, message: "终端会话不存在或已关闭" }, 404);
     const body = await c.req.json().catch(() => ({}));
+    if (body.sessionId !== session.sessionId) return c.json({ ok: false, message: "终端不属于当前会话" }, 403);
     const data = typeof body.data === "string" ? body.data : "";
     const command = typeof body.command === "string" ? body.command.trim() : "";
     if (!data && !command) return c.json({ ok: true });
@@ -1047,6 +1066,7 @@ const pendingQuestions = new Map<string, { sessionId: string; resolve: (answer: 
     const session = getTerminalSession(c.req.param("id"));
     if (!session) return c.json({ ok: false, message: "终端会话不存在" }, 404);
     const body = await c.req.json().catch(() => ({}));
+    if (body.sessionId !== session.sessionId) return c.json({ ok: false, message: "终端不属于当前会话" }, 403);
     resizeSession(session, Number(body.cols) || 0, Number(body.rows) || 0);
     return c.json({ ok: true });
   });
@@ -1057,6 +1077,7 @@ const pendingQuestions = new Map<string, { sessionId: string; resolve: (answer: 
   app.get("/api/terminal/:id/stream", (c) => {
     const session = getTerminalSession(c.req.param("id"));
     if (!session) return c.json({ ok: false, message: "终端会话不存在" }, 404);
+    if (c.req.query("sessionId") !== session.sessionId) return c.json({ ok: false, message: "终端不属于当前会话" }, 403);
     return streamSSE(c, async (stream) => {
       const heartbeat = setInterval(() => {
         stream.writeSSE({ event: "ping", data: "" }).catch(() => {});
@@ -1081,8 +1102,10 @@ const pendingQuestions = new Map<string, { sessionId: string; resolve: (answer: 
 
   // 终止会话（kill 进程树 + 移除）
   app.delete("/api/terminal/:id", (c) => {
-    const ok = killTerminalSession(c.req.param("id"));
-    return c.json({ ok });
+    const session = getTerminalSession(c.req.param("id"));
+    if (!session) return c.json({ ok: false }, 404);
+    if (c.req.query("sessionId") !== session.sessionId) return c.json({ ok: false, message: "终端不属于当前会话" }, 403);
+    return c.json({ ok: killTerminalSession(session.id) });
   });
 
   // 活动会话列表（调试/管理用；含 buffer 长度与订阅者数诊断字段）
@@ -1863,6 +1886,7 @@ const pendingQuestions = new Map<string, { sessionId: string; resolve: (answer: 
     clearObservedFiles(id);
     clearApprovalMemory(id);
     clearSessionBypass(id);
+    try { clearRecovery(id); } catch { /* 忽略 */ }
     try { clearEgressAllow(id); } catch { /* 忽略 */ }
     // v3.6：todo 清单随会话删除清理
     try { clearTodos(id); } catch { /* 忽略 */ }
@@ -2018,7 +2042,8 @@ const pendingQuestions = new Map<string, { sessionId: string; resolve: (answer: 
       if (Array.isArray(body.args)) s.args = body.args.map(String);
     } else {
       if (!body.url) return c.json({ ok: false, message: "http 类型需要 url" }, 400);
-      s.url = String(body.url);
+      try { s.url = (await validateHttpMcpUrl(String(body.url))).toString(); }
+      catch (e) { return c.json({ ok: false, message: (e as Error).message }, 400); }
     }
     if (body.env && typeof body.env === "object") {
       const env: Record<string, string> = {};
@@ -2049,7 +2074,13 @@ const pendingQuestions = new Map<string, { sessionId: string; resolve: (answer: 
     if (typeof body.enabled === "boolean") s.enabled = body.enabled;
     if (typeof body.command === "string") s.command = body.command || undefined;
     if (Array.isArray(body.args)) s.args = body.args.map(String);
-    if (typeof body.url === "string") s.url = body.url || undefined;
+    if (typeof body.url === "string") {
+      if (!body.url) s.url = undefined;
+      else {
+        try { s.url = (await validateHttpMcpUrl(body.url)).toString(); }
+        catch (e) { return c.json({ ok: false, message: (e as Error).message }, 400); }
+      }
+    }
     if (body.env && typeof body.env === "object") {
       const env: Record<string, string> = {};
       for (const [k, v] of Object.entries(body.env)) if (typeof v === "string") env[k] = v;
@@ -2165,16 +2196,12 @@ const pendingQuestions = new Map<string, { sessionId: string; resolve: (answer: 
     if ((cfg.plugins ?? []).some((x) => x.id === id)) {
       return c.json({ ok: false, message: `插件 "${id}" 已存在` }, 409);
     }
-    // 默认落盘：~/.infu/plugins/<id>.mjs（用户级）；body.path 可指定绝对路径——
-    // 以 .mjs/.js/.ts 结尾视为完整文件路径，否则视为目录
-    const explicitPath = typeof body.path === "string" && body.path.trim() ? body.path.trim() : "";
-    const file = explicitPath
-      ? /\.(mjs|js|ts)$/i.test(explicitPath)
-        ? explicitPath
-        : join(explicitPath, `${id}.mjs`)
-      : join(resolveDataDir(), "plugins", `${id}.mjs`);
+    // Generated code is always kept in the protected data directory. Accepting an arbitrary
+    // body.path here made this authenticated API a filesystem write primitive.
+    const pluginDir = join(resolveDataDir(), "plugins");
+    const file = join(pluginDir, `${id}.mjs`);
     try {
-      mkdirSync(path.dirname(file), { recursive: true });
+      mkdirSync(pluginDir, { recursive: true });
       writeFileSync(file, code, "utf-8");
     } catch (e) {
       return c.json({ ok: false, message: `写入插件文件失败: ${(e as Error).message}` }, 500);
@@ -2495,7 +2522,8 @@ export function startServer(opts: ServerOptions = {}) {
   process.on("unhandledRejection", (reason) => crashLog("unhandledRejection", reason));
   const host = opts.host ?? "127.0.0.1";
   const basePort = opts.port ?? 4317;
-  const app = createApp(opts);
+  const localToken = opts.localToken ?? process.env.INFU_LOCAL_TOKEN ?? randomUUID().replace(/-/g, "");
+  const app = createApp({ ...opts, localToken });
   let httpServer: ReturnType<typeof createServer> | null = null;
   // v3.1：启动时清理上次残留的 running 会话（服务重启后旧任务已死，防续跑被误拦）
   try {
@@ -2548,7 +2576,7 @@ export function startServer(opts: ServerOptions = {}) {
       console.log(`[infu-agent] 服务已启动: http://${host}:${listeningPort}`);
       console.log(`[infu-agent] 工具数: ${Object.keys(TOOLS).length}`);
       checkConfigHealth();
-      opts.onListening?.(listeningPort);
+      opts.onListening?.(listeningPort, localToken);
       console.log(`[infu-agent] Ctrl+C 停止服务`);
     });
     server.on("error", (err: NodeJS.ErrnoException) => {

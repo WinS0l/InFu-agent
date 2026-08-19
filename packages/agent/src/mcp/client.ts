@@ -9,7 +9,8 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
-import type { McpServerConfig } from "@infu/shared";
+import { lookup } from "node:dns/promises";
+import { isPrivateHostText, type McpServerConfig } from "@infu/shared";
 import { sanitizeEnv } from "../sandbox/index.js";
 
 /** MCP 工具信息（listTools 返回） */
@@ -30,12 +31,30 @@ export interface McpConnection {
 /** 握手超时（stdio 子进程启动/远程端点响应慢时兜底，避免任务悬挂） */
 const CONNECT_TIMEOUT_MS = 20_000;
 
+/** Validate before connecting. DNS is checked, but the SDK transport cannot pin its address. */
+export async function validateHttpMcpUrl(raw: string): Promise<URL> {
+  let url: URL;
+  try { url = new URL(raw); } catch { throw new Error("MCP HTTP URL 无效"); }
+  if (url.protocol !== "https:" && url.protocol !== "http:") throw new Error("MCP HTTP URL 仅允许 http/https");
+  if (url.username || url.password) throw new Error("MCP HTTP URL 不允许内嵌凭据");
+  const textual = isPrivateHostText(url.hostname);
+  if (textual?.private) throw new Error("MCP HTTP URL 不允许指向本机或私有网络");
+  if (!textual) {
+    let addresses: Array<{ address: string }>;
+    try { addresses = await lookup(url.hostname, { all: true }); } catch { throw new Error("MCP HTTP 主机无法解析"); }
+    if (!addresses.length || addresses.some((entry) => isPrivateHostText(entry.address)?.private)) {
+      throw new Error("MCP HTTP 主机解析到本机或私有网络");
+    }
+  }
+  return url;
+}
+
 export async function connectMcp(cfg: McpServerConfig): Promise<McpConnection> {
   const client = new Client({ name: "infu-agent", version: "1.0.0" });
   let transport: StdioClientTransport | StreamableHTTPClientTransport;
   if (cfg.type === "http") {
     if (!cfg.url) throw new Error(`MCP 服务器「${cfg.name}」：http 类型需要 url`);
-    transport = new StreamableHTTPClientTransport(new URL(cfg.url));
+    transport = new StreamableHTTPClientTransport(await validateHttpMcpUrl(cfg.url));
   } else {
     if (!cfg.command) throw new Error(`MCP 服务器「${cfg.name}」：stdio 类型需要 command`);
     // v3.1 审计修复：env 以 sanitizeEnv() 为基底——SDK 的 env 传 undefined 会继承完整

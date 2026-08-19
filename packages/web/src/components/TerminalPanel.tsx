@@ -18,6 +18,7 @@ import { ShieldAlert, Loader2, RefreshCw, ChevronDown } from "lucide-react";
 import { useStore } from "../store";
 import { terminalStart, terminalInput, terminalResize, terminalKill, apiFetch } from "../api";
 import { CapsuleButton } from "./ui";
+import { readSseData, readSseEventName, takeSseFrames } from "@infu/shared";
 
 /** v3 xterm 配色（跟随设计系统：深色主题 主流 底；浅色主题用白底终端） */
 function xtermTheme(dark: boolean) {
@@ -77,6 +78,7 @@ interface PendingApproval {
 
 export default function TerminalPanel() {
   const root = useStore((s) => s.root);
+  const activeSessionId = useStore((s) => s.activeSessionId);
   const theme = useStore((s) => s.theme);
   // v3.0 批 12：theme=system → 解析系统实际深浅（xterm 配色跟随）
   const resolvedDark = theme === "system"
@@ -86,6 +88,7 @@ export default function TerminalPanel() {
   const termRef = useRef<Terminal | null>(null);
   const fitRef = useRef<FitAddon | null>(null);
   const sessionIdRef = useRef<string | null>(null);
+  const ownerSessionIdRef = useRef<string | null>(null);
   const abortRef = useRef<AbortController | null>(null);
   const lineBufRef = useRef("");
   const escBufRef = useRef("");
@@ -115,7 +118,9 @@ export default function TerminalPanel() {
     blockedRef.current = true; // 等待服务端裁决期间暂停后续输入处理
     enqueue(async () => {
       try {
-        const r = await terminalInput(id, { data: command + "\r", command });
+        const owner = ownerSessionIdRef.current;
+        if (!owner) return;
+        const r = await terminalInput(id, { sessionId: owner, data: command + "\r", command });
         if (r.requireApproval) {
           setApproval({ command, description: r.description ?? `执行高风险命令：${command}` });
         } else if (r.ok === false && r.message) {
@@ -139,7 +144,9 @@ export default function TerminalPanel() {
     enqueue(async () => {
       try {
         if (approved) {
-          await terminalInput(id, { data: a.command + "\r", command: a.command, confirmed: true });
+          const owner = ownerSessionIdRef.current;
+          if (!owner) return;
+          await terminalInput(id, { sessionId: owner, data: a.command + "\r", command: a.command, confirmed: true });
         } else {
           termRef.current?.write("\r\n⛔ 已拒绝（审批策略）：" + a.command + "\r\n");
         }
@@ -158,7 +165,9 @@ export default function TerminalPanel() {
     abortRef.current = controller;
     (async () => {
       try {
-        const res = await apiFetch(`/api/terminal/${encodeURIComponent(id)}/stream`, { signal: controller.signal });
+        const owner = ownerSessionIdRef.current;
+        if (!owner) throw new Error("终端所属会话已丢失");
+        const res = await apiFetch(`/api/terminal/${encodeURIComponent(id)}/stream?sessionId=${encodeURIComponent(owner)}`, { signal: controller.signal });
         if (!res.ok || !res.body) throw new Error(`终端流连接失败: ${res.status}`);
         const reader = res.body.getReader();
         const decoder = new TextDecoder();
@@ -167,18 +176,18 @@ export default function TerminalPanel() {
           const { done, value } = await reader.read();
           if (done) break;
           buf += decoder.decode(value, { stream: true });
-          const frames = buf.split("\n\n");
-          buf = frames.pop() ?? "";
-          for (const frame of frames) {
-            const dataLine = frame.split("\n").find((l) => l.startsWith("data:"));
-            if (!dataLine) continue;
+           const parsed = takeSseFrames(buf);
+           buf = parsed.remainder;
+           const frames = parsed.frames;
+           for (const frame of frames) {
+             const data = readSseData(frame);
+             if (data == null) continue;
             // v4.0 审计修复（L2）：解析 event: 行——服务端 exit 事件此前被丢弃
             // （只取 data: 行，`event: exit` 的 data 无 "data" 字段 → 忽略），
             // 「进程已退出」徽标是永假死代码
-            const eventLine = frame.split("\n").find((l) => l.startsWith("event:"));
-            const evName = eventLine?.slice(6).trim();
-            try {
-              const ev = JSON.parse(dataLine.slice(5).trim());
+             const evName = readSseEventName(frame);
+             try {
+               const ev = JSON.parse(data);
               if (evName === "exit") {
                 setExited(true);
                 setNote("进程已退出");
@@ -203,15 +212,18 @@ export default function TerminalPanel() {
     if (manual) retryCountRef.current = 0;
     const old = sessionIdRef.current;
     if (old) {
-      enqueue(async () => terminalKill(old).catch(() => {}));
+      const owner = ownerSessionIdRef.current;
+      if (owner) enqueue(async () => terminalKill(old, owner).catch(() => {}));
     }
     setConnecting(true);
     setExited(false);
     setNote("");
     try {
-      const s = await terminalStart(root || undefined, chosenShell || undefined);
+      if (!activeSessionId) throw new Error("请先创建或打开一个会话，再使用终端");
+      const s = await terminalStart(activeSessionId, chosenShell || undefined);
       retryCountRef.current = 0;
       sessionIdRef.current = s.id;
+      ownerSessionIdRef.current = activeSessionId;
       setSessionId(s.id);
       setShell(s.shell);
       termRef.current?.write(`\x1b[2J\x1b[H`);
@@ -267,7 +279,8 @@ export default function TerminalPanel() {
           }
           if (done) {
             const id = sessionIdRef.current;
-            if (id) enqueue(() => terminalInput(id, { data: escBufRef.current }).catch(() => {}));
+            const owner = ownerSessionIdRef.current;
+            if (id && owner) enqueue(() => terminalInput(id, { sessionId: owner, data: escBufRef.current }).catch(() => {}));
             escBufRef.current = "";
           }
           continue;
@@ -288,7 +301,8 @@ export default function TerminalPanel() {
           }
         } else if (ch < " " && ch !== "\t") {
           const id = sessionIdRef.current;
-          if (id) enqueue(() => terminalInput(id, { data: ch }).catch(() => {}));
+          const owner = ownerSessionIdRef.current;
+          if (id && owner) enqueue(() => terminalInput(id, { sessionId: owner, data: ch }).catch(() => {}));
         } else {
           lineBufRef.current += ch;
           term.write(ch); // 本地预览
@@ -300,8 +314,9 @@ export default function TerminalPanel() {
     const ro = new ResizeObserver(() => {
       try {
         fit.fit();
-        if (sessionIdRef.current) {
-          terminalResize(sessionIdRef.current, term.cols, term.rows).catch(() => {});
+        const owner = ownerSessionIdRef.current;
+        if (sessionIdRef.current && owner) {
+          terminalResize(sessionIdRef.current, owner, term.cols, term.rows).catch(() => {});
         }
       } catch { /* 面板隐藏时 fit 失败忽略 */ }
     });
@@ -321,6 +336,22 @@ export default function TerminalPanel() {
     const t = termRef.current;
     if (t) t.options.theme = xtermTheme(resolvedDark);
   }, [theme]);
+
+  // A PTY is scoped to the session root it was created for. Do not leave it
+  // interactive under another session's title/root after a sidebar switch.
+  useEffect(() => {
+    const id = sessionIdRef.current;
+    const owner = ownerSessionIdRef.current;
+    if (!id || !owner || owner === activeSessionId) return;
+    abortRef.current?.abort();
+    void terminalKill(id, owner).catch(() => {});
+    sessionIdRef.current = null;
+    ownerSessionIdRef.current = null;
+    setSessionId(null);
+    setShell("");
+    setExited(false);
+    setNote("");
+  }, [activeSessionId]);
 
   // 首开自动建会话（v3.6：失败退避——服务端不可用时最多自动重试 3 次，不再无限重试风暴）
   useEffect(() => {

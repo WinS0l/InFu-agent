@@ -21,6 +21,9 @@ import { mkdtempSync, writeFileSync, readFileSync, existsSync, mkdirSync, rmSync
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
+import { setDataDirForTest } from "../src/data-dir.js";
+import { getStore, resetStore } from "../src/db/store.js";
+import { readSseData, readSseEventName, takeSseFrames } from "@infu/shared";
 
 let passed = 0;
 let failed = 0;
@@ -30,6 +33,19 @@ function check(name: string, cond: boolean, detail = "") {
 }
 
 console.log("\n=== Web 交互式终端自测（v2.4 批 2）===\n");
+const testDataDir = mkdtempSync(join(tmpdir(), "infu-terminal-data-"));
+setDataDirForTest(testDataDir);
+resetStore();
+
+console.log("▶ 共享 SSE 解析");
+{
+  const first = takeSseFrames('event: output\r\ndata: {"data":"中');
+  check("不完整帧保留", first.frames.length === 0 && first.remainder.endsWith("中"));
+  const second = takeSseFrames(first.remainder + '文"}\r\ndata: tail\r\n\r\n');
+  check("CRLF 帧解析", second.frames.length === 1 && second.remainder === "");
+  check("多行 data 合并", readSseData(second.frames[0]) === '{"data":"中文"}\ntail');
+  check("event 字段解析", readSseEventName(second.frames[0]) === "output");
+}
 
 // ── 1. 高危命令检测 ──
 console.log("▶ detectDangerousTerminalCommand");
@@ -84,7 +100,7 @@ console.log("▶ 会话生命周期（node-pty）");
 {
   const proj = mkdtempSync(join(tmpdir(), "infu-term-sess-"));
   writeFileSync(join(proj, "marker.txt"), "hello");
-  const s = createTerminalSession(proj);
+  const s = createTerminalSession("terminal-direct-owner", proj);
   check("会话创建（id/pid）", !!s.id && typeof s.pid === "number" && s.pid > 0, JSON.stringify(s));
   check("cwd 正确", s.cwd === proj, s.cwd);
   check("shell 非空", s.shell.length > 0);
@@ -118,72 +134,79 @@ console.log("▶ 会话生命周期（node-pty）");
   check("kill 后 get 为 undefined", getTerminalSession(s.id) === undefined);
   check("重复 kill 返回 false", killTerminalSession(s.id) === false);
 
-  // cwd 不存在回退 process.cwd()
-  const s2 = createTerminalSession(join(tmpdir(), "no-such-dir-xyz"));
-  check("cwd 不存在回退 process.cwd()", s2.cwd === process.cwd(), s2.cwd);
-  killTerminalSession(s2.id);
+  let invalidCwdRejected = false;
+  try { createTerminalSession("terminal-direct-owner", join(tmpdir(), "no-such-dir-xyz")); } catch { invalidCwdRejected = true; }
+  check("cwd 不存在明确拒绝（不回退宿主目录）", invalidCwdRejected);
 
   // 清理
   closeAllTerminalSessions();
   check("closeAll 清空", listTerminalSessions().length === 0);
-  rmSync(proj, { recursive: true, force: true });
+  // Windows ConPTY may retain a short-lived directory handle after kill.
+  try { rmSync(proj, { recursive: true, force: true, maxRetries: 3, retryDelay: 300 }); } catch { /* 忽略 */ }
 }
 
 // ── 4. API 审批协议（createApp().request()）──
 console.log("▶ /api/terminal API 审批协议");
 {
-  const app = createApp();
+  const token = "terminal-test-token";
+  const app = createApp({ localToken: token });
   const proj = mkdtempSync(join(tmpdir(), "infu-term-api-"));
   const post = (path: string, body: unknown) =>
-    app.request(path, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+    app.request(path, { method: "POST", headers: { "content-type": "application/json", "x-infu-token": token }, body: JSON.stringify(body) });
 
   // 创建会话
-  const created = await post("/api/terminal", { cwd: proj });
+  const ownerSid = getStore().createSession({ title: "终端所有者", root: proj });
+  const otherSid = getStore().createSession({ title: "其他会话", root: proj });
+  const created = await post("/api/terminal", { sessionId: ownerSid, cwd: join(tmpdir(), "ignored") });
   const c = await created.json();
-  check("创建 200 + id", created.status === 200 && !!c.id, JSON.stringify(c));
+  check("创建 200 + id（cwd 从会话 root 读取）", created.status === 200 && !!c.id && c.cwd === proj, JSON.stringify(c));
   const sid = c.id as string;
 
   // 普通命令直接执行
-  const r1 = await post(`/api/terminal/${sid}/input`, { data: "echo normal\r", command: "echo normal" });
+  const r1 = await post(`/api/terminal/${sid}/input`, { sessionId: ownerSid, data: "echo normal\r", command: "echo normal" });
   const j1 = await r1.json();
   check("普通命令 ok", r1.status === 200 && j1.ok === true, JSON.stringify(j1));
 
   // 高危未确认 → requireApproval（不执行）
-  const r2 = await post(`/api/terminal/${sid}/input`, { data: "rm -rf dist\r", command: "rm -rf dist" });
+  const r2 = await post(`/api/terminal/${sid}/input`, { sessionId: ownerSid, data: "rm -rf dist\r", command: "rm -rf dist" });
   const j2 = await r2.json();
   check("高危未确认 → requireApproval", r2.status === 200 && j2.requireApproval === true && j2.risk === "high", JSON.stringify(j2));
   check("拦截描述含命令", String(j2.description ?? "").includes("rm -rf dist"));
 
   // 高危确认 → 执行
-  const r3 = await post(`/api/terminal/${sid}/input`, { data: "rm -rf dist\r", command: "rm -rf dist", confirmed: true });
+  const r3 = await post(`/api/terminal/${sid}/input`, { sessionId: ownerSid, data: "rm -rf dist\r", command: "rm -rf dist", confirmed: true });
   const j3 = await r3.json();
   check("高危确认 → ok", r3.status === 200 && j3.ok === true, JSON.stringify(j3));
 
   // 空 data 容忍
-  const r4 = await post(`/api/terminal/${sid}/input`, { data: "" });
+  const r4 = await post(`/api/terminal/${sid}/input`, { sessionId: ownerSid, data: "" });
   check("空 data ok", r4.status === 200);
 
   // 不存在会话 → 404
-  const r5 = await post("/api/terminal/no-such-session/input", { data: "x" });
+  const r5 = await post("/api/terminal/no-such-session/input", { sessionId: ownerSid, data: "x" });
   check("不存在会话 → 404", r5.status === 404, String(r5.status));
 
   // resize 端点
-  const r6 = await post(`/api/terminal/${sid}/resize`, { cols: 100, rows: 20 });
+  const r6 = await post(`/api/terminal/${sid}/resize`, { sessionId: ownerSid, cols: 100, rows: 20 });
   check("resize 端点 ok", r6.status === 200);
 
   // 删除会话
-  const del = await app.request(`/api/terminal/${sid}`, { method: "DELETE" });
+  const forbidden = await post(`/api/terminal/${sid}/input`, { sessionId: otherSid, data: "echo stolen\r" });
+  check("其他会话不能写入终端", forbidden.status === 403, String(forbidden.status));
+  const del = await app.request(`/api/terminal/${sid}?sessionId=${encodeURIComponent(ownerSid)}`, { method: "DELETE", headers: { "x-infu-token": token } });
   const d = await del.json();
   check("删除 ok", del.status === 200 && d.ok === true, JSON.stringify(d));
 
   // 删除后写入 → 404
-  const r7 = await post(`/api/terminal/${sid}/input`, { data: "x" });
+  const r7 = await post(`/api/terminal/${sid}/input`, { sessionId: ownerSid, data: "x" });
   check("删除后写入 → 404", r7.status === 404, String(r7.status));
 
   closeAllTerminalSessions();
   // Windows 上 PTY 子进程可能短暂占用目录句柄，清理失败不影响断言
   try { rmSync(proj, { recursive: true, force: true, maxRetries: 3, retryDelay: 300 }); } catch { /* 忽略 */ }
 }
+
+try { rmSync(testDataDir, { recursive: true, force: true }); } catch { /* 忽略 */ }
 
 console.log(`\n=== 结果：${passed} 通过 / ${failed} 失败 ===`);
 // Windows 上 node-pty 的 conpty 辅助句柄（Socket/ChildProcess）可能阻止进程自然退出：

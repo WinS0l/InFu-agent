@@ -1,4 +1,4 @@
-import type { AgentEvent, RiskLevel, SessionMeta, StoredEvent } from "@infu/shared";
+import { readSseData, takeSseFrames, type AgentEvent, type RiskLevel, type SessionMeta, type StoredEvent } from "@infu/shared";
 import { useStore } from "./store";
 
 /**
@@ -16,7 +16,7 @@ const API_BASE = (() => {
 // 但读取发生在模块加载第一时间，暴露窗口 = 页面加载到 JS 执行之间）
 const LOCAL_TOKEN = (() => {
   const g = globalThis as { __INFU_TOKEN__?: string };
-  const t = g.__INFU_TOKEN__;
+  const t = g.__INFU_TOKEN__ ?? new URLSearchParams(globalThis.location?.search).get("infuAgentToken") ?? undefined;
   if (t) {
     try { delete g.__INFU_TOKEN__; } catch { /* 只读全局（罕见）降级 */ }
   }
@@ -26,7 +26,7 @@ async function apiFetch(input: RequestInfo | URL, init?: RequestInit): Promise<R
   const url = typeof input === "string" && input.startsWith("/") ? API_BASE + input : input;
   // v3.1 审计修复：本地令牌——生产模式（同端口静态托管）服务端注入
   // window.__INFU_TOKEN__（见 server.ts），所有 API 请求带 X-InFu-Token；
-  // vite dev 无注入 → 不带头（服务端未启用令牌校验）
+  // Vite/desktop development receives the same token in the launch URL.
   const token = LOCAL_TOKEN;
   if (token) {
     const headers = new Headers(init?.headers);
@@ -420,12 +420,12 @@ export interface TerminalSessionInfo {
   pid: number;
 }
 
-/** 创建终端会话（cwd = 项目根；shell 可选 cmd/powershell/bash） */
-export async function terminalStart(cwd?: string, shell?: string): Promise<TerminalSessionInfo> {
+/** 创建终端会话（服务端从持久化会话读取唯一可信工作目录） */
+export async function terminalStart(sessionId: string, shell?: string): Promise<TerminalSessionInfo> {
   const res = await apiFetch("/api/terminal", {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ cwd, shell }),
+    body: JSON.stringify({ sessionId, shell }),
   });
   const data = await res.json();
   if (!res.ok || data.ok === false) throw new Error(data.message || `终端创建失败: ${res.status}`);
@@ -444,7 +444,7 @@ export interface TerminalInputResult {
 /** 写入输入（命令级：command 字段供服务端高危检测与审计） */
 export async function terminalInput(
   id: string,
-  body: { data: string; command?: string; confirmed?: boolean }
+  body: { sessionId: string; data: string; command?: string; confirmed?: boolean }
 ): Promise<TerminalInputResult> {
   const res = await apiFetch(`/api/terminal/${encodeURIComponent(id)}/input`, {
     method: "POST",
@@ -457,17 +457,17 @@ export async function terminalInput(
 }
 
 /** 同步 PTY 尺寸（xterm fit 后调用） */
-export async function terminalResize(id: string, cols: number, rows: number) {
+export async function terminalResize(id: string, sessionId: string, cols: number, rows: number) {
   await apiFetch(`/api/terminal/${encodeURIComponent(id)}/resize`, {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ cols, rows }),
+    body: JSON.stringify({ sessionId, cols, rows }),
   });
 }
 
 /** 终止会话（kill 进程树） */
-export async function terminalKill(id: string) {
-  await apiFetch(`/api/terminal/${encodeURIComponent(id)}`, { method: "DELETE" });
+export async function terminalKill(id: string, sessionId: string) {
+  await apiFetch(`/api/terminal/${encodeURIComponent(id)}?sessionId=${encodeURIComponent(sessionId)}`, { method: "DELETE" });
 }
 
 /** SSE 事件分发（v3.1：按连接会话路由——并行多会话时事件写各自缓存，不串扰） */
@@ -486,7 +486,9 @@ function handleEvent(ev: AgentEvent, connSid: string | null) {
   switch (ev.type) {
     case "session":
       // v2.1：SSE 首帧回传新会话 id，绑定当前会话
-      st.setActiveSessionId(ev.id);
+      // A late response from a newly-created session must not steal the view
+      // after the user has selected another session while the request started.
+      if (st.activeSessionId === null) st.setActiveSessionId(ev.id);
       st.setEventTarget(ev.id);
       // v3.1：新建会话即进入运行态（runningIds 标记，侧栏徽标）
       st.setSessionRunning(ev.id, true);
@@ -875,14 +877,14 @@ export async function sendChat(
       if (done) break;
       buf += decoder.decode(value, { stream: true });
 
-      // SSE 按空行分帧，取 data: 行
-      const frames = buf.split("\n\n");
-      buf = frames.pop() ?? "";
-      for (const frame of frames) {
-        const dataLine = frame.split("\n").find((l) => l.startsWith("data:"));
-        if (!dataLine) continue;
-        try {
-          const ev = JSON.parse(dataLine.slice(5).trim()) as AgentEvent;
+       const parsed = takeSseFrames(buf);
+       buf = parsed.remainder;
+       const frames = parsed.frames;
+       for (const frame of frames) {
+         const data = readSseData(frame);
+         if (data == null) continue;
+         try {
+           const ev = JSON.parse(data) as AgentEvent;
           // v3.1：session 事件绑定本连接会话 id（后续事件路由依据）
           if (ev.type === "session") connSid = ev.id;
           handleEvent(ev, connSid);

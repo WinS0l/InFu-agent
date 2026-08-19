@@ -10,7 +10,7 @@ import path from "node:path";
 import type { ToolContext, RiskLevel } from "@infu/shared";
 import {
   sanitizeEnv, auditCommand, dockerAvailable, buildDockerArgs,
-  resolveSandboxMode, resolveEffectiveMode, type SandboxMode,
+  redactSensitiveOutput, resolveSandboxMode, resolveEffectiveMode, type SandboxMode,
 } from "../sandbox/index.js";
 import {
   winRestrictedAvailable, runRestricted, type RestrictedRunResult,
@@ -102,7 +102,7 @@ export function fmtOut(o: { stdout: string; stderr: string }, ok: boolean): stri
   const parts: string[] = [];
   if (o.stdout.trim()) parts.push(o.stdout.trim());
   if (o.stderr.trim()) parts.push(`[stderr] ${o.stderr.trim()}`);
-  const body = parts.join("\n") || "(无输出)";
+  const body = redactSensitiveOutput(parts.join("\n") || "(无输出)");
   return ok ? clip(body) : `命令执行失败：\n${clip(body)}`;
 }
 
@@ -138,10 +138,10 @@ export async function runShell(
       return { ok: false, out: "任务已停止（用户中止）", code: null };
     }
     // 关键：错误详情必须透出（目录不存在/找不到命令/退出码），不要吞掉
-    const detail = [e.stderr, e.stdout, e.message ? String(e.message) : ""]
+    const detail = redactSensitiveOutput([e.stderr, e.stdout, e.message ? String(e.message) : ""]
       .filter((s) => typeof s === "string" && s.trim())
       .join("\n")
-      .trim();
+      .trim());
     return {
       ok: false,
       out: detail
@@ -166,10 +166,10 @@ export async function runInDocker(command: string, root: string, timeoutMs = 120
     return { ok: true, out: fmtOut({ stdout, stderr }, true), code: 0 };
   } catch (e: any) {
     const code = e.code ?? e.status ?? null;
-    const detail = [e.stderr, e.stdout, e.message ? String(e.message) : ""]
+    const detail = redactSensitiveOutput([e.stderr, e.stdout, e.message ? String(e.message) : ""]
       .filter((s) => typeof s === "string" && s.trim())
       .join("\n")
-      .trim();
+      .trim());
     return {
       ok: false,
       out: detail
@@ -198,10 +198,10 @@ export async function getSandboxMode(): Promise<SandboxMode> {
 /** 受限执行结果 → 标准输出格式（level/net 映射为模式标签；退出码 0 才算成功，与 Node exec 语义一致） */
 export function fmtRestricted(r: RestrictedRunResult): { out: string; ok: boolean; code: number | null; sandbox: string } {
   const ok = r.ok && !r.timedOut && r.code === 0;
-  const body = [r.stdout, r.stderr]
+  const body = redactSensitiveOutput([r.stdout, r.stderr]
     .filter((s) => s.trim())
     .join(r.stdout.trim() && r.stderr.trim() ? "\n[stderr] " : "\n")
-    .trim();
+    .trim());
   const out = ok
     ? clip(body || "(无输出)")
     : `命令执行失败（code=${r.code}${r.timedOut ? "，超时被终止" : ""}）：\n${clip(body)}`;

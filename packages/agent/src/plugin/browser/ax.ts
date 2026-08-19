@@ -165,7 +165,7 @@ export async function axSnapshot(cdp: CdpClient): Promise<AxSnapshotResult | nul
 
 /**
  * 按编号点击（编号来自 AX 树——与快照同一来源）。
- * CDP 定位：backendDOMNodeId → DOM.describeNode → DOM.resolveNode → Runtime.callFunctionOn 触发 click
+ * CDP 定位：backendDOMNodeId → DOM.resolveNode → Runtime.callFunctionOn 触发 click
  * 失败返回错误描述（调用方并入快照输出）。
  * v3.0 批 8：必须传「与展示给 Agent 的同一份 snapshot」的 indexMap——
  * 动态页面（bing 等）两次 snapshot 之间编号漂移，click 内重取会导致
@@ -178,9 +178,10 @@ export async function clickByIndex(cdp: CdpClient, idx: number, ax?: AxSnapshotR
     return `错误：编号 ${idx} 不存在，请重新 browser_snapshot 确认`;
   }
   try {
-    const { node } = await cdp.send("DOM.describeNode", { backendNodeId: backendId });
-    if (!node || !(node as { nodeId?: number }).nodeId) return `错误：编号 ${idx} 无法定位元素`;
-    const { object } = await cdp.send("DOM.resolveNode", { nodeId: (node as { nodeId: number }).nodeId });
+    // backendDOMNodeId is the snapshot-stable handle. Converting it through a
+    // frontend nodeId fails after DOM updates (and can be zero for AX nodes).
+    const { object } = await cdp.send("DOM.resolveNode", { backendNodeId: backendId });
+    if (!(object as { objectId?: string } | undefined)?.objectId) return `错误：编号 ${idx} 无法定位元素`;
     await cdp.send("Runtime.callFunctionOn", {
       objectId: (object as { objectId: string }).objectId,
       functionDeclaration: "function () { this.click(); if (typeof this.focus === 'function') this.focus(); return true; }",

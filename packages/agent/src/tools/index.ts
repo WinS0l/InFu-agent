@@ -8,7 +8,7 @@ import fs from "node:fs";
 import path, { join } from "node:path";
 import type { ToolDef, ToolContext, RiskLevel } from "@infu/shared";
 import {
-  sanitizeEnv, isProtectedPath, auditCommand,
+  sanitizeEnv, isProtectedPath, auditCommand, containsSensitiveOutput,
 } from "../sandbox/index.js";
 import { detectEgress, egressBlockedMessage } from "../sandbox/net-policy.js";
 import { registerMcpServer, type RegisterInput } from "../mcp/register.js";
@@ -41,6 +41,7 @@ import { loadIndex } from "../index/index.js";
 import { searchSymbols, type SymbolKind } from "../index/symbols.js";
 import { fsTools } from "./fs-tools.js";
 import { envTools } from "./env-tools.js";
+import { backupForRecovery } from "./recovery.js";
 
 /**
  * v3.5 升级 read-before-edit（对齐 ZCode CLI 的 readFileState 机制——三层）：
@@ -222,6 +223,8 @@ export const TOOLS: Record<string, ToolDef> = {
       }
       const desc = `写入文件 ${rel}（${(args.content as string).length} 字符）`;
       if (!(await guard(ctx, "write_file", "low", desc))) return "用户拒绝：未写入";
+      const recoveryId = fs.existsSync(abs) ? backupForRecovery(ctx.root, abs, rel, ctx.sessionId) : null;
+      if (fs.existsSync(abs) && !recoveryId) return "错误：无法创建会话恢复副本，未写入";
       fs.mkdirSync(path.dirname(abs), { recursive: true });
       fs.writeFileSync(abs, args.content as string, "utf-8");
       // v3.5：写成功 → 用新指纹刷新状态（自己写的算已知，可继续改无需重读）
@@ -234,7 +237,7 @@ export const TOOLS: Record<string, ToolDef> = {
         sizeBytes: st.size,
       });
       const lines = (args.content as string).split("\n").length;
-      return `已写入 ${rel}（${(args.content as string).length} 字符，${lines} 行）`;
+      return `已写入 ${rel}（${(args.content as string).length} 字符，${lines} 行）${recoveryId ? `；可用 file_ops restore 恢复（记录 ${recoveryId}，7 天有效）` : ""}`;
     },
   },
 
@@ -274,6 +277,8 @@ export const TOOLS: Record<string, ToolDef> = {
       }
       const desc = `修改文件 ${rel}（替换 ${oldText.length} 字符）`;
       if (!(await guard(ctx, "edit_file", "low", desc))) return "用户拒绝：未修改";
+      const recoveryId = backupForRecovery(ctx.root, abs, rel, ctx.sessionId);
+      if (!recoveryId) return "错误：无法创建会话恢复副本，未修改";
       const updated = content.replace(oldText, args.new_text as string);
       fs.writeFileSync(abs, updated, "utf-8");
       // v3.5：编辑成功 → 用新指纹刷新状态（本会话后续可继续改，无需重读）
@@ -290,7 +295,7 @@ export const TOOLS: Record<string, ToolDef> = {
       const newLines = (args.new_text as string).split("\n").length;
       const added = newLines > oldLines ? newLines - oldLines : 0;
       const removed = oldLines > newLines ? oldLines - newLines : 0;
-      return `已修改 ${rel}（${added > 0 ? `+${added} ` : ""}${removed > 0 ? `-${removed} ` : ""}行）`;
+      return `已修改 ${rel}（${added > 0 ? `+${added} ` : ""}${removed > 0 ? `-${removed} ` : ""}行）；可用 file_ops restore 恢复（记录 ${recoveryId}，7 天有效）`;
     },
   },
 
@@ -532,8 +537,7 @@ export const TOOLS: Record<string, ToolDef> = {
       // v4.0 审计修复：凭据模式补常见令牌前缀——GitHub PAT（ghp_）、Slack（xoxb-）、
       // Google API（AIza）、Google OAuth（ya29.）、JWT（eyJ…）此前漏检，命中时输出
       // >8K 会带凭据落盘项目 .infu/outputs/*.log
-      const SENSITIVE_OUT = /(sk-[A-Za-z0-9]{12,}|AKIA[0-9A-Z]{16}|ghp_[A-Za-z0-9]{20,}|xox[baprs]-[A-Za-z0-9-]{10,}|AIza[0-9A-Za-z_-]{20,}|ya29\.[0-9A-Za-z_-]+|eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}|BEGIN (RSA|OPENSSH|EC|DSA|PGP) PRIVATE KEY|Bearer [A-Za-z0-9._~+\/-]{16,}|api[_-]?key["']?\s*[:=]\s*["'][^"']{8,}["'])/i;
-      if (outText.length > 8000 && !SENSITIVE_OUT.test(outText)) {
+      if (outText.length > 8000 && !containsSensitiveOutput(outText)) {
         try {
           const outDir = join(ctx.root, ".infu", "outputs");
           fs.mkdirSync(outDir, { recursive: true });
@@ -551,13 +555,6 @@ export const TOOLS: Record<string, ToolDef> = {
         } catch {
           /* 落盘失败回退原输出（trimToolResult 仍会裁剪回填副本） */
         }
-      } else if (outText.length > 8000) {
-        // 命中凭据模式：不入盘，只回填 head/tail 裁剪版 + 警告（凭据不进模型上下文/会话事件）
-        return (
-          `${outText.slice(0, 4096)}\n[... 输出疑似包含敏感凭据（API 密钥/私钥/令牌），完整输出未保存 — 请改用只输出变量名/状态摘要的命令重试 …]\n${outText.slice(-1024)}` +
-          netNote +
-          (r.ok ? `\n${sandboxTag(r.sandbox)}${netTag}执行完成` : `\n${sandboxTag(r.sandbox)}${netTag}`)
-        );
       }
 
       // 命令审计（所有模式，含沙箱档位）

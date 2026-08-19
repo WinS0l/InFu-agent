@@ -28,6 +28,7 @@ fs.writeFileSync(path.join(root, "src", "deep", "b.ts"), "export const b = 2;");
 const ctx: ToolContext = {
   root, cwd: root, emit: () => {},
   requestApproval: async () => true,
+  sessionId: "fs-tools",
   scopeRules: undefined,
 } as unknown as ToolContext;
 
@@ -156,5 +157,6 @@ ok("project_tree 非写工具", !isMutatingTool("project_tree"));
 }
 
 fs.rmSync(tmp, { recursive: true, force: true });
+fs.rmSync(tmpDataDir, { recursive: true, force: true });
 console.log(`\n=== 结果：${pass} 通过 / ${fail} 失败 ===`);
 if (fail > 0) process.exit(1);

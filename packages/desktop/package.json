@@ -9,7 +9,8 @@
     "build": "tsc -p tsconfig.json && node -e \"require('fs').copyFileSync('src/preload.cjs','dist/preload.cjs')\"",
     "start": "npm run build && cross-env INFU_DESKTOP_DEV=1 electron .",
     "dev": "electron .",
-    "pack": "npm run build && electron-builder --win nsis"
+    "pack": "npm run build:prerequisites && npm run build && electron-builder --win nsis",
+    "build:prerequisites": "npm run build -w @infu/shared && npm run build -w @infu/agent && npm run build -w @infu/web"
   },
   "dependencies": {
     "@infu/agent": "*",

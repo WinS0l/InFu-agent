@@ -2,7 +2,7 @@
  * v2.6 收尾工具调用优化自测（畸形 JSON 修复 / 结果裁剪 / 写工具分组）
  * 运行：npx tsx packages/agent/tests/loop-opt.test.ts
  */
-import { repairToolArgs, trimToolResult, TRIM_TOOL_RESULT, isMutatingTool } from "../src/agent/loop.js";
+import { repairToolArgs, trimToolResult, TRIM_TOOL_RESULT, isMutatingTool, isToolResultFailure, shouldBlockSameCallFailure } from "../src/agent/loop.js";
 
 let passed = 0;
 let failed = 0;
@@ -38,6 +38,14 @@ console.log("\n▶ 写工具串行分组");
 check("写工具命中", isMutatingTool("write_file") && isMutatingTool("edit_file") && isMutatingTool("run_command") && isMutatingTool("git_commit") && isMutatingTool("git_add") && isMutatingTool("memory_write"));
 check("ask_user 串行", isMutatingTool("ask_user"));
 check("只读工具并行", !isMutatingTool("read_file") && !isMutatingTool("search_code") && !isMutatingTool("git_status") && !isMutatingTool("git_log") && !isMutatingTool("git_diff") && !isMutatingTool("webfetch") && !isMutatingTool("delegate_task"));
+
+// 4. Same-call operational failure guard
+console.log("\n▶ 同参失败恢复守卫");
+check("工具错误文本视为失败", isToolResultFailure(true, "错误：文件不存在 x.ts"));
+check("成功结果不计失败", !isToolResultFailure(true, "已写入 x.ts"));
+check("用户拒绝不计入失败（保留下次审批）", !isToolResultFailure(true, "用户拒绝：未写入"));
+check("两次失败前允许调整", !shouldBlockSameCallFailure(1));
+check("两次同参失败后阻止第三次执行", shouldBlockSameCallFailure(2));
 
 console.log(`\n=== 结果：${passed} 通过 / ${failed} 失败 ===`);
 process.exit(failed ? 1 : 0);

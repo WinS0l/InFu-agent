@@ -11,6 +11,7 @@ import type { ToolDef, ToolContext } from "@infu/shared";
 import { isProtectedPath } from "../sandbox/index.js";
 import { isPathInside, clip, guard, sessionRootReadOnlyBlock } from "./util.js";
 import { checkPathScope } from "../memory/index.js";
+import { backupForRecovery, restoreRecovery } from "./recovery.js";
 
 /** 递归目录树（v3.1；跳过噪音目录，depth 限制，文件带大小） */
 function renderTree(absRoot: string, depth: number): string {
@@ -76,18 +77,29 @@ export const fsTools: Record<string, ToolDef> = {
   file_ops: {
     name: "file_ops",
     description:
-      "文件系统操作：移动/复制/重命名/删除/创建目录。op = mv|cp|rm|mkdir；rm 只接受项目内的文件或目录（目录递归删除，谨慎）；mv/cp 目标必须在项目内。越界/受保护路径（~/.ssh 等）一律拒绝。",
+      "文件系统操作：移动/复制/重命名/删除/创建目录/恢复。op = mv|cp|rm|mkdir|restore；删除和覆盖前会保存本会话恢复副本（7 天有效），用 restore + recovery_id 恢复。rm 只接受项目内的文件或目录；越界/受保护路径（~/.ssh 等）一律拒绝。",
     risk: "medium",
     schema: z.object({
-      op: z.enum(["mv", "cp", "rm", "mkdir"]).describe("操作：mv 移动/重命名、cp 复制、rm 删除、mkdir 创建目录"),
-      path: z.string().describe("源路径（相对项目根）"),
+      op: z.enum(["mv", "cp", "rm", "mkdir", "restore"]).describe("操作：mv 移动/重命名、cp 复制、rm 删除、mkdir 创建目录、restore 恢复会话副本"),
+      path: z.string().optional().describe("源路径（相对项目根；restore 时省略）"),
       dest: z.string().optional().describe("目标路径（mv/cp 必填；相对项目根）"),
       recursive: z.boolean().optional().describe("rm/cp 目录时是否递归（默认 false；目录必须 true 否则报错）"),
+      recovery_id: z.string().optional().describe("restore 必填：此前写入/编辑/删除结果中的恢复记录 id"),
     }),
     async execute(args, ctx) {
       const op = args.op as string;
-      const rel = args.path as string;
+      const rel = args.path as string | undefined;
       const destRel = args.dest as string | undefined;
+      if (op === "restore") {
+        const recoveryId = args.recovery_id as string | undefined;
+        if (!recoveryId) return "错误：restore 需要 recovery_id";
+        const roBlock = sessionRootReadOnlyBlock(ctx);
+        if (roBlock) return `错误：${roBlock}`;
+        if (!(await guard(ctx, "file_ops", "medium", `恢复会话文件副本 ${recoveryId}`))) return "用户拒绝：文件恢复未执行";
+        const restored = restoreRecovery(ctx.root, recoveryId, ctx.sessionId, (target) => !checkPathScope(target, ctx.scopeRules));
+        return restored.ok ? restored.message : `恢复失败：${restored.message}`;
+      }
+      if (!rel) return "错误：该操作需要 path 源路径";
       const abs = path.resolve(ctx.root, rel);
       if (!isPathInside(ctx.root, abs)) return "错误：源路径越界";
       const scopeErr = checkPathScope(rel, ctx.scopeRules);
@@ -123,8 +135,10 @@ export const fsTools: Record<string, ToolDef> = {
           return `错误：${rel} 是目录——删除目录需 recursive=true（会递归删除全部内容）`;
         }
         try {
+          const recoveryId = backupForRecovery(ctx.root, abs, rel, ctx.sessionId);
+          if (!recoveryId) return "错误：无法创建会话恢复副本，未删除";
           fs.rmSync(abs, { recursive: stat.isDirectory(), force: true });
-          return `已删除：${rel}`;
+          return `已删除：${rel}；可用 file_ops restore 恢复（记录 ${recoveryId}，7 天有效）`;
         } catch (e) {
           return `删除失败：${(e as Error).message}`;
         }
@@ -142,6 +156,19 @@ export const fsTools: Record<string, ToolDef> = {
           return `错误：复制目录需 recursive=true`;
         }
         try {
+          // mv removes the source path; cp/mv can replace an existing destination. Preserve every
+          // path whose prior state would otherwise be lost.
+          const recoveryIds: string[] = [];
+          if (op === "mv") {
+            const sourceRecoveryId = backupForRecovery(ctx.root, abs, rel, ctx.sessionId);
+            if (!sourceRecoveryId) return "错误：无法创建会话恢复副本，未移动";
+            recoveryIds.push(sourceRecoveryId);
+          }
+          if (fs.existsSync(destAbs)) {
+            const destRecoveryId = backupForRecovery(ctx.root, destAbs, destRel, ctx.sessionId);
+            if (!destRecoveryId) return `错误：无法创建目标 ${destRel} 的会话恢复副本，未${op === "mv" ? "移动" : "复制"}`;
+            recoveryIds.push(destRecoveryId);
+          }
           if (op === "mv") {
             fs.mkdirSync(path.dirname(destAbs), { recursive: true });
             fs.renameSync(abs, destAbs);
@@ -149,7 +176,7 @@ export const fsTools: Record<string, ToolDef> = {
             fs.mkdirSync(path.dirname(destAbs), { recursive: true });
             fs.cpSync(abs, destAbs, { recursive: stat.isDirectory() });
           }
-          return `已${op === "mv" ? "移动/重命名" : "复制"}：${rel} → ${destRel}`;
+          return `已${op === "mv" ? "移动/重命名" : "复制"}：${rel} → ${destRel}${recoveryIds.length ? `；可用 file_ops restore 恢复（记录 ${recoveryIds.join("、")}，7 天有效）` : ""}`;
         } catch (e) {
           return `${op} 失败：${(e as Error).message}`;
         }

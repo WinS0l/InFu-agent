@@ -16,6 +16,7 @@ import { createApp } from "../src/server.js";
 import { jsonSchemaToZod } from "../src/mcp/schema.js";
 import { resolveToolRisk, mcpToolToDef } from "../src/mcp/tools.js";
 import { loadMcpTools } from "../src/mcp/index.js";
+import { validateHttpMcpUrl } from "../src/mcp/client.js";
 import type { McpConnection } from "../src/mcp/index.js";
 import { registerMcpServer, mcpIdFromName } from "../src/mcp/register.js";
 import { TOOLS } from "../src/tools/index.js";
@@ -40,6 +41,7 @@ console.log("\n=== MCP 客户端自测 ===\n");
 // v3.6：数据目录重定向到临时目录（原备份/恢复真实 ~/.infu/config.json 崩溃即污染用户数据）
 const tmpData = mkdtempSync(join(tmpdir(), "infu-test-"));
 setDataDirForTest(tmpData);
+writeFileSync(join(tmpData, "index.html"), "<!doctype html><html><head></head><body></body></html>", "utf-8");
 
 // ── 1. JSON Schema → zod 转换 ──
 console.log("▶ schema 转换器");
@@ -234,8 +236,10 @@ console.log("\n▶ /api/mcp API");
   const CONFIG = join(tmpData, "config.json");
   const saveTestConfig = (cfg: unknown) => writeFileSync(CONFIG, JSON.stringify(cfg, null, 2), "utf-8");
 
-  const app = createApp();
-  const call = (url: string, init?: RequestInit) => app.request(url, init);
+   const app = createApp({ staticDir: tmpData });
+   const tokenHtml = await (await app.fetch(new Request("http://localhost/"))).text();
+   const token = /window\.__INFU_TOKEN__="([0-9a-f]{32})"/.exec(tokenHtml)?.[1] ?? "";
+   const call = (url: string, init?: RequestInit) => app.request(url, { ...init, headers: { ...init?.headers, "x-infu-token": token } });
   try {
     saveTestConfig({ version: 2, models: [], providers: [] });
 
@@ -270,7 +274,7 @@ console.log("\n▶ /api/mcp API");
     r = await call("/api/mcp", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ id: "remote", name: "远程", type: "http", url: "https://x/mcp", enabled: false }),
+       body: JSON.stringify({ id: "remote", name: "远程", type: "http", url: "http://8.8.8.8/mcp", enabled: false }),
     });
     j = await r.json();
     check("添加 http 成功", r.status === 200 && j.ok);
@@ -420,6 +424,19 @@ console.log("\n▶ mcp_register 自注册");
   } finally {
     // v3.6：无需恢复——config 已重定向到临时数据目录，随 tmpData 一并清理
   }
+}
+
+// ── 9. MCP HTTP SSRF validation ──
+console.log("\n▶ MCP HTTP SSRF");
+{
+  const rejects = async (url: string) => {
+    try { await validateHttpMcpUrl(url); return false; } catch { return true; }
+  };
+  check("回环 IPv4 拒绝", await rejects("http://127.0.0.1/mcp"));
+  check("私有 IPv4 拒绝", await rejects("http://192.168.1.5/mcp"));
+  check("IPv6 回环拒绝", await rejects("http://[::1]/mcp"));
+  check("内嵌 URL 凭据拒绝", await rejects("https://user:pass@example.com/mcp"));
+  check("非 HTTP 协议拒绝", await rejects("file:///tmp/mcp"));
 }
 
 // 清理临时数据目录（v3.6：只删测试自己的临时目录，绝不动用户 ~/.infu）

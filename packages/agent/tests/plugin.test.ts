@@ -256,8 +256,11 @@ console.log("\n▶ /api/plugins + /api/skills API");
   const CONFIG = join(tmpData, "config.json");
   const saveTestConfig = (cfg: unknown) => writeFileSync(CONFIG, JSON.stringify(cfg, null, 2), "utf-8");
 
-  const app = createApp({ defaultRoot: proj });
-  const call = (url: string, init?: RequestInit) => app.request(url, init);
+  writeFileSync(join(tmpData, "index.html"), "<!doctype html><html><head></head><body></body></html>", "utf-8");
+  const app = createApp({ defaultRoot: proj, staticDir: tmpData });
+  const tokenHtml = await (await app.fetch(new Request("http://localhost/"))).text();
+  const token = /window\.__INFU_TOKEN__="([0-9a-f]{32})"/.exec(tokenHtml)?.[1] ?? "";
+  const call = (url: string, init?: RequestInit) => app.request(url, { ...init, headers: { ...init?.headers, "x-infu-token": token } });
   try {
     saveTestConfig({ version: 2, models: [], providers: [] });
 
@@ -355,13 +358,13 @@ console.log("\n▶ /api/plugins + /api/skills API");
       body: JSON.stringify({ id: "gen-hooks-2" }),
     });
     check("缺 code → 400", r.status === 400);
-    // 指定 path 生成
+    // 任意 path 不得把生成代码写出安全 dataDir
     r = await call("/api/plugins/generate", {
       method: "POST", headers: { "content-type": "application/json" },
       body: JSON.stringify({ id: "gen-hooks-3", code: genCode, path: join(proj, "custom-hooks.mjs") }),
     });
     j = await r.json();
-    check("指定 path 生成", r.status === 200 && String(j.path ?? "").includes("custom-hooks.mjs"), j.path);
+    check("指定 path 仍写入安全 plugins 目录", r.status === 200 && String(j.path ?? "").startsWith(join(tmpData, "plugins")) && !String(j.path ?? "").includes("custom-hooks.mjs"), j.path);
     // 清理生成的插件（删除注册 + 默认目录文件 + 自定义路径文件）
     await call("/api/plugins/gen-hooks", { method: "DELETE" });
     await call("/api/plugins/gen-hooks-3", { method: "DELETE" });

@@ -454,10 +454,13 @@ export async function getPage(opts?: { create?: boolean }): Promise<BrowserTab> 
   return getWebTab(opts);
 }
 
-/** 关闭浏览器并释放单例（桌面模式：不销毁——tab 除非显式关闭永不关闭，对齐主流） */
+/** 关闭当前浏览器标签页并释放单例。 */
 export async function closeBrowser(): Promise<void> {
   if (isDesktopMode()) {
-    // 桌面模式：CDP 桥连接由主进程持有（webview 元素生命周期），这里只清内存态
+    const closeTab = g.__infuCloseActiveBrowserTab as (() => boolean) | undefined;
+    if (typeof closeTab !== "function" || !closeTab()) {
+      throw new Error("当前没有可关闭的嵌入式浏览器标签页");
+    }
     return;
   }
   if (browser) {

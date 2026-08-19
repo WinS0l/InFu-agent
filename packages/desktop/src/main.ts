@@ -22,7 +22,7 @@
  *  - 关闭窗口 = 退出应用；托盘仅「显示主窗口/退出」入口
  */
 import { app, BrowserWindow, Tray, Menu, ipcMain, screen, nativeImage, nativeTheme, shell, dialog, powerSaveBlocker, Notification, type Rectangle } from "electron";
-import type { IpcMainEvent, IpcMainInvokeEvent, WebContents } from "electron";
+import type { IpcMainEvent, IpcMainInvokeEvent, WebContents, WebPreferences } from "electron";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { existsSync, mkdirSync, readFileSync, writeFileSync, renameSync } from "node:fs";
@@ -164,6 +164,22 @@ function createMainWindow() {
   });
   mainWindow = win;
 
+  // Only the application's own <webview> elements may create browser guests.
+  // Strip injected preload/privilege options before Electron attaches the guest.
+  win.webContents.on("will-attach-webview", (event, webPreferences, params) => {
+    const src = typeof params.src === "string" ? params.src : "";
+    const isStartPage = src.startsWith("data:text/html;charset=utf-8,");
+    if (!isStartPage && !sanitizeBrowserUrl(src)) {
+      event.preventDefault();
+      console.log(`[infu-desktop] 拒绝 webview attach: ${src.slice(0, 120)}`);
+      return;
+    }
+    delete webPreferences.preload;
+    delete (webPreferences as WebPreferences & { preloadURL?: string }).preloadURL;
+    webPreferences.nodeIntegration = false;
+    webPreferences.contextIsolation = true;
+    webPreferences.webSecurity = true;
+  });
   // webview 元素 → guest webContents 注册（批 8 CDP 桥：debugger.attach + 事件接线）
   win.webContents.on("did-attach-webview", (_e, wc) => registerBrowserWebContents(wc));
 
@@ -232,16 +248,10 @@ function createMainWindow() {
   // prod 127.0.0.1:<serverPort>——loadURL 不触发 will-navigate，初始加载不受影响）；
   // 其余 http(s) 交给系统浏览器并拦截（防 XSS/恶意链接把主窗口导航到任意远程页面后
   // 持有完整桥），file:// 等一律拦截
-  const mainOrigin = (() => {
-    try {
-      return new URL(IS_DEV ? "http://localhost:5199" : `http://127.0.0.1:${serverPort}`).origin;
-    } catch {
-      return "";
-    }
-  })();
   const isMainOrigin = (url: string) => {
     try {
-      return !!mainOrigin && new URL(url).origin === mainOrigin;
+      const mainOrigin = new URL(IS_DEV ? "http://localhost:5199" : `http://127.0.0.1:${serverPort}`).origin;
+      return new URL(url).origin === mainOrigin;
     } catch {
       return false;
     }
@@ -263,15 +273,9 @@ function createMainWindow() {
     }
   });
 
-  // 导航目标（统一等 agent 服务端口就绪后加载；dev = vite 独立端口 + query 传 API 端口）
-  if (serverPort > 0) {
-    const url = IS_DEV
-      ? `http://localhost:5199?infuAgentPort=${serverPort}`
-      : `http://127.0.0.1:${serverPort}/`;
-    // browser-use runtime 页识别排除用（精确排除应用自身页面，防把主窗口当嵌入式页）
-    (globalThis as Record<string, unknown>).__infuMainWindowUrl = url;
-    win.loadURL(url);
-  }
+  // Wait for startServer's onListening callback. The requested port can be
+  // occupied and auto-incremented, so loading before that would trust an
+  // unrelated local service with the desktop preload bridge.
 }
 
 // ── 嵌入式真浏览器（v3.0 批 8：<webview> 元素 + 主进程 CDP 桥）──
@@ -282,6 +286,13 @@ let activeTabId: number | null = null;
 function activeWc(): WebContents | null {
   return (activeTabId != null && browserTabs.get(activeTabId)) || null;
 }
+
+/** Agent-side browser_close closes only the active embedded tab, never the app window. */
+(globalThis as Record<string, unknown>).__infuCloseActiveBrowserTab = (): boolean => {
+  const wc = activeWc();
+  if (!wc || wc.isDestroyed()) return false;
+  try { wc.close(); return true; } catch { return false; }
+};
 
 /** 广播全 tab 状态 + 活跃 tab 详情（渲染进程 tab 条 + Agent browser_tabs） */
 function sendBrowserState() {
@@ -377,6 +388,7 @@ function registerBrowserWebContents(wc: WebContents) {
       activeTabId = browserTabs.keys().next().value ?? null;
     }
     refreshGlobalMarkers();
+    sendBrowserState();
   });
 
   refreshGlobalMarkers();
@@ -1071,7 +1083,6 @@ ipcMain.on("session:open", (e, id: string) => {
 // ── 生命周期 ──
 app.whenReady().then(() => {
   registerIpc();
-  createMainWindow();
   createTray();
 
   // 启动 agent 后端（同进程宿主；生产模式同端口托管 web dist）
@@ -1112,17 +1123,18 @@ app.whenReady().then(() => {
       }
       void sessionId;
     },
-    onListening: (port) => {
+    onListening: (port, localToken) => {
       serverPort = port;
       console.log(`[infu-desktop] agent 服务就绪: http://127.0.0.1:${port}`);
-      if (mainWindow) {
-        const url = IS_DEV
-          ? `http://localhost:5199?infuAgentPort=${port}`
-          : `http://127.0.0.1:${port}/`;
-        // 同步更新页识别标记（createMainWindow 的初始标记可能因端口冲突过期）
-        (globalThis as Record<string, unknown>).__infuMainWindowUrl = url;
-        mainWindow.loadURL(url);
-      }
+      // Create the trusted renderer only after the server selected its actual
+      // port. Loading a speculative 4317 page would grant an unrelated local
+      // process this window's preload bridge during a port collision.
+      if (!mainWindow) createMainWindow();
+      const url = IS_DEV
+        ? `http://localhost:5199?infuAgentPort=${port}&infuAgentToken=${encodeURIComponent(localToken)}`
+        : `http://127.0.0.1:${port}/`;
+      (globalThis as Record<string, unknown>).__infuMainWindowUrl = url;
+      mainWindow?.loadURL(url);
     },
   });
 

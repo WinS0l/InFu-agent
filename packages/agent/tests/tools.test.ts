@@ -4,10 +4,12 @@
  */
 import { TOOLS } from "../src/tools/index.js";
 import { resolveDataDir } from "../src/data-dir.js";
-import { mkdtempSync, writeFileSync, mkdirSync, existsSync, rmSync } from "node:fs";
+import { mkdtempSync, writeFileSync, mkdirSync, existsSync, rmSync, readFileSync } from "node:fs";
 import { tmpdir, homedir } from "node:os";
 import { join } from "node:path";
+import { setDataDirForTest } from "../src/data-dir.js";
 import type { ToolContext, AgentEvent } from "@infu/shared";
+import { redactSensitiveOutput } from "../src/sandbox/index.js";
 
 let passed = 0;
 let failed = 0;
@@ -18,6 +20,8 @@ function check(name: string, cond: boolean, detail = "") {
 
 // ── 测试项目夹具 ──
 const proj = mkdtempSync(join(tmpdir(), "infu-test-"));
+const dataDir = mkdtempSync(join(tmpdir(), "infu-tools-data-"));
+setDataDirForTest(dataDir);
 mkdirSync(join(proj, "src"), { recursive: true });
 writeFileSync(join(proj, "package.json"), JSON.stringify({
   name: "fixture", version: "1.0.0",
@@ -33,12 +37,16 @@ const ctx: ToolContext = {
   cwd: proj,
   requestApproval: async () => true,
   emit: (e) => events.push(e),
+  sessionId: "tools-recovery",
 };
 
 const run = (name: string, args: Record<string, unknown>) => TOOLS[name].execute(args, ctx);
 const T = TOOLS;
 
 console.log("\n=== 工具系统自测 ===\n");
+
+const redactedShort = redactSensitiveOutput("token=sk-abcdefghijklmnop");
+check("短命令输出也脱敏", !redactedShort.includes("abcdefghijklmnop") && redactedShort.includes("已脱敏"), redactedShort);
 
 // 1. project_scan
 console.log("▶ project_scan");
@@ -137,6 +145,22 @@ check("覆盖成功（写后免重读）", wr3.includes("已写入"), wr3);
 const wr4 = await run("write_file", { path: "src/brand-new.txt", content: "fresh" });
 check("新建文件无需先读", wr4.includes("已写入"), wr4);
 
+// 恢复副本：已有文件覆盖/删除均可在当前会话恢复；副本不放在项目目录或敏感路径。
+console.log("\n▶ 文件恢复");
+const recoveryTarget = join(proj, "src", "recover.txt");
+writeFileSync(recoveryTarget, "before", "utf-8");
+await run("read_file", { path: "src/recover.txt" });
+const wrRecovery = await run("write_file", { path: "src/recover.txt", content: "after" });
+const recoveryId = wrRecovery.match(/记录 ([a-f0-9-]{36})/i)?.[1];
+check("覆盖前创建会话恢复副本", !!recoveryId && !existsSync(join(proj, ".infu", "recovery")), wrRecovery);
+const restored = await TOOLS.file_ops.execute({ op: "restore", recovery_id: recoveryId }, ctx);
+check("restore 恢复覆盖前内容", restored.includes("已恢复") && readFileSync(recoveryTarget, "utf-8") === "before", restored);
+const removed = await run("file_ops", { op: "rm", path: "src/recover.txt" });
+const removeRecoveryId = removed.match(/记录 ([a-f0-9-]{36})/i)?.[1];
+check("删除前创建恢复副本", !!removeRecoveryId && !existsSync(recoveryTarget), removed);
+const restoredDeleted = await TOOLS.file_ops.execute({ op: "restore", recovery_id: removeRecoveryId }, ctx);
+check("restore 恢复已删除文件", restoredDeleted.includes("已恢复") && readFileSync(recoveryTarget, "utf-8") === "before", restoredDeleted);
+
 // 7. run_command
 console.log("\n▶ run_command");
 const cmd = await run("run_command", { command: "echo infu-ok" });
@@ -159,6 +183,7 @@ check("read 越界拦截", re.includes("越界"), re);
 
 // 清理
 rmSync(proj, { recursive: true, force: true });
+rmSync(dataDir, { recursive: true, force: true });
 
 console.log(`\n=== 结果：${passed} 通过 / ${failed} 失败 ===`);
 process.exit(failed ? 1 : 0);

@@ -190,7 +190,7 @@ export const visionTools: Record<string, ToolDef> = {
   "screen_capture": {
     name: "screen_capture",
     description:
-      "截取当前屏幕并注入视觉上下文（computer-use：视觉模型据此决定下一步操作）。仅桌面版可用。截图保存在项目 .infu/screenshots/ 目录，**返回的完整文件路径是唯一事实——不要猜测/拼接路径，需要重新读取时用返回的绝对路径**。minimize=true 时先最小化 InFu 窗口再截（InFu 挡在最前会截到自己；截完自动恢复）。多显示器时截取全部屏幕的合并区域（点击/移动坐标以该合并图为基准）。何时用：需要观察桌面/应用状态时（与浏览器工具互补——browser_snapshot 管网页，screen_capture 管桌面）。",
+      "截取当前屏幕并注入视觉上下文（computer-use：视觉模型据此决定下一步操作）。仅桌面版可用。截图保存在项目 .infu/screenshots/ 目录，**返回的完整文件路径是唯一事实——不要猜测/拼接路径，需要重新读取时用返回的绝对路径**。多显示器截图返回虚拟桌面原点：图片内坐标是相对坐标，screen_click/move/drag 使用的始终是绝对物理屏幕坐标，需将图片坐标加上该原点；screen_tree 已直接返回绝对坐标。minimize=true 时先最小化 InFu 窗口再截（InFu 挡在最前会截到自己；截完自动恢复）。",
     risk: "low",
     schema: z.object({
       minimize: z.boolean().optional().describe("true = 先最小化 InFu 窗口再截（操作桌面时建议；默认 false 截当前屏幕全貌）"),
@@ -198,10 +198,11 @@ export const visionTools: Record<string, ToolDef> = {
     async execute(args, ctx) {
       if (!isDesktop()) return "错误：screen_capture 仅桌面版可用（Web 版无屏幕访问能力）";
       const g = globalThis as Record<string, unknown>;
-      const cap = g.__infuScreenCapture as ((dir: string, minimize?: boolean, sessionId?: string) => string | null) | undefined;
+      const cap = g.__infuScreenCapture as ((dir: string, minimize?: boolean, sessionId?: string, signal?: AbortSignal) => Promise<{ file: string; origin: { x: number; y: number } } | null>) | undefined;
       if (typeof cap !== "function") return "错误：桌面截图通道不可用（主进程未接线）";
-      const file = cap(shotDir(ctx), args.minimize === true, ctx.sessionId);
-      if (!file || !existsSync(file)) return "截图失败：桌面截图通道未返回文件";
+      const captured = await cap(shotDir(ctx), args.minimize === true, ctx.sessionId, ctx.abortSignal);
+      if (!captured || !existsSync(captured.file)) return "截图失败：桌面截图通道未返回文件";
+      const { file, origin } = captured;
       // v3.4 审计修复（M7）：screen_capture 补大小上限（原实现无检查——4K 双屏 PNG
       // 可达 10-40MB，base64 后直接撑爆下一轮模型请求；read_image 有 8MB 检查它没有）
       const shotSize = statSync(file).size;
@@ -212,7 +213,8 @@ export const visionTools: Record<string, ToolDef> = {
       const name = file.split(/[\\/]/).pop() ?? "shot.png";
       return (
         pushVision(ctx, `data:image/png;base64,${b64}`, `桌面截图 ${name}`) +
-        `\n文件绝对路径：${file}（read_image 需要时用此路径，不要猜测）`
+        `\n文件绝对路径：${file}（read_image 需要时用此路径，不要猜测）` +
+        `\n虚拟桌面原点：(${origin.x}, ${origin.y})。截图内 (0,0) = 此绝对屏幕坐标；操作截图中的点时，将图片坐标加上此原点。`
       );
     },
   },
@@ -255,10 +257,10 @@ export const visionTools: Record<string, ToolDef> = {
       if (!isDesktop()) return "错误：screen_click 仅桌面版可用";
       if (!(await ctx.requestApproval(`桌面鼠标点击 (${args.x}, ${args.y})`, "medium"))) return "用户拒绝：未点击";
       const g = globalThis as Record<string, unknown>;
-      const input = g.__infuScreenInput as ((action: string, ...params: Array<string | number>) => string) | undefined;
+      const input = g.__infuScreenInput as ((action: string, params: Array<string | number>, signal?: AbortSignal) => Promise<string>) | undefined;
       if (typeof input !== "function") return "错误：桌面输入通道不可用（主进程未接线）";
       const btn = (args.button as string) ?? "left";
-      const r = input("click", args.x as number, args.y as number, btn);
+      const r = await input("click", [args.x as number, args.y as number, btn], ctx.abortSignal);
       return r.startsWith("OK") ? `已点击 (${args.x}, ${args.y}) ${btn === "double" ? "双击" : btn === "right" ? "右键" : "左键"}` : `点击失败：${r}`;
     },
   },
@@ -274,9 +276,9 @@ export const visionTools: Record<string, ToolDef> = {
       if (!isDesktop()) return "错误：screen_type 仅桌面版可用";
       if (!(await ctx.requestApproval(`桌面键盘输入：${(args.text as string).slice(0, 40)}`, "medium"))) return "用户拒绝：未输入";
       const g = globalThis as Record<string, unknown>;
-      const input = g.__infuScreenInput as ((action: string, ...params: Array<string | number>) => string) | undefined;
+      const input = g.__infuScreenInput as ((action: string, params: Array<string | number>, signal?: AbortSignal) => Promise<string>) | undefined;
       if (typeof input !== "function") return "错误：桌面输入通道不可用（主进程未接线）";
-      const r = input("type", args.text as string);
+      const r = await input("type", [args.text as string], ctx.abortSignal);
       return r.startsWith("OK") ? `已输入 ${(args.text as string).slice(0, 40)}` : `输入失败：${r}`;
     },
   },
@@ -295,9 +297,9 @@ export const visionTools: Record<string, ToolDef> = {
       const amount = Number(args.amount ?? 1);
       if (!(await ctx.requestApproval(`桌面滚动：${dir} ×${amount}`, "medium"))) return "用户拒绝：未滚动";
       const g = globalThis as Record<string, unknown>;
-      const input = g.__infuScreenInput as ((action: string, ...params: Array<string | number>) => string) | undefined;
+      const input = g.__infuScreenInput as ((action: string, params: Array<string | number>, signal?: AbortSignal) => Promise<string>) | undefined;
       if (typeof input !== "function") return "错误：桌面输入通道不可用（主进程未接线）";
-      const r = input("scroll", dir, amount);
+      const r = await input("scroll", [dir, amount], ctx.abortSignal);
       return r.startsWith("OK") ? `已滚动 ${dir} ${amount} 格` : `滚动失败：${r}`;
     },
   },
@@ -313,9 +315,9 @@ export const visionTools: Record<string, ToolDef> = {
       if (!isDesktop()) return "错误：screen_key 仅桌面版可用";
       if (!(await ctx.requestApproval(`桌面按键：${(args.keys as string).slice(0, 40)}`, "medium"))) return "用户拒绝：未按键";
       const g = globalThis as Record<string, unknown>;
-      const input = g.__infuScreenInput as ((action: string, ...params: Array<string | number>) => string) | undefined;
+      const input = g.__infuScreenInput as ((action: string, params: Array<string | number>, signal?: AbortSignal) => Promise<string>) | undefined;
       if (typeof input !== "function") return "错误：桌面输入通道不可用（主进程未接线）";
-      const r = input("key", args.keys as string);
+      const r = await input("key", [args.keys as string], ctx.abortSignal);
       return r.startsWith("OK") ? `已按键 ${args.keys}` : `按键失败：${r}`;
     },
   },
@@ -331,9 +333,9 @@ export const visionTools: Record<string, ToolDef> = {
     async execute(args, ctx) {
       if (!isDesktop()) return "错误：screen_move 仅桌面版可用";
       const g = globalThis as Record<string, unknown>;
-      const input = g.__infuScreenInput as ((action: string, ...params: Array<string | number>) => string) | undefined;
+      const input = g.__infuScreenInput as ((action: string, params: Array<string | number>, signal?: AbortSignal) => Promise<string>) | undefined;
       if (typeof input !== "function") return "错误：桌面输入通道不可用（主进程未接线）";
-      const r = input("move", args.x as number, args.y as number);
+      const r = await input("move", [args.x as number, args.y as number], ctx.abortSignal);
       return r.startsWith("OK") ? `鼠标已移动到 (${args.x}, ${args.y})` : `移动失败：${r}`;
     },
   },
@@ -355,9 +357,9 @@ export const visionTools: Record<string, ToolDef> = {
       const desc = `桌面拖拽 (${args.x1}, ${args.y1}) → (${args.x2}, ${args.y2})`;
       if (!(await ctx.requestApproval(desc, "medium"))) return "用户拒绝：未拖拽";
       const g = globalThis as Record<string, unknown>;
-      const input = g.__infuScreenInput as ((action: string, ...params: Array<string | number>) => string) | undefined;
+      const input = g.__infuScreenInput as ((action: string, params: Array<string | number>, signal?: AbortSignal) => Promise<string>) | undefined;
       if (typeof input !== "function") return "错误：桌面输入通道不可用（主进程未接线）";
-      const r = input("drag", args.x1 as number, args.y1 as number, args.x2 as number, args.y2 as number, (args.steps as number | undefined) ?? 10);
+      const r = await input("drag", [args.x1 as number, args.y1 as number, args.x2 as number, args.y2 as number, (args.steps as number | undefined) ?? 10], ctx.abortSignal);
       return r.startsWith("OK") ? `已拖拽 (${args.x1}, ${args.y1}) → (${args.x2}, ${args.y2})` : `拖拽失败：${r}`;
     },
   },
@@ -379,9 +381,9 @@ export const visionTools: Record<string, ToolDef> = {
         if (!(await ctx.requestApproval(`激活窗口：${name}`, "medium"))) return "用户拒绝：未激活";
       }
       const g = globalThis as Record<string, unknown>;
-      const win = g.__infuScreenWindows as ((action: string, name?: string) => string) | undefined;
+      const win = g.__infuScreenWindows as ((action: string, name?: string, signal?: AbortSignal) => Promise<string>) | undefined;
       if (typeof win !== "function") return "错误：桌面窗口通道不可用（主进程未接线）";
-      return win(action, name);
+      return win(action, name, ctx.abortSignal);
     },
   },
 };

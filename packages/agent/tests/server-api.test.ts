@@ -11,6 +11,7 @@
 import { createApp } from "../src/server.js";
 import { setDataDirForTest } from "../src/data-dir.js";
 import { getStore, resetStore } from "../src/db/store.js";
+import { createProject } from "../src/projects.js";
 import { mkdtempSync, mkdirSync, writeFileSync, existsSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -26,10 +27,20 @@ function check(name: string, cond: boolean, detail = "") {
 const tmpData = mkdtempSync(join(tmpdir(), "infu-server-api-"));
 setDataDirForTest(tmpData);
 resetStore(); // 确保用重定向目录
+writeFileSync(join(tmpData, "index.html"), "<!doctype html><html><head></head><body></body></html>", "utf-8");
 
 console.log("\n=== server API 回归（server-api）自测 ===\n");
 
-const app = createApp({});
+const rawApp = createApp({ staticDir: tmpData });
+const tokenHtml = await (await rawApp.fetch(new Request("http://localhost/"))).text();
+const token = /window\.__INFU_TOKEN__="([0-9a-f]{32})"/.exec(tokenHtml)?.[1] ?? "";
+const app = {
+  fetch(input: Request) {
+    const headers = new Headers(input.headers);
+    headers.set("x-infu-token", token);
+    return rawApp.fetch(new Request(input, { headers }));
+  },
+};
 
 // ── 1. /api/approvals/bypass 路由顺序回归（bypass 不被 :id 吞掉）──
 // v4.0 审计修复（H1 缓解）：bypass 必须针对已存在会话（404）+ 开启动作落库审计事件
@@ -128,10 +139,29 @@ console.log("\n▶ 本地令牌鉴权");
   check("index.html 注入 window.__INFU_TOKEN__", /window\.__INFU_TOKEN__="[0-9a-f]{32}"/.test(html));
 }
 
-// ── 4. 终端双字段旁路回归（v3.7）：command 与 data 并存时 data 段同样过高危检测 ──
+// ── 4. Arbitrary filesystem roots must be server-authorized ──
+console.log("\n▶ API root authorization");
+{
+  const privateRoot = mkdtempSync(join(tmpdir(), "infu-sa-private-"));
+  writeFileSync(join(privateRoot, "secret.txt"), "not an authorized project", "utf-8");
+  const denied = await app.fetch(new Request(`http://localhost/api/fs/file?root=${encodeURIComponent(privateRoot)}&path=secret.txt`));
+  check("未注册任意 root → 400", denied.status === 400, String(denied.status));
+  const registered = createProject(privateRoot, "授权项目");
+  const allowed = await app.fetch(new Request(`http://localhost/api/fs/file?root=${encodeURIComponent(privateRoot)}&path=secret.txt`));
+  const allowedJson = await allowed.json() as { content?: string };
+  check("注册项目 root 可读取", registered.ok && allowed.status === 200 && allowedJson.content === "not an authorized project", JSON.stringify(allowedJson));
+}
+
+// ── 5. 终端双字段旁路回归（v3.7）：command 与 data 并存时 data 段同样过高危检测 ──
 console.log("\n▶ 终端双字段高危检测（command + data 并存）");
 {
-  const t = await app.fetch(new Request("http://localhost/api/terminal", { method: "POST" }));
+  const terminalRoot = mkdtempSync(join(tmpdir(), "infu-sa-terminal-"));
+  const terminalOwner = getStore().createSession({ title: "终端测试", root: terminalRoot });
+  const t = await app.fetch(new Request("http://localhost/api/terminal", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ sessionId: terminalOwner }),
+  }));
   const tj = (await t.json()) as { ok?: boolean; id?: string };
   if (!tj.ok || !tj.id) {
     check("终端会话创建（前置）", false, JSON.stringify(tj));
@@ -141,7 +171,7 @@ console.log("\n▶ 终端双字段高危检测（command + data 并存）");
     const r = await app.fetch(new Request(`http://localhost/api/terminal/${tid}/input`, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ command: "echo ok", data: "rm -rf C:\r\n" }),
+      body: JSON.stringify({ sessionId: terminalOwner, command: "echo ok", data: "rm -rf C:\r\n" }),
     }));
     const j = (await r.json()) as { requireApproval?: boolean; risk?: string };
     check("command+data 并存时 data 高危 → requireApproval", r.status === 200 && j.requireApproval === true && j.risk === "high", JSON.stringify(j));
@@ -149,7 +179,7 @@ console.log("\n▶ 终端双字段高危检测（command + data 并存）");
     const r2 = await app.fetch(new Request(`http://localhost/api/terminal/${tid}/input`, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ command: "rm -rf C:", data: "rm -rf C:\r\n", confirmed: true }),
+      body: JSON.stringify({ sessionId: terminalOwner, command: "rm -rf C:", data: "rm -rf C:\r\n", confirmed: true }),
     }));
     const j2 = (await r2.json()) as { ok?: boolean };
     check("confirmed:true 后放行", j2.ok === true, JSON.stringify(j2));
@@ -157,7 +187,7 @@ console.log("\n▶ 终端双字段高危检测（command + data 并存）");
     const r3 = await app.fetch(new Request(`http://localhost/api/terminal/${tid}/input`, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ command: "echo ok", data: "" }),
+      body: JSON.stringify({ sessionId: terminalOwner, command: "echo ok", data: "" }),
     }));
     const j3 = (await r3.json()) as { ok?: boolean; requireApproval?: boolean };
     check("command-only 也过检测（echo ok 放行）", j3.ok === true, JSON.stringify(j3));
@@ -165,12 +195,12 @@ console.log("\n▶ 终端双字段高危检测（command + data 并存）");
     const r4 = await app.fetch(new Request(`http://localhost/api/terminal/${tid}/input`, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ command: "del /s /q C:", data: "" }),
+      body: JSON.stringify({ sessionId: terminalOwner, command: "del /s /q C:", data: "" }),
     }));
     const j4 = (await r4.json()) as { requireApproval?: boolean };
     check("command-only 高危 → requireApproval", j4.requireApproval === true, JSON.stringify(j4));
 
-    await app.fetch(new Request(`http://localhost/api/terminal/${tid}`, { method: "DELETE" }));
+    await app.fetch(new Request(`http://localhost/api/terminal/${tid}?sessionId=${encodeURIComponent(terminalOwner)}`, { method: "DELETE" }));
   }
 }
 

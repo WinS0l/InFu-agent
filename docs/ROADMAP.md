@@ -11,6 +11,13 @@
 
 ## 高优先级（未完成前，每个阶段都要知道）
 
+### ✅ v6.2 安全/可恢复性/交互可靠性批（2026-08-19，用户授权 P0+P1+P2 全量）
+- **P0 信任边界**——所有 API 模式统一随机本地令牌（static 注入、Vite proxy、桌面启动参数三通道）+ 文件/审查/截图/记忆/索引 API root 仅限默认根、已注册项目或会话根且拒绝受保护路径 + 子 Agent root 复用 `isPathInside` + 插件生成强制数据目录安全文件名 + MCP HTTP URL 协议/userinfo/私网解析门禁 + 命令所有长度输出统一脱敏；终端不再信任客户端 `confirmed` 绕过鉴权。
+- **P1 可恢复性**——会话级 data-dir recovery（写/编辑覆盖、删除、移动、复制覆盖均预备份；7 天 TTL；会话删除清理；`file_ops restore` 可逆恢复）+ 连续两次同工具同参数操作失败后阻止第三次原样执行（审批拒绝不计失败）。
+- **P2 桌面与前端**——Electron 先监听最终端口后创建受信窗口、`will-attach-webview` 收口、PTY 按会话 root 绑定并防跨会话操作、聊天会话首帧不抢用户切换、BrowserPanel 主进程状态收敛、共享 SSE CRLF/多行/UTF-8 分帧、Modal 焦点陷阱与语义、打包先构建所有嵌入产物。
+- **browser-use / computer-use 主流对齐复核**——基础 observe→act→verify 工具链已有（AX snapshot/JS eval/tab/viewport、UI tree/OCR/窗口/键鼠/拖拽）；本批修快照编号跨调用漂移、桌面 tab close 假成功、截图名穿越、截图/UIA 坐标双偏移、同步 PowerShell 冻结、输入覆盖剪贴板。屏幕输入/UIA 定稿为绝对物理坐标，截图附虚拟屏原点。
+- **依赖与验证**——`npm audit fix --package-lock-only` 后 `npm audit --omit=dev` 为 0 漏洞；`npm test` **51/51、1538 断言 0 失败**；根 build、agent/web/desktop tsc/build、lint 0 error 均过。MCP SDK 无 DNS connection pinning hook，当前每次连接前解析并拒绝私网，DNS rebinding TOCTOU 留作 transport 可替换时处理。
+
 ### ✅ v5.0 产品增强批（2026-08-18，审计建议清单全量落地——A1-A5/B1/B2/B4/C1-C4/A4/D3）
 - **A1 页面级 E2E 套件（补测试盲区）**——新 `tests/e2e-prod.test.ts`：真实服务器（staticDir=web/dist）+ playwright chromium 加载生产页面——API 层断言 CSP nonce 与注入脚本匹配 / 无令牌 401 / 带令牌 200 / 主题脚本与资源可加载；浏览器层断言页面零 401（CSP 回归的直接判据——v4.0 补 1 那类回归从此被自动拦截）/ 零 CSP 违规 / React 真实渲染 / theme-init.js 在 CSP 下执行（阻断 bundle 两阶段）/ 服务端配置主题管线。12 断言，入 npm test（43→44 套件）；startServer 补返回 httpServer（可 close）
 - **A2 命令审计 UI**——GET /api/audit（commands.log 尾段解析：时间/结果/cwd/命令/详情/沙箱档位，倒序 + 搜索 + 仅失败过滤）+ 设置「数据与统计 → 命令审计」Tab（AuditPane，过期响应守卫）

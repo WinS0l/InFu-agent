@@ -60,8 +60,16 @@ if (chromePath) {
     check("snapshot 含可交互元素", nav.includes("[1]") && nav.includes("用户名") && nav.includes("提交"), nav.slice(0, 300));
     const shot = await tool("browser_screenshot").execute({ name: "smoke" }, ctx);
     check("截图保存到 .infu/browser", shot.includes(".infu") && shot.includes("browser") && shot.includes(".png"), shot);
+    const traversalShot = await tool("browser_screenshot").execute({ name: "../escape\\nested" }, ctx);
+    const traversalPath = traversalShot.replace("截图已保存：", "").trim();
+    check("截图文件名阻止路径穿越", traversalPath.startsWith(join(proj, ".infu", "browser")) && !traversalPath.includes(".."), traversalPath);
     const snap = await tool("browser_snapshot").execute({}, ctx);
     check("snapshot 返回页面状态", snap.includes("Hello Browser"), snap.slice(0, 200));
+    const submitIndex = /\[(\d+)\].*提交/.exec(snap)?.[1];
+    await tool("browser_eval").execute({ code: "document.querySelector('button').dataset.clicked = 'yes'; document.body.insertAdjacentHTML('afterbegin', '<button>新按钮</button>')" }, ctx);
+    const clicked = submitIndex ? await tool("browser_click").execute({ target: submitIndex }, ctx) : "";
+    const clickState = await tool("browser_eval").execute({ code: "return document.querySelector('button[data-clicked]')?.dataset.clicked" }, ctx);
+    check("编号点击使用快照句柄而非重建编号", clicked.includes("已点击") && clickState.includes("yes"), `${clicked}\n${clickState}`);
   } finally {
     await tool("browser_close").execute({}, ctx);
     server.close();

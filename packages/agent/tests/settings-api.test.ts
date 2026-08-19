@@ -33,10 +33,10 @@ setDataDirForTest(tmpData);
 const CONFIG = configPath();
 saveConfig({ models: [] });
 
-const app = createApp();
-const get = (url: string) => app.request(url);
+const app = createApp({ localToken: "test-token" });
+const get = (url: string) => app.request(url, { headers: { "x-infu-token": "test-token" } });
 const put = (url: string, body: unknown) =>
-  app.request(url, { method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+  app.request(url, { method: "PUT", headers: { "content-type": "application/json", "x-infu-token": "test-token" }, body: JSON.stringify(body) });
 
 try {
   // ── 1. GET /api/config ──
@@ -178,13 +178,13 @@ try {
     check("browser.headless 落盘", cfg.browser?.headless === false);
     check("browser.executablePath 落盘", cfg.browser?.executablePath === "C:\\chromium\\chrome.exe");
 
-    const bs = await (await app.request("/api/browser/status")).json();
+    const bs = await (await get("/api/browser/status")).json();
     check("browser status 含 available 布尔", typeof bs.available === "boolean", JSON.stringify(bs));
     check("browser status 反映 headless=false", bs.headless === false);
     check("browser status 反映 executablePath", bs.executablePath === "C:\\chromium\\chrome.exe");
     check("browser status pluginEnabled 布尔", typeof bs.pluginEnabled === "boolean");
 
-    const mem = await (await app.request("/api/memory")).json();
+    const mem = await (await get("/api/memory")).json();
     check("memory 含 globalDir", typeof mem.globalDir === "string");
     check("memory 含 global 数组", Array.isArray(mem.global));
     check("memory 含 project 数组", Array.isArray(mem.project));
@@ -195,12 +195,12 @@ try {
     check("memory.autoSediment 落盘", loadConfig()?.memory?.autoSediment === false);
 
     // v2.7 使用统计 + 索引库端点
-    const stats = await (await app.request("/api/stats?days=7")).json();
+    const stats = await (await get("/api/stats?days=7")).json();
     check("stats 含 tokens 数字", typeof stats.tokens === "number", JSON.stringify(stats));
     check("stats 含 sessions/messages/activeDays", typeof stats.sessions === "number" && typeof stats.messages === "number" && typeof stats.activeDays === "number");
     check("stats 含 modelUsage 数组", Array.isArray(stats.modelUsage));
     check("stats 含 dailyTrend 数组", Array.isArray(stats.dailyTrend));
-    const idx = await (await app.request("/api/index/status")).json();
+    const idx = await (await get("/api/index/status")).json();
     check("index status 含 built 布尔", typeof idx.built === "boolean", JSON.stringify(idx));
   }
 } finally {

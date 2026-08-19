@@ -117,6 +117,16 @@ export interface RunResult {
   usage?: { cacheHit: number; cacheMiss: number; promptTokens: number; completionTokens: number };
 }
 
+/** A tool generally signals an operational failure with these result prefixes rather than throwing. */
+export function isToolResultFailure(ok: boolean, output: string): boolean {
+  return !ok || /^(错误：|工具参数校验失败：|工具执行异常:|恢复失败：|删除失败：|创建失败：|mv 失败：|cp 失败：)/.test(output);
+}
+
+/** Prevent unchanged retries after two operational failures; a changed call gets a fresh attempt. */
+export function shouldBlockSameCallFailure(consecutiveFailures: number): boolean {
+  return consecutiveFailures >= 2;
+}
+
 /**
  * preToolUse 钩子链（v2.3 批 2）：逐个执行——block → 立即返回拒绝；args 可改写；抛错放行不阻塞。
  * 返回 { args: 最终参数, blocked: 拦截原因或 null }。
@@ -575,12 +585,9 @@ export async function runAgent(opts: AgentRunOptions): Promise<RunResult> {
   const approvals = { required: 0, approved: 0, denied: 0 };
   // v3：LLM usage 聚合（模型 API 返回缓存命中 tokens → 命中率；v2.12 四桶）
   const usage = { cacheHit: 0, cacheMiss: 0, promptTokens: 0, completionTokens: 0 };
-  // v2.10 重复调用守卫（借鉴 主流 repeat-tool-reminder）：连续同工具同参数达 3/5/8 次注入提醒
-  // v2.13 修复：计数 Map 在**循环外**（原来每轮重建——跨轮累计失效，注释承诺的"连续 N 次"永不触发）
-  const repeatCount = new Map<string, number>();
-  // v3.0 批 6.5：记录每次调用成败——提醒仅在「连续失败」时注入（成功重复是合理确认，不打扰）
-  const repeatLastOk = new Map<string, boolean>();
-  const REPEAT_REMIND_AT = new Set([3, 5, 8]);
+  // Same-call failure guard: tool result strings often encode expected operational failures rather
+  // than throwing. Two unchanged failures require the model to change parameters or strategy.
+  const sameCallFailures = new Map<string, number>();
 
   // 审批计数（包装 requestApproval），工具层走计数版
   const guardedApproval = async (
@@ -834,8 +841,10 @@ export async function runAgent(opts: AgentRunOptions): Promise<RunResult> {
         return { call, args, ok: false, out: "任务已停止（用户中止）" };
       }
       const key = `${call.toolName}::${JSON.stringify(args ?? {})}`;
-      const n = (repeatCount.get(key) ?? 0) + 1;
-      repeatCount.set(key, n);
+      const previousFailures = sameCallFailures.get(key) ?? 0;
+      if (shouldBlockSameCallFailure(previousFailures)) {
+        return { call, args, ok: false, out: `错误：已阻止原样重试——${call.toolName} 以相同参数已连续失败 ${previousFailures} 次。未执行工具、未请求审批；请改变路径/参数/权限或改用恢复方案后再试。` };
+      }
       let out = "";
       let ok = true;
       try {
@@ -881,16 +890,9 @@ export async function runAgent(opts: AgentRunOptions): Promise<RunResult> {
         ok = false;
         out = `工具执行异常: ${(e as Error).message}`;
       }
-// v2.10 重复调用提醒（v3.0 批 6.5 优化：仅「上次同参调用失败」时注入——
-      // 防死循环重试；成功重复是合理确认（如 tab 切换），不打扰）
-      // v3.0 审计修复（B1）：原条件 `ok &&` 与注释相反——本次成功才提醒，而死循环
-      // 重试场景（连续失败）恰好不提醒；改回「第 N 次且上次失败」即提醒（与批 6.5 意图一致）
-      const prevOk = repeatLastOk.get(key) ?? true;
-      repeatLastOk.set(key, ok);
-      if (REPEAT_REMIND_AT.has(n) && prevOk === false) {
-        out = `⚠️ 提醒：你已连续 ${n} 次以完全相同参数调用 ${call.toolName}，且上次结果失败——请检查并改变策略（路径/参数/权限/格式），勿原样重试。\n\n${out}`;
-      }
-      return { call, args, ok, out };
+       if (isToolResultFailure(ok, out)) sameCallFailures.set(key, previousFailures + 1);
+       else sameCallFailures.delete(key);
+       return { call, args, ok, out };
     };
     const execResults: Awaited<ReturnType<typeof runOne>>[] = [];
     // 只读组：有界滚动池并行（v2.10：单批 ≤10，防单轮 20+ 只读调用同时跑爆内存；主流 maxParallel 同款）；

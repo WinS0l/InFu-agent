@@ -128,16 +128,24 @@ export default function BrowserPanel() {
   useEffect(() => {
     if (!desktop) return;
     return desktop.onBrowserState((s) => {
-      setNavState((prev) => ({
-        canGoBack: s.active?.canGoBack ?? prev.canGoBack,
-        canGoForward: s.active?.canGoForward ?? prev.canGoForward,
-        isLoading: s.active?.isLoading ?? prev.isLoading,
-      }));
-      // Agent 销毁了全部 tab（browser_close）→ 本地清空（元素移除 = guest 销毁）
-      if (s.tabs.length === 0 && tabsRef.current.length > 0) {
-        setTabs([]);
-        setFreeSize(null);
-      }
+      setNavState({
+        canGoBack: s.active?.canGoBack ?? false,
+        canGoForward: s.active?.canGoForward ?? false,
+        isLoading: s.active?.isLoading ?? false,
+      });
+      // Main process is authoritative for guests. Reconcile removals, titles,
+      // URLs and active state without creating guest elements from broadcasts.
+      setTabs((local) => {
+        const mainById = new Map(s.tabs.map((tab) => [tab.id, tab]));
+        const next = local
+          .filter((tab) => !tab.wcId || mainById.has(tab.wcId))
+          .map((tab) => {
+            const main = tab.wcId ? mainById.get(tab.wcId) : undefined;
+            return main ? { ...tab, title: main.title, url: main.url, active: main.active, pending: false } : tab;
+          });
+        return next;
+      });
+      if (s.tabs.length === 0) setFreeSize(null);
     });
   }, [desktop]);
 

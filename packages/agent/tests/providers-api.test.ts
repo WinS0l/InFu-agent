@@ -37,8 +37,8 @@ function saveTestConfig(cfg: unknown) {
 
 console.log("\n=== 供应商上游获取自测 ===\n");
 
-const app = createApp();
-const call = (url: string, init?: RequestInit) => app.request(url, init);
+const app = createApp({ localToken: "test-token" });
+const call = (url: string, init?: RequestInit) => app.request(url, { ...init, headers: { ...init?.headers, "x-infu-token": "test-token" } });
 
 try {
   // 1. 成功：标准 OpenAI /models 返回

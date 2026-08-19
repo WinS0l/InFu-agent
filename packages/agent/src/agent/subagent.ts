@@ -18,6 +18,7 @@
  */
 
 import path from "node:path";
+import { isPathInside } from "../tools/util.js";
 import type { AgentEvent, RuntimeModelInfo, ToolContext, ToolDef } from "@infu/shared";
 import { runAgent } from "./loop.js";
 import { readAgentFile, READONLY_TOOLS } from "./agents.js";
@@ -245,8 +246,7 @@ function genId(): string {
 function resolveSubRoot(spec: SubagentSpec, parentRoot: string): string {
   if (!spec.root) return parentRoot;
   const abs = path.isAbsolute(spec.root) ? path.normalize(spec.root) : path.resolve(parentRoot, spec.root);
-  const base = path.resolve(parentRoot) + path.sep;
-  if (!abs.startsWith(base) && abs !== path.resolve(parentRoot)) {
+  if (!isPathInside(parentRoot, abs)) {
     throw new Error(`错误：子智能体 root 越界（${spec.root} 不在项目根 ${parentRoot} 内）`);
   }
   return abs;

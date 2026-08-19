@@ -170,6 +170,13 @@ async function main() {
     console.log(`  ${tag} ${f}  ${((r.ms) / 1000).toFixed(1)}s ${detail}`);
     results.push(r);
     if (!ok) {
+      const failures = r.output
+        .split(/\r?\n/)
+        .filter((line) => /(?:❌|\bFAIL\b|\bError:|\bAssertionError\b)/.test(line));
+      if (failures.length) {
+        console.log("      失败断言：");
+        console.log(failures.map((line) => `      ${line}`).join("\n"));
+      }
       const tail = r.output.split(/\r?\n/).slice(-12).join("\n").trim();
       if (tail) console.log(tail.split("\n").map((l) => `      ${l}`).join("\n"));
     }

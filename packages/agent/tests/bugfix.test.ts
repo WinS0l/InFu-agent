@@ -9,7 +9,7 @@
  *  - updateStatus stopped 终态保护（用户停止不被 done/error 覆盖）
  */
 
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { SessionStore } from "../src/db/store.js";
@@ -51,12 +51,18 @@ function check(name: string, cond: boolean, detail = "") {
 
   // ── 3. 路径边界（isPathInside）──
   console.log("\n▶ 路径边界（startsWith 前缀漏洞修复）");
-  check("根内文件放行", isPathInside("E:\\work", "E:\\work\\a\\b.ts") === true);
-  check("根自身放行", isPathInside("E:\\work", "E:\\work") === true);
-  check("同前缀兄弟目录拦截", isPathInside("E:\\work", "E:\\work2\\evil.ts") === false);
-  check("根外拦截", isPathInside("E:\\work", "E:\\other\\x.ts") === false);
-  check("win32 大小写变体拦截", isPathInside("E:\\work", "E:\\WORK2\\x.ts") === false);
-  check("父目录相对路径 resolve 后拦截", isPathInside("E:\\work", "E:\\work\\..\\work2\\x.ts") === false);
+  const pathBase = mkdtempSync(join(tmpdir(), "infu-path-"));
+  const pathRoot = join(pathBase, "work");
+  const sibling = join(pathBase, "work2");
+  mkdirSync(pathRoot);
+  mkdirSync(sibling);
+  check("根内文件放行", isPathInside(pathRoot, join(pathRoot, "a", "b.ts")) === true);
+  check("根自身放行", isPathInside(pathRoot, pathRoot) === true);
+  check("同前缀兄弟目录拦截", isPathInside(pathRoot, join(sibling, "evil.ts")) === false);
+  check("根外拦截", isPathInside(pathRoot, join(pathBase, "other", "x.ts")) === false);
+  check("win32 大小写变体拦截", isPathInside(pathRoot, join(pathBase, "WORK2", "x.ts")) === false);
+  check("父目录相对路径 resolve 后拦截", isPathInside(pathRoot, join(pathRoot, "..", "work2", "x.ts")) === false);
+  rmSync(pathBase, { recursive: true, force: true });
 
   // ── 3.2. 符号链接/目录联接逃逸（v6.0 S6：junction 越界回归 + fail-closed）──
   console.log("\n▶ junction 逃逸拦截（真实目录联接）");

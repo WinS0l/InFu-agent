@@ -220,6 +220,13 @@ async function lspRun(
       void (async () => {
         for (let i = 0; i < requests.length; i++) {
           const r = requests[i];
+          // tsserver's `open` is a notification: it intentionally has no response. Waiting for
+          // one wastes the per-request timeout on slower CI runners and starves definition.
+          if (r.command === "open") {
+            try { p.stdin!.write(JSON.stringify({ seq: ++seq, type: "request", command: r.command, arguments: r.args }) + "\n"); }
+            catch { /* process failure is handled by the outer timeout/error listener */ }
+            continue;
+          }
           const id = ++seq;
           const request = new Promise<LspOutcome>((res) => {
             pending.set(id, res);

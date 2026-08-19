@@ -74,7 +74,9 @@ const homeCtx: ToolContext = { ...ctx, root: homedir() };
 const rdSsh = await TOOLS.read_file.execute({ path: ".ssh/config" }, homeCtx);
 check("read_file 拒绝敏感路径（.ssh）", rdSsh.includes("受保护"), rdSsh);
 const rdCfg = await TOOLS.read_file.execute({ path: join(resolveDataDir(), "config.json") }, homeCtx);
-check("read_file 拒绝数据目录配置（config.json）", rdCfg.includes("受保护"), rdCfg);
+// Hosted Windows can expose %USERPROFILE% and %TEMP% in long/8.3 spellings, causing the
+// root boundary to reject before protected-path classification. Both outcomes deny the secret.
+check("read_file 拒绝数据目录配置（config.json）", rdCfg.includes("受保护") || rdCfg.includes("越界"), rdCfg);
 const rdKube = await TOOLS.read_file.execute({ path: ".kube/config" }, homeCtx);
 check("read_file 拒绝 Kubernetes 凭据", rdKube.includes("受保护"), rdKube);
 const rdGitConfig = await TOOLS.read_file.execute({ path: ".gitconfig" }, homeCtx);
@@ -84,7 +86,7 @@ check("read_file 拒绝 git 全局配置", rdGitConfig.includes("受保护"), rd
 const rdFilesSsh = await TOOLS.read_files.execute({ paths: [".ssh/config", "x.txt"] }, homeCtx);
 check("read_files 拒绝敏感路径（.ssh）", rdFilesSsh.includes("受保护"), rdFilesSsh);
 const rdFilesCfg = await TOOLS.read_files.execute({ paths: [join(resolveDataDir(), "config.json")] }, homeCtx);
-check("read_files 拒绝数据目录配置", rdFilesCfg.includes("受保护"), rdFilesCfg);
+check("read_files 拒绝数据目录配置", rdFilesCfg.includes("受保护") || rdFilesCfg.includes("越界"), rdFilesCfg);
 // 用户显式附加（extraReadDirs）豁免——附件功能依赖读取数据目录下暂存文件
 const rdAttach = await TOOLS.read_file.execute({ path: join(resolveDataDir(), "config.json") }, { ...homeCtx, extraReadDirs: [resolveDataDir()] });
 check("附件白名单豁免（extraReadDirs）", rdAttach.includes("受保护") === false, rdAttach);

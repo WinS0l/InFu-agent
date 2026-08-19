@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Activity, Bot, Braces, ChevronRight, FileDown, Gauge, ListTree, RotateCcw, Wrench } from "lucide-react";
 import { useStore } from "../store";
 import { CodeBlock } from "./ui";
@@ -51,6 +51,8 @@ export default function SessionTracePane() {
   // selection changed on every render, which can recurse into React's update-depth guard.
   const events = useStore((s) => (activeSessionId ? s.traceBySession[activeSessionId] ?? EMPTY_EVENTS : EMPTY_EVENTS));
   const [selected, setSelected] = useState<number | null>(null);
+  // Sequence values are only unique inside a session. Never carry a selected row into another session.
+  useEffect(() => setSelected(null), [activeSessionId]);
   const rows = useMemo(() => events.filter((x) => ["model-call", "tool-start", "tool-result", "context-compressed", "model-fallback", "retry", "subagent-start", "subagent-done", "task-notification", "error"].includes(x.event.type)), [events]);
   const selectedEvent = selected == null ? null : rows.find((x) => x.seq === selected) ?? null;
   const usage = useMemo(() => rows.reduce((a, x) => {

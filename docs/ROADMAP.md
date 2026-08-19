@@ -93,6 +93,10 @@
 - **语义**——改动已提交、合并或丢弃后，实时审查显示工作区干净而胶囊保留历史累计 `+/-` 属正常，二者不再因错误 root 空白。
 - **验证**——web tsc + vite build 通过。
 
+### ✅ v6.18 会话追踪跨会话详情隔离（2026-08-19）
+- **修复**——追踪面板的 `selected` 是 session-local seq，切换会话时若保留同一数值可能错误命中新会话事件；在 `activeSessionId` 改变时显式清空选中详情。
+- **验证**——web tsc + vite build 通过。
+
 ### ✅ v5.0 产品增强批（2026-08-18，审计建议清单全量落地——A1-A5/B1/B2/B4/C1-C4/A4/D3）
 - **A1 页面级 E2E 套件（补测试盲区）**——新 `tests/e2e-prod.test.ts`：真实服务器（staticDir=web/dist）+ playwright chromium 加载生产页面——API 层断言 CSP nonce 与注入脚本匹配 / 无令牌 401 / 带令牌 200 / 主题脚本与资源可加载；浏览器层断言页面零 401（CSP 回归的直接判据——v4.0 补 1 那类回归从此被自动拦截）/ 零 CSP 违规 / React 真实渲染 / theme-init.js 在 CSP 下执行（阻断 bundle 两阶段）/ 服务端配置主题管线。12 断言，入 npm test（43→44 套件）；startServer 补返回 httpServer（可 close）
 - **A2 命令审计 UI**——GET /api/audit（commands.log 尾段解析：时间/结果/cwd/命令/详情/沙箱档位，倒序 + 搜索 + 仅失败过滤）+ 设置「数据与统计 → 命令审计」Tab（AuditPane，过期响应守卫）

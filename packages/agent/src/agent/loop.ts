@@ -297,10 +297,13 @@ export function repairToolArgs(raw: string | undefined): Record<string, unknown>
 }
 
 /** v2.6 收尾：回填模型的工具结果上限（完整输出仍走事件/落库；仅裁剪模型上下文里的副本） */
-export const TRIM_TOOL_RESULT = 8000;
+export const TRIM_TOOL_RESULT = 6000;
 export function trimToolResult(out: string, max = TRIM_TOOL_RESULT): string {
   if (out.length <= max) return out;
-  return out.slice(0, max) + `\n…（输出过长已截断，完整内容见会话记录；共 ${out.length} 字符）`;
+  // 保留尾部的退出码、异常和最终统计；完整文本仍在事件流与会话数据库中。
+  const tail = Math.min(1200, Math.floor(max / 3));
+  const head = Math.max(1, max - tail);
+  return out.slice(0, head) + `\n…（中间输出已截断，完整内容见会话记录；共 ${out.length} 字符）…\n` + out.slice(-tail);
 }
 
 // ── v2.12 工具 schema 精简（Token 成本杠杆：MCP 大 schema 可吃 67K token）──
@@ -492,7 +495,8 @@ export async function runAgent(opts: AgentRunOptions): Promise<RunResult> {
   // 组装 OpenAI tools 格式（zod schema → JSON Schema）
   // v2.12：schema 精简（compactJsonSchema）——MCP/插件大 schema 吃大量 token 的最大成本杠杆；
   // 工具 description 也截断（内置工具手写描述普遍 <800 无感，MCP 超长被裁）
-  const allowed = Object.entries(tools);
+  // 固定工具序列化顺序：扩展加载顺序变化不应打碎提供商的 prompt/KV cache 前缀。
+  const allowed = Object.entries(tools).sort(([a], [b]) => a.localeCompare(b));
   const openaiTools = allowed.map(([name, t]) => ({
     type: "function" as const,
     function: {
@@ -515,7 +519,7 @@ export async function runAgent(opts: AgentRunOptions): Promise<RunResult> {
    * 只作用于运行时 messages）。预算跟当前活动模型走——降级切模型后自动跟随。
    * v3.2：force=true 强制压缩一次（API 400 上下文超限时——估算可能低估，直接压到目标）。
    */
-  const ensureContextBudget = async (force = false) => {
+  const ensureContextBudget = async (force = false): Promise<boolean> => {
     const window = resolveContextWindow({
       provider: chain.active.provider as any,
       model: chain.active.model,
@@ -523,7 +527,7 @@ export async function runAgent(opts: AgentRunOptions): Promise<RunResult> {
     });
     // v6.0（D1/S2）：触发判定用校准因子（API 真实用量 vs 本地估算的 EWMA 比值）修正估算
     const calibFactor = contextCalibrationFactor(sessionId ?? "cli");
-    if (!force && estimateTokens(messages) * calibFactor <= window * COMPRESS_TRIGGER_RATIO) return;
+    if (!force && estimateTokens(messages) * calibFactor <= window * COMPRESS_TRIGGER_RATIO) return false;
     const summarize = async (history: ChatMessageLike[]): Promise<string> => {
       const out: string[] = [];
       // v2.10 缓存友好：摘要请求 = 当前 system（稳定前缀）+ 原样历史消息 + 末尾摘要指令
@@ -538,6 +542,9 @@ export async function runAgent(opts: AgentRunOptions): Promise<RunResult> {
           ...history,
           { role: "user", content: SUMMARIZE_PROMPT },
         ],
+        // 摘要请求沿用正常调用的完整工具前缀，最大化 KV cache 命中；显式禁止工具调用。
+        tools: openaiTools,
+        toolChoice: "none",
         signal: abortSignal,
       })) {
         if (delta.text) out.push(delta.text);
@@ -578,7 +585,9 @@ export async function runAgent(opts: AgentRunOptions): Promise<RunResult> {
     if (r.after < r.before || r.messages !== messages) {
       messages = r.messages;
       emit({ type: "context-compressed", before: r.before, after: r.after, summary: r.summary });
+      return true;
     }
+    return false;
   };
   let toolCount = 0;
   const toolLogs: Array<{ tool: string; args: Record<string, unknown>; ok: boolean; summary: string }> = [];
@@ -713,7 +722,12 @@ export async function runAgent(opts: AgentRunOptions): Promise<RunResult> {
         if (!ctxRetried && isContextWindowExceeded(e)) {
           ctxRetried = true;
           try {
-            await ensureContextBudget(true);
+            const recovered = await ensureContextBudget(true);
+            // 只有上下文表面真的缩减才值得重试，避免额度和时间被无效的 400 循环消耗。
+            if (!recovered) {
+              callError = "模型拒绝请求：上下文超出窗口，自动压缩未能缩减上下文。请减少附件、缩小任务范围或使用更大上下文模型。";
+              break;
+            }
           } catch {
             /* 压缩失败：继续透出原错误 */
           }

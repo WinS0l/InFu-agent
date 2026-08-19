@@ -475,6 +475,8 @@ function handleEvent(ev: AgentEvent, connSid: string | null) {
   const st = useStore.getState();
   // 事件路由目标 = 本连接会话（与当前视图不同才切换，避免每次 set 触发订阅）
   if (connSid && connSid !== st.eventTarget) st.setEventTarget(connSid);
+  // 聊天视图只保留可读摘要；检查器保存同一条原始事件流，实时与历史会话一致。
+  st.appendTrace(ev, connSid ?? st.eventTarget ?? st.activeSessionId);
   // v2.5：子智能体内部过程事件（带 subagentId）→ 路由进委派卡片的迷你时间线，不进主消息流
   if (ev && "subagentId" in ev && ev.subagentId) {
     st.updateSubagent(ev);

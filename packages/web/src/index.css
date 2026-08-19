@@ -252,6 +252,26 @@ html[data-stream-cursor="off"] .stream-cursor::after { display: none; }
   pointer-events: none;
 }
 
+/* 欢迎页仅突出产品名：慢速光带扫过字形，避免常驻的装饰性动效干扰工作区。 */
+.infinite-future-mark {
+  position: relative;
+  text-shadow: 0 0 28px color-mix(in srgb, var(--info) 30%, transparent);
+  animation: future-breathe 6s ease-in-out infinite;
+}
+
+/* 会话状态胶囊有独立的近场阴影与顶部高光，圆点、展开胶囊和菜单保持同一悬浮层级。 */
+.task-capsule {
+  box-shadow: 0 10px 22px rgba(0, 0, 0, 0.2), 0 2px 5px rgba(0, 0, 0, 0.18), inset 0 1px 0 var(--border-l3);
+}
+.task-capsule:hover { box-shadow: 0 14px 30px rgba(0, 0, 0, 0.26), 0 3px 7px rgba(0, 0, 0, 0.2), inset 0 1px 0 var(--border-l4); transform: translateY(-1px); }
+.task-capsule-menu { box-shadow: 0 18px 42px rgba(0, 0, 0, 0.3), 0 3px 10px rgba(0, 0, 0, 0.18), inset 0 1px 0 var(--border-l3); }
+.task-capsule-text { animation: capsule-summary-in 180ms ease-out; }
+@keyframes capsule-summary-in { from { opacity: 0; transform: translateY(3px); } to { opacity: 1; transform: translateY(0); } }
+@keyframes future-breathe {
+  0%, 100% { filter: drop-shadow(0 0 0 transparent); opacity: .92; }
+  50% { filter: drop-shadow(0 0 18px color-mix(in srgb, var(--info) 38%, transparent)); opacity: 1; }
+}
+
 /* ── 助手 Markdown（.infu-md：Streamdown 输出容器；v3 对齐 harness MarkdownText）── */
 .infu-md { min-width: 0; overflow-wrap: anywhere; font-size: 15px; line-height: 25px; color: var(--text-primary); }
 .infu-md strong { font-weight: 600; }
@@ -364,7 +384,7 @@ html[data-stream-cursor="off"] .stream-cursor::after { display: none; }
 
 /* 动效减弱偏好 */
 @media (prefers-reduced-motion: reduce) {
-  .shimmer-text, .glare-sweep::after, .stream-cursor::after, .tool-running { animation: none; }
+  .shimmer-text, .glare-sweep::after, .stream-cursor::after, .tool-running, .infinite-future-mark, .task-capsule-text { animation: none; }
   body { transition: none; }
 }
 

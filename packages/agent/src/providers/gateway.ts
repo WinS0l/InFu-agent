@@ -73,6 +73,7 @@ export interface FailoverOptions {
   chain: ModelChain;
   messages: ChatMessageLike[];
   tools?: StreamChatOptions["tools"];
+  toolChoice?: StreamChatOptions["toolChoice"];
   signal?: AbortSignal;
   timeoutMs?: number;
   retry?: RetryPolicy;
@@ -85,7 +86,7 @@ export interface FailoverOptions {
 
 /** 带降级链的流式调用：当前模型重试耗尽 → 依次切换备用模型 */
 export async function* streamChatWithFailover(opts: FailoverOptions): AsyncGenerator<ChatDelta> {
-  const { chain, messages, tools, signal, timeoutMs, retry, extraBody, debug, onRetry } = opts;
+  const { chain, messages, tools, toolChoice, signal, timeoutMs, retry, extraBody, debug, onRetry } = opts;
 
   let started = false;
   while (true) {
@@ -97,6 +98,7 @@ export async function* streamChatWithFailover(opts: FailoverOptions): AsyncGener
         model: active.model,
         messages,
         tools,
+        toolChoice,
         signal,
         timeoutMs,
         retry,

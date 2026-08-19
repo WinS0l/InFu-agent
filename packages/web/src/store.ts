@@ -114,7 +114,7 @@ export interface AskState {
 }
 
 /** v2.9 右侧栏标签页（浏览器式）类型 */
-export type RightTabKind = "review" | "browser" | "subagent" | "subagents" | "computeruse";
+export type RightTabKind = "review" | "browser" | "subagent" | "subagents" | "computeruse" | "trace";
 /** v2.9 右侧栏标签页：review=审查 / browser=浏览器（占位）/ subagent=子 Agent 详情 / subagents=子 Agent 列表 */
 export interface RightTab {
   id: string;
@@ -155,6 +155,9 @@ interface StoreState {
   setPendingBrowserOpen: (url: string | null) => void;
   /** v3.1：每会话消息缓存（多会话并行：流式事件写对应缓存；切换会话秒切，不丢流式状态） */
   sessionCache: Record<string, ChatMsg[]>;
+  /** 会话原始事件账本：供右栏追踪检查器查看，不取代面向用户的聊天 Timeline。 */
+  traceBySession: Record<string, StoredEvent[]>;
+  appendTrace: (event: AgentEvent, sessionId?: string | null) => void;
   /** v3.1：SSE 事件路由目标会话（api.ts 每连接设置；null = 当前视图会话） */
   eventTarget: string | null;
   /** v3.1：每会话编排阶段/步数（流式事件写缓存时用，防跨会话污染视图 currentStep/currentPhase） */
@@ -541,6 +544,15 @@ export const useStore = create<StoreState>()(
   runningIds: [],
   running: false,
   sessionCache: {},
+   traceBySession: {},
+   appendTrace: (event, sessionId) =>
+     set((s) => {
+       const sid = sessionId ?? targetId(s);
+       if (!sid || event.type === "session") return {};
+       const previous = s.traceBySession[sid] ?? [];
+       const next: StoredEvent = { seq: previous.at(-1)?.seq != null ? previous.at(-1)!.seq + 1 : 0, ts: Date.now(), event };
+       return { traceBySession: { ...s.traceBySession, [sid]: [...previous, next] } };
+     }),
   eventTarget: null,
   sessionPhase: {},
   sessionStep: {},
@@ -926,6 +938,7 @@ export const useStore = create<StoreState>()(
     if (usage) out.usageBySession = { ...get().usageBySession, [sid ?? ""]: usage };
     if (sid) {
       out.sessionCache = { ...get().sessionCache, [sid]: msgs };
+      out.traceBySession = { ...get().traceBySession, [sid]: events };
       out.sessionPhase = { ...get().sessionPhase, [sid]: null };
       out.sessionStep = { ...get().sessionStep, [sid]: currentStep };
       // runningIds 不在此清理：调用方负责（done 已由 finishAssistant 移除；重放不改变运行集合，
@@ -1585,6 +1598,7 @@ export const useStore = create<StoreState>()(
       todosBySession: {},
       usage: { cacheHit: 0, cacheMiss: 0, promptTokens: 0, completionTokens: 0 },
       usageBySession: {},
+      traceBySession: {},
       abortControllers: {},
     }),
   }),

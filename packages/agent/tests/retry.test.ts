@@ -66,6 +66,21 @@ check("EOF 无空行尾帧 finish_reason 不丢失", tailDeltas.some((d) => d.fi
 const tailUsage = tailDeltas.find((d) => d.usage)?.usage;
 check("OpenAI cached_tokens 计入缓存命中", tailUsage?.cacheHit === 40 && tailUsage.cacheMiss === 60, JSON.stringify(tailUsage));
 
+// 1.6 基础设施调用需要保留 tools 前缀但显式禁用工具选择，保障缓存命中且避免摘要误调工具。
+console.log("\n▶ tool_choice 透传");
+let capturedBody: Record<string, unknown> | null = null;
+installFetch((_call, init) => {
+  capturedBody = JSON.parse(init?.body ?? "{}") as Record<string, unknown>;
+  return sse('data: {"choices":[{"delta":{"content":"summary"}}]}\n\ndata: [DONE]\n\n');
+});
+await collect({
+  messages: [{ role: "user", content: "summarize" }],
+  tools: [{ type: "function", function: { name: "read_file", parameters: { type: "object" } } }],
+  toolChoice: "none",
+});
+check("保留工具定义", Array.isArray(capturedBody?.tools) && capturedBody?.tools.length === 1, JSON.stringify(capturedBody));
+check("tool_choice=none 透传", capturedBody?.tool_choice === "none", JSON.stringify(capturedBody));
+
 // 2. 5xx 重试耗尽抛错
 console.log("\n▶ 5xx 耗尽抛错");
 installFetch(() => new Response("boom", { status: 500 }));

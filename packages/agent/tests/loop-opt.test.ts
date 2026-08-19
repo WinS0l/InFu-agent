@@ -28,6 +28,8 @@ check("数组输入 → null（非对象）", repairToolArgs("[1,2,3]") === null
 console.log("\n▶ 工具结果裁剪");
 const long = "x".repeat(20000);
 const trimmed = trimToolResult(long);
+check("超长结果保留头尾", trimmed.startsWith("x".repeat(4000)) && trimmed.endsWith("x".repeat(1200)));
+check("超长结果小于原结果", trimmed.length < long.length);
 check("超长截断", trimmed.length < 20000 && trimmed.includes("已截断"), `len=${trimmed.length}`);
 const short = "hello";
 check("短结果原样", trimToolResult(short) === short);

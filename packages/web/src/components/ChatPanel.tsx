@@ -3,7 +3,7 @@ import {
   Send, Square, GitBranch, Loader2,
   RotateCcw, AlertTriangle, Files, Folder, FolderOpen, ChevronDown, Check,
   BrainCircuit, ShieldCheck, ShieldAlert, Scale, Cpu, Paperclip, FileText, X, Pencil, Image as ImageIcon, WifiOff, Zap, Globe,
-  CheckCircle2, XCircle, OctagonX, Skull,
+  CheckCircle2, XCircle, OctagonX, Skull, Command, ListTree, Bot, Activity,
 } from "lucide-react";
 import { Streamdown } from "streamdown";
 import type { PhaseId } from "@infu/shared";
@@ -19,6 +19,132 @@ import AttachmentRail, { AttachmentLine, ATTACH_LIMITS, type AttachmentDraft } f
 import PlanCard from "./PlanCard";
 const TerminalPanel = lazy(() => import("./TerminalPanel"));
 import { CopyButton } from "./ui";
+
+const EMPTY_TRACE_EVENTS: import("@infu/shared").StoredEvent[] = [];
+
+function ActivityDock({ visible }: { visible: boolean }) {
+  const activeSessionId = useStore((s) => s.activeSessionId);
+  const events = useStore((s) => (activeSessionId ? s.traceBySession[activeSessionId] ?? EMPTY_TRACE_EVENTS : EMPTY_TRACE_EVENTS));
+  const sessionTitle = useStore((s) => s.sessions.find((item) => item.id === s.activeSessionId)?.title ?? "当前会话");
+  const activity = useMemo(() => {
+    const tools = new Map<string, string>();
+    const jobs = new Map<string, { command: string; startedAt: number }>();
+    const agents = new Map<string, { name: string; prompt: string }>();
+    let added = 0;
+    let removed = 0;
+    for (const { event, ts } of events) {
+      if (event.type === "tool-start" && event.callId) tools.set(event.callId, event.tool);
+      if (event.type === "tool-result" && event.callId) tools.delete(event.callId);
+      if (event.type === "job-start") jobs.set(event.id, { command: event.command, startedAt: ts });
+      if (event.type === "job-done") jobs.delete(event.id);
+      if (event.type === "subagent-start") agents.set(event.id, { name: event.name, prompt: event.prompt });
+      if (event.type === "subagent-done") agents.delete(event.id);
+      if (event.type === "tool-result" && (event.tool === "write_file" || event.tool === "edit_file" || event.tool === "git_diff")) {
+        for (const match of event.summary.matchAll(/\+(\d+)/g)) added += Number(match[1]);
+        for (const match of event.summary.matchAll(/-(\d+)/g)) removed += Number(match[1]);
+      }
+    }
+    return { tools: [...tools.values()], jobs: [...jobs.entries()], agents: [...agents.entries()], added, removed };
+  }, [events]);
+  const [menuOpen, setMenuOpen] = useState(false);
+  const [position, setPosition] = useState<{ x: number; y: number } | null>(null);
+  const [compact, setCompact] = useState(false);
+  const [summaryIndex, setSummaryIndex] = useState(0);
+  const [, setClockTick] = useState(0);
+  const drag = useRef<{ offsetX: number; offsetY: number; host: DOMRect } | null>(null);
+  const moved = useRef(false);
+  const idleTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const active = activity.tools.length + activity.jobs.length + activity.agents.length > 0;
+  const openTrace = () => {
+    useStore.getState().openRightTab({ id: "trace", kind: "trace", label: "会话追踪" });
+    useStore.getState().setDetailsOpen(true);
+  };
+  const hasDiff = activity.added > 0 || activity.removed > 0;
+  const summaries = [
+    hasDiff ? `改动 +${activity.added} / -${activity.removed}` : null,
+    activity.jobs.length ? `后台命令 ${activity.jobs.length}` : null,
+    activity.agents.length ? `子 Agent ${activity.agents.length}` : null,
+    activity.tools[0] ?? null,
+  ].filter((text): text is string => Boolean(text));
+  const capsuleText = summaries[summaryIndex % Math.max(1, summaries.length)] ?? "会话待命";
+  const fmtDuration = (startedAt: number) => {
+    const seconds = Math.max(0, Math.floor((Date.now() - startedAt) / 1000));
+    return seconds >= 60 ? `${Math.floor(seconds / 60)}分${String(seconds % 60).padStart(2, "0")}秒` : `${seconds}秒`;
+  };
+  const openAgent = (id: string, name: string) => {
+    useStore.getState().openRightTab({ id: `subagent:${id}`, kind: "subagent", label: name, subagentId: id });
+    useStore.getState().setDetailsOpen(true);
+  };
+  const resetIdle = useCallback(() => {
+    if (idleTimer.current) clearTimeout(idleTimer.current);
+    setCompact(false);
+    idleTimer.current = setTimeout(() => { setMenuOpen(false); setCompact(true); }, 10000);
+  }, []);
+  useEffect(() => {
+    resetIdle();
+    return () => { if (idleTimer.current) clearTimeout(idleTimer.current); };
+  }, [active, activeSessionId, resetIdle]);
+  useEffect(() => { setMenuOpen(false); }, [activeSessionId]);
+  useEffect(() => {
+    setSummaryIndex(0);
+    if (summaries.length < 2 || compact) return;
+    const timer = setInterval(() => setSummaryIndex((index) => (index + 1) % summaries.length), 3000);
+    return () => clearInterval(timer);
+  }, [activeSessionId, compact, summaries.length]);
+  useEffect(() => {
+    if (!activity.jobs.length) return;
+    const timer = setInterval(() => setClockTick((n) => n + 1), 1000);
+    return () => clearInterval(timer);
+  }, [activity.jobs.length]);
+  const onMove = (event: PointerEvent) => {
+    const state = drag.current;
+    if (!state) return;
+    moved.current = true;
+    setPosition({
+      x: Math.max(8, Math.min(state.host.width - 152, event.clientX - state.host.left - state.offsetX)),
+      y: Math.max(8, Math.min(state.host.height - 48, event.clientY - state.host.top - state.offsetY)),
+    });
+  };
+  const onUp = () => {
+    drag.current = null;
+    window.removeEventListener("pointermove", onMove);
+    window.removeEventListener("pointerup", onUp);
+  };
+  const beginDrag = (event: React.PointerEvent<HTMLDivElement>) => {
+    const host = event.currentTarget.closest("main")?.getBoundingClientRect();
+    if (!host) return;
+    const pill = event.currentTarget.getBoundingClientRect();
+    resetIdle();
+    setSummaryIndex(0);
+    moved.current = false;
+    drag.current = { offsetX: event.clientX - pill.left, offsetY: event.clientY - pill.top, host };
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+  };
+  if (!visible) return null;
+  return <div className="absolute z-30 select-none" style={position ? { left: position.x, top: position.y } : { right: 16, top: 12 }} onPointerDown={resetIdle}>
+    <div
+      onPointerDown={beginDrag}
+      onDoubleClick={() => { if (!moved.current) { resetIdle(); setMenuOpen((v) => !v); } }}
+      onClick={() => { if (moved.current) return; resetIdle(); if (compact) setCompact(false); }}
+      className={`task-capsule group inline-flex cursor-grab touch-none items-center rounded-full border bg-elevated/95 text-text backdrop-blur transition-[height,padding,box-shadow,transform] duration-300 active:cursor-grabbing ${compact ? "h-8 w-8 justify-center" : "h-8 max-w-[144px] px-1.5"} ${active ? "border-info/45" : "border-line hover:border-info/25"}`}
+      title="拖拽移动 · 双击展开任务菜单"
+    >
+      <span className={`flex h-5 w-5 shrink-0 items-center justify-center rounded-full ${active ? "bg-info text-white" : "bg-hover text-sub"}`}>{active ? <Loader2 className="h-3 w-3 animate-spin" /> : <Activity className="h-3 w-3" />}</span>
+      {!compact && <span key={capsuleText} className="task-capsule-text ml-1.5 max-w-[112px] truncate text-[11px] font-semibold">{capsuleText}</span>}
+    </div>
+    {menuOpen && !compact && <div className="task-capsule-menu absolute right-0 top-[calc(100%+8px)] w-[286px] overflow-hidden rounded-2xl border border-line bg-elevated">
+      <div className="flex items-center gap-2 px-3.5 pb-2 pt-3"><span className={`flex h-6 w-6 items-center justify-center rounded-lg ${active ? "bg-info-soft text-info" : "bg-hover text-sub"}`}>{active ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Activity className="h-3.5 w-3.5" />}</span><span className="min-w-0 flex-1 truncate text-[12px] font-semibold text-text">{sessionTitle}</span></div>
+      <div className="max-h-52 space-y-1 overflow-y-auto px-1.5 pb-1.5">
+        {activity.jobs.map(([id, job]) => <div key={id} className="flex items-center gap-2 rounded-xl px-2.5 py-2 text-[12px] text-sub"><span className="text-warn"><Command className="h-3.5 w-3.5" /></span><span className="min-w-0 flex-1"><span className="block truncate text-text">{job.command}</span><span className="block text-[10px] text-caption">后台命令 · 已运行 {fmtDuration(job.startedAt)}</span></span></div>)}
+        {activity.agents.map(([id, agent]) => <button key={id} onClick={() => openAgent(id, agent.name)} className="flex w-full cursor-pointer items-center gap-2 rounded-xl px-2.5 py-2 text-left text-[12px] text-sub transition-colors hover:bg-hover"><span className="text-success"><Bot className="h-3.5 w-3.5" /></span><span className="min-w-0 flex-1"><span className="block truncate text-text">{agent.name}</span><span className="block truncate text-[10px] text-caption">{agent.prompt}</span></span><span className="text-[10px] text-info">查看</span></button>)}
+        {hasDiff && <div className="flex items-center gap-2 rounded-xl px-2.5 py-2 text-[12px] text-sub"><span className="text-info"><Files className="h-3.5 w-3.5" /></span><span className="min-w-0 flex-1 text-text">本会话改动</span><span className="font-mono text-[11px]"><span className="text-success">+{activity.added}</span>{" "}<span className="text-danger">-{activity.removed}</span></span></div>}
+        {!activity.jobs.length && !activity.agents.length && !hasDiff && <div className="px-2.5 py-3 text-center text-[12px] leading-5 text-sub">目前没有内容。</div>}
+      </div>
+      <button onClick={openTrace} className="flex w-full cursor-pointer items-center gap-2 px-3.5 py-2.5 text-left text-[12px] font-medium text-info transition-colors hover:bg-info-soft"><ListTree className="h-3.5 w-3.5" />打开会话追踪 <span className="ml-auto text-[10px] text-caption">完整事件账本</span></button>
+    </div>}
+  </div>;
+}
 
 /** 运行耗时（turn 尾操作行「· 运行 15s」；不足 60s 秒、以上 分:秒） */
 function fmtClock(ts?: number): string {
@@ -1199,6 +1325,7 @@ export default function ChatPanel() {
   // v2.14 批 5：卡片壳在外层（App.tsx：header + ChatPanel 一体圆角卡片）；本组件只负责内部布局
   return (
     <main className="relative flex h-full min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
+      <ActivityDock visible={messages.length > 0} />
       {/* v3 左侧定位浮标（用户消息锚点；小横杠，hover 变长方便点击；滚动条隐藏但可上下滑动；
           仅消息流多轮且聊天列不窄时显示） */}
       {!narrow && messages.filter((m) => m.role === "user").length > 1 && (
@@ -1239,24 +1366,20 @@ export default function ChatPanel() {
             <div className="shrink-0" style={{ WebkitAppRegion: "drag", height: "3.25rem" } as React.CSSProperties} />
             <div className="relative flex min-h-0 flex-1 flex-col items-center justify-center px-6">
             <div className="hero-glow" />
-            <div className="relative flex flex-col items-center gap-4 text-center">
-              <div>
-                <h1
-                  className="text-[56px] font-extrabold leading-[72px] tracking-[0.18em]"
-                  style={{
-                    // v2.14 批 17 追加：字距拉远（0.18em）+ 渐变层次（顶部纯色高光段 → 灰 → 渐隐透明）
-                    // + 微光托底（info 蓝低透明 drop-shadow，深色主题下柔光、浅色下几乎无感）
-                    background: "linear-gradient(180deg, var(--text-primary) 0%, var(--text-primary) 22%, var(--text-tertiary) 62%, transparent 100%)",
-                    WebkitBackgroundClip: "text",
-                    backgroundClip: "text",
-                    color: "transparent",
-                    filter: "drop-shadow(0 3px 16px rgba(103, 158, 254, 0.20))",
-                  }}
-                >
-                  无限未来
-                </h1>
-                <p className="mt-2 text-sm leading-5 text-sub">Forward, infinite future.</p>
-              </div>
+              <div className="relative flex flex-col items-center gap-4 text-center">
+               <div>
+                 <h1
+                   className="infinite-future-mark text-[62px] font-black leading-[76px] tracking-[0.2em]"
+                   style={{
+                     background: "linear-gradient(135deg, var(--text-primary) 8%, #b9d0ff 42%, var(--text-primary) 76%)",
+                     WebkitBackgroundClip: "text",
+                     backgroundClip: "text",
+                     color: "transparent",
+                   }}
+                 >
+                   无限未来
+                 </h1>
+               </div>
               {/* 项目 chip（v3：可点击 → 工作区选择菜单；批 12：点击空白处自动收起） */}
               <span ref={wsMenuRef} className="relative">
                 <button
@@ -1293,10 +1416,15 @@ export default function ChatPanel() {
                     ))}
                   </div>
                 )}
-              </span>
-            </div>
-            {/* v3 hero：输入框与 hero 内容一起居中（主流 布局；发送首条后恢复底部固定） */}
-            <div className="mt-8 w-full max-w-[780px]">{composer(true)}</div>
+               </span>
+             </div>
+             {/* v3 hero：输入框与 hero 内容一起居中（主流 布局；发送首条后恢复底部固定） */}
+             <div className="mt-8 w-full max-w-[780px]">{composer(true)}</div>
+             <div className="mt-3 flex flex-wrap justify-center gap-1.5">
+               {["分析这个项目的结构", "检查当前改动并给出风险", "帮我定位并修复一个问题"].map((suggestion) => (
+                 <button key={suggestion} onClick={() => void doSubmit(suggestion)} className="cursor-pointer rounded-full border border-line bg-elevated/70 px-3 py-1.5 text-[12px] text-sub transition-colors hover:border-info/40 hover:bg-info-soft hover:text-text">{suggestion}</button>
+               ))}
+             </div>
             </div>
           </div>
         ) : (

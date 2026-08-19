@@ -63,10 +63,15 @@ export default function ReviewPane() {
     // 注意 worktree 状态是 persist 的（刷新不消失）——残留的旧路径（已合并/丢弃被删、
     // 旧格式 .infu-worktrees/、或任务创建失败回退）必须忽略，否则界面查无效目录变空。
     // 补 21：worktree 路径请求失败（root 无效）→ 回退项目根重试（用户实测根因）
-    const rawRoot = useStore((s) => s.root);
+    const rawRoot = useStore((s) => s.sessions.find((item) => item.id === s.activeSessionId)?.root || s.root);
     const useWorktree = useStore((s) => s.useWorktree);
     const worktree = useStore((s) => s.worktree);
-    const root = useWorktree && worktree ? worktree.path : rawRoot;
+    // 工作树是任务级资源。仅当它确实位于当前会话项目下时才采用，避免切换会话后
+    // 持久化的旧工作树把审查请求带到另一个项目或已删除目录。
+    const norm = (p: string) => p.replace(/[\\/]+$/, "").toLowerCase();
+    const root = useWorktree && worktree && norm(worktree.path).startsWith(`${norm(rawRoot)}\\.infu\\worktrees\\`)
+      ? worktree.path
+      : rawRoot;
   const { messages } = useStore();
   const lastTest = [...messages]
     .reverse()

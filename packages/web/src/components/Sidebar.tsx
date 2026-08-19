@@ -164,11 +164,16 @@ function SessionRow({ s, projectName, onOpen, onRename, onPin, onArchive, busy }
       ) : (
         <>
           {s.pinned && <Pin className="h-3 w-3 shrink-0 text-info" />}
-          {/* v3.1：运行中绿点脉冲（多会话并行——后台任务运行指示） */}
+          {/* 运行中：六段环形横杠，比单一绿点更明确但仍保持侧栏行的紧凑密度。 */}
           {isRunning && (
-            <span className="relative flex h-2 w-2 shrink-0">
-              <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-success opacity-60" />
-              <span className="relative inline-flex h-2 w-2 rounded-full bg-success" />
+            <span className="relative flex h-4 w-4 shrink-0 animate-spin" title="任务正在运行">
+              {Array.from({ length: 6 }, (_, i) => (
+                <span
+                  key={i}
+                  className="absolute left-1/2 top-1/2 h-[2px] w-[5px] rounded-full bg-success"
+                  style={{ transform: `translate(-50%, -50%) rotate(${i * 60}deg) translateY(-5px)`, opacity: 0.32 + i * 0.11 }}
+                />
+              ))}
             </span>
           )}
           {/* v5.0（A3）：待处理徽标（审批/提问/计划挂起——后台会话的决策入口提示） */}
@@ -396,7 +401,7 @@ export default function Sidebar({ onOpenSettings, className = "" }: SidebarProps
   /* ── 折叠 rail（56px）：Logo=展开 / 新建 / 设置（v3.3 补：按钮加大）── */
   if (sidebarCollapsed) {
     return (
-      <aside className={`flex min-h-0 flex-col items-center gap-1 bg-sidebar/70 backdrop-blur-2xl py-3 ${className}`}>
+      <aside className={`flex min-h-0 flex-col items-center gap-1 bg-sidebar/70 backdrop-blur-2xl py-3 select-none ${className}`}>
         <button
           className="flex h-10 w-10 cursor-pointer items-center justify-center rounded-full text-info transition-colors hover:bg-hover"
           onClick={() => setSidebarCollapsed(false)}
@@ -424,7 +429,7 @@ export default function Sidebar({ onOpenSettings, className = "" }: SidebarProps
   }
 
   return (
-    <aside className={`flex min-h-0 min-w-0 flex-col bg-sidebar/70 backdrop-blur-2xl ${className}`}>
+    <aside className={`flex min-h-0 min-w-0 flex-col bg-sidebar/70 backdrop-blur-2xl select-none ${className}`}>
       {/* Logo 行（与聊天 header 同高）：点击 = 新建会话；右侧折叠按钮；
           v3.0 批 9 = 窗口拖拽区（no-drag 给按钮）
           v3.2：header 3.25rem（与右侧栏 tab 条统一，原生融合）

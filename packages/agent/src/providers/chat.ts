@@ -87,6 +87,8 @@ export interface StreamChatOptions {
     type: "function";
     function: { name: string; description?: string; parameters: Record<string, unknown> };
   }>;
+  /** 工具选择策略。摘要等基础设施调用保留稳定的工具前缀，但禁止模型再发起工具。 */
+  toolChoice?: "auto" | "none";
   signal?: AbortSignal;
   timeoutMs?: number;
   /** 重试策略（瞬时故障指数退避；默认 3 次尝试） */
@@ -137,12 +139,13 @@ async function* requestOnce(opts: {
   model: string;
   messages: ChatMessageLike[];
   tools?: StreamChatOptions["tools"];
+  toolChoice?: StreamChatOptions["toolChoice"];
   signal?: AbortSignal;
   timeoutMs: number;
   extraBody?: Record<string, unknown>;
   debug?: boolean;
 }): AsyncGenerator<ChatDelta> {
-  const { baseURL, apiKey, model, messages, tools, signal, timeoutMs, extraBody, debug } = opts;
+  const { baseURL, apiKey, model, messages, tools, toolChoice, signal, timeoutMs, extraBody, debug } = opts;
 
   const controller = new AbortController();
   const onOuterAbort = () => controller.abort();
@@ -167,7 +170,7 @@ async function* requestOnce(opts: {
       messages,
       stream: true,
       ...(extraBody ?? {}),
-      ...(tools && tools.length ? { tools, tool_choice: "auto" } : {}),
+      ...(tools && tools.length ? { tools, tool_choice: toolChoice ?? "auto" } : {}),
     };
     if (debug) console.error(`[streamChat] → ${baseURL}/chat/completions body=${JSON.stringify(body).slice(0, 300)}`);
 
@@ -361,6 +364,7 @@ export async function* streamChat(opts: StreamChatOptions): AsyncGenerator<ChatD
         model: opts.model,
         messages: opts.messages,
         tools: opts.tools,
+        toolChoice: opts.toolChoice,
         signal,
         timeoutMs,
         extraBody: opts.extraBody,

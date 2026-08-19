@@ -1,11 +1,12 @@
 import { useEffect, useRef, useState } from "react";
 import { useClickOutside } from "./useClickOutside";
-import { Bot, FileSearch, Globe, Monitor, X, Loader2, PanelRightClose, Plus, PanelsTopLeft } from "lucide-react";
+import { Bot, FileSearch, Globe, Monitor, X, Loader2, PanelRightClose, Plus, PanelsTopLeft, ListTree } from "lucide-react";
 import { useStore, type RightTab } from "../store";
 import ReviewPane from "./ReviewPane";
 import SubagentThreadView from "./SubagentThreadView";
 import BrowserPanel from "./BrowserPanel";
 import ComputerUsePane from "./ComputerUsePane";
+import SessionTracePane from "./SessionTracePane";
 
 /**
  * v2.9 右侧栏（浏览器式）：顶部 tab 条（活动高亮 + 状态徽标 + 关闭 ×）+ 内容区。
@@ -111,6 +112,14 @@ function RightRailEmpty() {
           <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-hover text-info group-hover:bg-info-soft"><Monitor className="h-4 w-4" /></span>
           <span><span className="block text-[13px] font-semibold text-text">computer-use</span><span className="mt-0.5 block text-xs text-sub">截图、输入与桌面操作记录</span></span>
         </button>
+        <button
+          className={btn}
+          onClick={() => openRightTab({ id: "trace", kind: "trace", label: "会话追踪" })}
+          title="查看模型、工具、压缩和重试的原始事件账本"
+        >
+          <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-hover text-info group-hover:bg-info-soft"><ListTree className="h-4 w-4" /></span>
+          <span><span className="block text-[13px] font-semibold text-text">会话追踪</span><span className="mt-0.5 block text-xs text-sub">模型、工具与用量检查器</span></span>
+        </button>
       </div>
     </div>
   );
@@ -143,6 +152,7 @@ export default function RightRail({ onCollapse }: { onCollapse: () => void }) {
     { id: "browser", kind: "browser" as const, label: "浏览器", icon: <Globe className="h-4 w-4" /> },
     { id: "subagents", kind: "subagents" as const, label: "子 Agent", icon: <Bot className="h-4 w-4" /> },
     { id: "computeruse", kind: "computeruse" as const, label: "computer-use", icon: <Monitor className="h-4 w-4" /> },
+    { id: "trace", kind: "trace" as const, label: "会话追踪", icon: <ListTree className="h-4 w-4" /> },
   ];
 
   return (
@@ -168,7 +178,6 @@ export default function RightRail({ onCollapse }: { onCollapse: () => void }) {
         >
           <PanelRightClose className="h-5 w-5" />
         </button>
-        <span className="mb-2 hidden shrink-0 text-[11px] font-medium tracking-wide text-caption min-[700px]:inline">工作区</span>
         {/* tab 滚动区（z-0：任何滚动内容都被裁剪在本容器内；到达右侧让位边界即滚动堆叠。
             v3.3 补 7：滚轮水平滑动——Windows 普通滚轮默认只滚垂直，tab 条横向溢出时
             滚轮事件转水平滚动（scrollLeft += deltaY），滑动机制真实可感）
@@ -278,6 +287,8 @@ export default function RightRail({ onCollapse }: { onCollapse: () => void }) {
           <SubagentsList />
         ) : active.kind === "computeruse" ? (
           <ComputerUsePane />
+        ) : active.kind === "trace" ? (
+          <SessionTracePane />
         ) : active.subagentId && thread ? (
           <SubagentThreadView thread={thread} />
         ) : (

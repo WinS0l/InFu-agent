@@ -60,10 +60,14 @@ export default function CodeView() {
     // 注意 worktree 状态是 persist 的（刷新不消失）——残留的旧路径（已合并/丢弃被删、
     // 旧格式 .infu-worktrees/、或任务创建失败回退）必须忽略，否则界面查无效目录变空。
     // 补 21：worktree 路径请求失败（root 无效）→ 回退项目根重试（用户实测根因）
-    const rawRoot = useStore((s) => s.root);
+    const rawRoot = useStore((s) => s.sessions.find((item) => item.id === s.activeSessionId)?.root || s.root);
     const useWorktree = useStore((s) => s.useWorktree);
     const worktree = useStore((s) => s.worktree);
-    const root = useWorktree && worktree ? worktree.path : rawRoot;
+    // 不让另一会话遗留的工作树覆盖当前会话的项目代码视图。
+    const norm = (p: string) => p.replace(/[\\/]+$/, "").toLowerCase();
+    const root = useWorktree && worktree && norm(worktree.path).startsWith(`${norm(rawRoot)}\\.infu\\worktrees\\`)
+      ? worktree.path
+      : rawRoot;
   const codeViewFile = useStore((s) => s.codeViewFile);
   const [files, setFiles] = useState<FsTreeFile[] | null>(null);
   // v3.3 补 22：文件树实际加载成功的 root——worktree 残留路径失败回退项目根后，

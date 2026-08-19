@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { FileDiff, FlaskConical, GitCompare, Loader2, ArrowLeft } from "lucide-react";
+import { FileDiff, FlaskConical, GitCompare, Loader2, ArrowLeft, ChevronRight } from "lucide-react";
 import { useStore } from "../store";
 import { gitInitProject } from "../api";
 import { GitBranch } from "lucide-react";
@@ -85,6 +85,7 @@ export default function ReviewPane() {
   const [sel, setSel] = useState<string | null>(null);
   const [diff, setDiff] = useState("");
   const [loading, setLoading] = useState(false);
+  const [testsOpen, setTestsOpen] = useState(false);
   // v3.4 审计修复：diff 请求竞态守卫——快速连续点两个文件（或期间 root 变化）时，
   // 旧请求的响应晚到会覆盖新选中文件的 diff；序号守卫让过期响应丢弃
   const diffSeq = useRef(0);
@@ -247,21 +248,29 @@ export default function ReviewPane() {
             )}
           </div>
 
-          {/* 测试结果（列表视图底部保留） */}
-          <div className="shrink-0 border-t border-line px-4 py-2">
-            <div className="mb-1.5 flex items-center gap-1.5 text-xs font-medium leading-[18px] text-sub">
+          {/* 测试输出通常很长，默认收起以保持改动文件列表的主层级。 */}
+          <div className="shrink-0 border-t border-line px-3 py-1.5">
+            <button
+              className="flex w-full cursor-pointer items-center gap-1.5 rounded-lg px-1 py-1 text-left text-xs font-medium text-sub transition-colors hover:bg-hover hover:text-text"
+              onClick={() => setTestsOpen((open) => !open)}
+              aria-expanded={testsOpen}
+            >
               <FlaskConical className="h-3.5 w-3.5" />
-              测试结果
-            </div>
-            {lastTest ? (
-              <CodeBlock
-                label={lastTest.status === "running" ? "运行中…" : lastTest.status === "error" ? "失败" : "通过"}
-                text={lastTest.summary ?? (lastTest.status === "running" ? "测试执行中…" : "")}
-                maxHeight={160}
-              />
+              <span className="flex-1">测试结果</span>
+              {lastTest && <span className={`text-[11px] ${lastTest.status === "error" ? "text-danger" : lastTest.status === "running" ? "text-ongoing" : "text-success"}`}>{lastTest.status === "running" ? "运行中" : lastTest.status === "error" ? "失败" : "通过"}</span>}
+              <ChevronRight className={`h-3.5 w-3.5 transition-transform ${testsOpen ? "rotate-90" : ""}`} />
+            </button>
+            {testsOpen && (lastTest ? (
+              <div className="px-1 pb-1 pt-1">
+                <CodeBlock
+                  label={lastTest.status === "running" ? "运行中…" : lastTest.status === "error" ? "失败" : "通过"}
+                  text={lastTest.summary ?? (lastTest.status === "running" ? "测试执行中…" : "")}
+                  maxHeight={160}
+                />
+              </div>
             ) : (
-              <div className="py-1 text-[13px] leading-5 text-caption">暂无测试</div>
-            )}
+              <div className="px-1 pb-1 pt-1 text-[13px] leading-5 text-caption">暂无测试</div>
+            ))}
           </div>
         </>
       )}

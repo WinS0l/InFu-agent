@@ -104,6 +104,28 @@
 - **桌面/Rust**——guest 补 `will-frame-navigate` 同策略门禁；Rust abort_run 在 registry 锁内 terminate，消除 Job 句柄关闭/复用 TOCTOU。
 - **验证**——根 build、shared/agent/desktop tsc、web vite build、cargo check、lint 0 error、全量 **51/51、1554 断言 0 失败**。
 
+### ✅ v6.20 会话追踪事件内联详情（2026-08-19）
+- **交互**——会话追踪选中事件后，详情不再固定占据列表底部；改为直接在该事件行下方内联展开，列表随内容自然滚动。选中状态持续保留，直到再次点击同一事件收起或切换会话，避免诊断时详情脱离上下文。
+- **验证**——web tsc + vite build 通过。
+
+### ✅ v6.21 工作台壳交互收敛（2026-08-19）
+- **审查与浏览器**——审查页「测试结果」改为默认收起的可访问折叠栏，状态在栏内可见；桌面浏览器 tab 激活且没有页面时自动创建新标签页，关闭最后一页后仍在浏览器界面也会恢复一个可用空页。
+- **右栏与胶囊**——折叠右栏入口改为工作区图标；展开态标签最小宽度固定并支持滚轮/触控板横向滑动，不再压缩堆叠；任务胶囊在代码视图隐藏，并以实际胶囊尺寸夹紧坐标，右栏展开/收起改变聊天宽度时不再被裁出可视区。
+- **桌面融合**——Windows 原生最小化/最大化/关闭按钮保留系统行为，但 titleBarOverlay 高度、色面与右侧工作区 tab 条统一为 3.25rem，缩小旧 140px 让位，减少原生控件悬浮在界面上的割裂感。
+- **验证**——web tsc + vite build、desktop tsc 通过。
+
+### ✅ v6.22 会话胶囊实时 Diff 对齐（2026-08-19）
+- **可靠性**——任务胶囊不再从历史 `tool-result` 文本以 `/+n|-n/` 正则猜测增删行数（行号、错误码等可被误算）；改为调用审查页同一 `/api/review/files` 结构化 Git numstat，按当前会话有效 root/工作树汇总当前工作区真实 `+/-`。胶囊菜单同步命名为「当前工作区改动」。
+- **验证**——web tsc + vite build 通过。
+
+### ✅ v6.23 对话工具行结构化 Diff（2026-08-19）
+- **可靠性**——Timeline 的 `write_file/edit_file` 不再从 `summary` 文本以正则提取 `+/-`（行号、错误码、普通文本不会再误显示为代码删除）；共享 `tool-result.diff` 传递工具端基于写入前后内容计算的本次操作行数，loop/store 原样透传，Timeline 仅渲染该结构化字段。旧历史事件没有字段时不显示伪统计。
+- **验证**——shared/agent tsc、web vite build，tools 43/rebuild 20/session-store 30 断言通过。
+
+### ✅ v6.24 会话胶囊内部图标去阴影（2026-08-19）
+- **视觉**——会话胶囊内的圆形状态图标显式 `shadow-none`，去除内部圆点的阴影感；外层胶囊近场阴影与 hover 悬浮效果保留。
+- **验证**——web tsc + vite build 通过。
+
 ### ✅ v5.0 产品增强批（2026-08-18，审计建议清单全量落地——A1-A5/B1/B2/B4/C1-C4/A4/D3）
 - **A1 页面级 E2E 套件（补测试盲区）**——新 `tests/e2e-prod.test.ts`：真实服务器（staticDir=web/dist）+ playwright chromium 加载生产页面——API 层断言 CSP nonce 与注入脚本匹配 / 无令牌 401 / 带令牌 200 / 主题脚本与资源可加载；浏览器层断言页面零 401（CSP 回归的直接判据——v4.0 补 1 那类回归从此被自动拦截）/ 零 CSP 违规 / React 真实渲染 / theme-init.js 在 CSP 下执行（阻断 bundle 两阶段）/ 服务端配置主题管线。12 断言，入 npm test（43→44 套件）；startServer 补返回 httpServer（可 close）
 - **A2 命令审计 UI**——GET /api/audit（commands.log 尾段解析：时间/结果/cwd/命令/详情/沙箱档位，倒序 + 搜索 + 仅失败过滤）+ 设置「数据与统计 → 命令审计」Tab（AuditPane，过期响应守卫）

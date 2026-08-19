@@ -32,11 +32,13 @@ writeFileSync(join(proj, "src", "app.ts"), "export const greet = (name: string) 
 writeFileSync(join(proj, "README.md"), "# Fixture\n测试项目\n");
 
 const events: AgentEvent[] = [];
+const recordedDiffs: Array<{ added: number; removed: number }> = [];
 const ctx: ToolContext = {
   root: proj,
   cwd: proj,
   requestApproval: async () => true,
   emit: (e) => events.push(e),
+  recordFileDiff: (diff) => recordedDiffs.push(diff),
   sessionId: "tools-recovery",
 };
 
@@ -101,6 +103,7 @@ console.log("\n▶ write_file");
 const wr = await run("write_file", { path: "src/new.txt", content: "hello" });
 check("写入成功", wr.includes("已写入"), wr);
 check("文件存在", existsSync(join(proj, "src", "new.txt")));
+check("新文件结构化 diff 准确", recordedDiffs.at(-1)?.added === 1 && recordedDiffs.at(-1)?.removed === 0, JSON.stringify(recordedDiffs.at(-1)));
 const escape = await run("write_file", { path: "../../evil.txt", content: "x" });
 check("路径越界被拦截", escape.includes("越界"), escape);
 
@@ -114,6 +117,7 @@ const rd0 = await run("read_file", { path: "README.md" });
 check("read README.md 成功", rd0.includes("Fixture"), rd0);
 const ed1 = await run("edit_file", { path: "README.md", old_text: "# Fixture", new_text: "# InFu" });
 check("读取后编辑成功", ed1.includes("已修改"), ed1);
+check("等行替换结构化 diff 准确", recordedDiffs.at(-1)?.added === 1 && recordedDiffs.at(-1)?.removed === 1, JSON.stringify(recordedDiffs.at(-1)));
 // stale：读后外部修改文件 → 编辑被拒（防基于过期缓存覆盖）
 const staleTarget = join(proj, "src", "stale.txt");
 writeFileSync(staleTarget, "version 1", "utf-8");

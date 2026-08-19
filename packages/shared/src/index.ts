@@ -362,7 +362,7 @@ export type AgentEvent =
   | { type: "step-start"; step: number; subagentId?: string }
   | { type: "phase-start"; phase: PhaseId; label: string; /** v2.2：该阶段实际使用的模型（角色路由后） */ model?: string; subagentId?: string }
   | { type: "tool-start"; tool: string; args: Record<string, unknown>; risk: RiskLevel; callId?: string; subagentId?: string }
-  | { type: "tool-result"; tool: string; ok: boolean; summary: string; callId?: string; subagentId?: string }
+  | { type: "tool-result"; tool: string; ok: boolean; summary: string; diff?: { added: number; removed: number }; callId?: string; subagentId?: string }
   | { type: "approval-required"; id: string; description: string; risk: RiskLevel; subagentId?: string }
   | { type: "approval-result"; id: string; approved: boolean; subagentId?: string }
   // ── v4.0 审计新增 ──
@@ -531,6 +531,8 @@ export interface ToolContext {
    *  read_image / screen_capture 等把图片推入，loop 下一轮请求合并为 image part（视觉模型）；
    *  非视觉模型由既有降级机制（图片转文本）兜底 */
   visionQueue?: string[];
+  /** 写工具在成功后记录本次操作的结构化行级增删，供 Timeline 可靠展示。 */
+  recordFileDiff?: (diff: { added: number; removed: number }) => void;
   /** v3.3 异步任务编排：后台任务（子智能体/job）完成时向父循环通知队列入队——
    *  loop 每步开始 drain 为 user XML 消息（<task-notification>），模型实时感知；
    *  delegate_task/run_command 后台分支注入给 startBackgroundSubagent/startBackgroundJob */

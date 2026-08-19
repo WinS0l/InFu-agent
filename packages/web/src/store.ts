@@ -48,6 +48,8 @@ export interface ToolEventState {
   status: "running" | "ok" | "error";
   summary?: string;
   output?: string; // 完整输出（git_diff 等用于右侧面板）
+  /** 本次写工具成功操作的结构化行级增删（服务端计算，非文本正则猜测） */
+  diff?: { added: number; removed: number };
   /** 所属阶段（Timeline 分组） */
   step: number;
   /** 所属编排阶段（阶段内 step 重新编号，分组需复合键） */
@@ -518,7 +520,7 @@ function routeSubagentEvent(thread: SubagentThread, ev: AgentEvent): SubagentThr
       const idx = last?.tools.findIndex((it) => it.tool === ev.tool && it.status === "running");
       if (last && idx !== undefined && idx >= 0) {
         const status: ToolEventState["status"] = ev.ok ? "ok" : "error";
-        const tools = last.tools.map((t, i) => (i === idx ? { ...t, status, summary: ev.summary } : t));
+        const tools = last.tools.map((t, i) => (i === idx ? { ...t, status, summary: ev.summary, diff: ev.diff } : t));
         next = msgs.map((m, i) => (i === msgs.length - 1 ? { ...m, tools } : m));
       }
       break;
@@ -1251,7 +1253,7 @@ export const useStore = create<StoreState>()(
                 ...x,
                 tools: x.tools.map((t) =>
                   t.tool === ev.tool && t.status === "running"
-                    ? { ...t, status: ev.ok ? "ok" : "error", summary: ev.summary, output: ev.summary }
+                    ? { ...t, status: ev.ok ? "ok" : "error", summary: ev.summary, output: ev.summary, diff: ev.diff }
                     : t
                 ),
               }

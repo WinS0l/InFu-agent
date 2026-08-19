@@ -67,7 +67,7 @@ function BrowserPlaceholder() {
   );
 }
 
-export default function BrowserPanel() {
+export default function BrowserPanel({ active: isActive }: { active: boolean }) {
   const desktop = window.infuDesktop;
   const [tabs, setTabs] = useState<Tab[]>([]);
   const [navState, setNavState] = useState<{ canGoBack: boolean; canGoForward: boolean; isLoading: boolean }>({
@@ -83,6 +83,7 @@ export default function BrowserPanel() {
   const [customH, setCustomH] = useState("812");
   const [freeSize, setFreeSize] = useState<{ w?: number; h?: number } | null>(null);
   const wvRefs = useRef(new Map<string, InfuWebviewElement>());
+  const autoCreatedRef = useRef(false);
   // v3.0 批 12：📄/⋯ 下拉菜单点击空白处自动收起
   const menuRef = useClickOutside(() => setMenu(null));
   const seqRef = useRef(0);
@@ -178,8 +179,19 @@ export default function BrowserPanel() {
     });
   }, [desktop]);
 
-  // 面板打开且无 tab：**不自动开浏览器**（批 9.7 用户反馈——打开右侧栏应显示初始
-  // 选择界面；浏览器只由 Agent 请求（onOpenRequest）或用户显式点 ➕ 创建）
+  // 浏览器 tab 被用户打开时，确保总有一个可立即使用的新标签页。组件本身常驻，
+  // 因此以 active 状态而非挂载时机判断，避免打开其他工作区时意外创建 guest。
+  useEffect(() => {
+    if (tabs.length) {
+      autoCreatedRef.current = false;
+      return;
+    }
+    if (!desktop || !isActive || autoCreatedRef.current) return;
+    autoCreatedRef.current = true;
+    createTab();
+    // createTab only appends one local tab. StrictMode is guarded by the ref above.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [desktop, isActive, tabs.length]);
 
   /** webview 元素挂载后初始化（React 19 对 webview 属性用 property 会丢失 → setAttribute） */
   const attachWebview = (el: InfuWebviewElement | null, tabId: string) => {

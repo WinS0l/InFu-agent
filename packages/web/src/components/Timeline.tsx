@@ -91,20 +91,6 @@ function fmtArgs(args: Record<string, unknown>): string {
     .join("  ");
 }
 
-/** 从工具结果提取 diff 统计（+N -M；v2.14 批 2：仅写工具显示——read_file 等无更改能力，
- *  summary 里的 "-152" 是行号范围会被误匹配成假 diff；返回 [加, 减] 分开着色） */
-function diffStats(summary?: string): { added: number; removed: number } | null {
-  if (!summary) return null;
-  // 只认明确的 diff 统计形态："+N 行" / "+N -M 行"（write/edit 工具 summary 格式）
-  const added = summary.match(/\+\d+/);
-  const removed = summary.match(/-\d+/);
-  if (!added && !removed) return null;
-  return { added: added ? +added[0].slice(1) : 0, removed: removed ? +removed[0].slice(1) : 0 };
-}
-
-/** v2.14 批 2：写工具（有更改能力的工具才显示 diff 统计） */
-const MUTATING_FILE_TOOLS = new Set(["write_file", "edit_file"]);
-
 /** v2.5 委派风险徽标：只读委派（免审批）绿色；写能力委派红色 [high]；历史会话（无 readOnly 数据）中性显示 */
 function DelegateRiskBadge({ subagentId }: { subagentId?: string }) {
   const thread = useStore((s) => (subagentId ? s.subagentThreads[subagentId] : undefined));
@@ -168,7 +154,7 @@ function ToolRow({ t }: { t: ToolEventState }) {
   const Icon = TOOL_ICON[t.tool] ?? Wrench;
   const running = t.status === "running";
   const failed = t.status === "error";
-  const stats = MUTATING_FILE_TOOLS.has(t.tool) ? diffStats(t.summary) : null;
+  const stats = t.diff;
   // v2.14：文件工具摘要 = 路径链接（打开代码界面定位）
   const argPath =
     FILE_TOOLS.has(t.tool)

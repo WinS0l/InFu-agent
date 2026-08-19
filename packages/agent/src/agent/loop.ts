@@ -600,6 +600,7 @@ export async function runAgent(opts: AgentRunOptions): Promise<RunResult> {
   // Same-call failure guard: tool result strings often encode expected operational failures rather
   // than throwing. Two unchanged failures require the model to change parameters or strategy.
   const sameCallFailures = new Map<string, number>();
+  const toolDiffs = new Map<string, { added: number; removed: number }>();
 
   // 审批计数（包装 requestApproval），工具层走计数版
   const guardedApproval = async (
@@ -884,7 +885,11 @@ export async function runAgent(opts: AgentRunOptions): Promise<RunResult> {
           /* schema 本身异常（z.any/宽松 schema 罕见路径）→ 按原参数执行 */
         }
         if (ok) {
-          out = await execEntry.execute(execArgs as never, { ...ctx, callId: call.toolCallId });
+          out = await execEntry.execute(execArgs as never, {
+            ...ctx,
+            callId: call.toolCallId,
+            recordFileDiff: (diff) => toolDiffs.set(call.toolCallId, diff),
+          });
         }
         // ── postToolUse 钩子（改写回填模型的工具结果文本；抛错放行）──
         out = await applyPostToolUseHooks(
@@ -909,7 +914,7 @@ export async function runAgent(opts: AgentRunOptions): Promise<RunResult> {
       }
        if (isToolResultFailure(ok, out)) sameCallFailures.set(key, previousFailures + 1);
        else sameCallFailures.delete(key);
-       return { call, args, ok, out };
+        return { call, args, ok, out, diff: toolDiffs.get(call.toolCallId) };
     };
     const execResults: Awaited<ReturnType<typeof runOne>>[] = [];
     // 只读组：有界滚动池并行（v2.10：单批 ≤10，防单轮 20+ 只读调用同时跑爆内存；主流 maxParallel 同款）；
@@ -926,9 +931,9 @@ export async function runAgent(opts: AgentRunOptions): Promise<RunResult> {
     const results = execs.map((e) => byCallId.get(e.call.toolCallId)!);
 
     // 3.3) 按原调用顺序回填（tool-result 事件 + 日志 + 消息——顺序与 assistant tool_calls 一致）
-    for (const { call, args, ok, out } of results) {
+    for (const { call, args, ok, out, diff } of results) {
       // summary 推完整输出（v2.1 会话落库与 Diff 面板需要完整内容；显示层自行截断）
-      emit({ type: "tool-result", tool: call.toolName, ok, summary: out, callId: call.toolCallId });
+      emit({ type: "tool-result", tool: call.toolName, ok, summary: out, diff, callId: call.toolCallId });
       toolLogs.push({ tool: call.toolName, args, ok, summary: out });
       // v2.6 收尾：回填模型的消息副本统一裁剪（事件/落库保持完整，仅控模型侧上下文预算）
       toolResultParts.push({ role: "tool", tool_call_id: call.toolCallId, content: trimToolResult(out) });

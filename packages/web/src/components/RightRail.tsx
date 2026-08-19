@@ -183,7 +183,7 @@ export default function RightRail({ onCollapse }: { onCollapse: () => void }) {
             滚轮事件转水平滚动（scrollLeft += deltaY），滑动机制真实可感）
             no-drag：tab 项/关闭按钮可点（区域空白处由父容器 drag 接管） */}
         <div
-          className="no-scrollbar relative z-0 flex min-w-0 flex-1 items-end gap-0.5 overflow-x-auto pr-1"
+          className="no-scrollbar relative z-0 flex min-w-0 flex-1 items-end gap-0.5 overflow-x-auto pr-1 touch-pan-x"
           style={{ WebkitAppRegion: "no-drag" } as React.CSSProperties}
           onWheel={(e) => {
             const el = e.currentTarget;
@@ -196,7 +196,7 @@ export default function RightRail({ onCollapse }: { onCollapse: () => void }) {
           {rightTabs.map((t) => (
             <div
               key={t.id}
-              className={`group relative flex h-8 min-w-0 max-w-[156px] cursor-pointer items-center gap-1.5 rounded-lg px-2.5 text-[13px] transition-colors ${
+              className={`group relative flex h-8 min-w-[96px] max-w-[156px] shrink-0 cursor-pointer items-center gap-1.5 rounded-lg px-2.5 text-[13px] transition-colors ${
                 t.id === activeRightTab
                   ? "bg-elevated text-text shadow-lv1"
                   : "text-sub hover:bg-hover/70 hover:text-text"
@@ -275,7 +275,7 @@ export default function RightRail({ onCollapse }: { onCollapse: () => void }) {
           只切显隐不销毁；其余按活动 tab 渲染；无 tab = 初始面板） */}
       <div className="relative min-h-0 flex-1">
         <div className={`absolute inset-0 z-10 ${active?.kind === "browser" ? "" : "pointer-events-none hidden"}`}>
-          <BrowserPanel />
+          <BrowserPanel active={active?.kind === "browser"} />
         </div>
         {!active ? (
           <RightRailEmpty />

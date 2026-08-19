@@ -8,7 +8,7 @@ import {
 import { Streamdown } from "streamdown";
 import type { PhaseId } from "@infu/shared";
 import { useStore, type ChatMsg } from "../store";
-import { sendChat, mergeWorktree, discardWorktree, rewindSession, fetchProjects, fetchConfig, updateConfig, fetchPlugins, setApprovalBypass, type ApprovalMode, type ChatFileInput, type PluginInfo, egressAllow, egressDisallow } from "../api";
+import { sendChat, mergeWorktree, discardWorktree, rewindSession, fetchProjects, fetchConfig, updateConfig, fetchPlugins, setApprovalBypass, fetchReviewFiles, type ApprovalMode, type ChatFileInput, type PluginInfo, egressAllow, egressDisallow } from "../api";
 import Timeline from "./Timeline";
 import ReasoningBlock from "./ReasoningBlock";
 import QueueDock from "./QueueDock";
@@ -24,14 +24,16 @@ const EMPTY_TRACE_EVENTS: import("@infu/shared").StoredEvent[] = [];
 
 function ActivityDock({ visible }: { visible: boolean }) {
   const activeSessionId = useStore((s) => s.activeSessionId);
+  const viewMode = useStore((s) => s.viewMode);
+  const sessionRoot = useStore((s) => s.sessions.find((item) => item.id === s.activeSessionId)?.root || s.root);
+  const useWorktree = useStore((s) => s.useWorktree);
+  const worktree = useStore((s) => s.worktree);
   const events = useStore((s) => (activeSessionId ? s.traceBySession[activeSessionId] ?? EMPTY_TRACE_EVENTS : EMPTY_TRACE_EVENTS));
   const sessionTitle = useStore((s) => s.sessions.find((item) => item.id === s.activeSessionId)?.title ?? "当前会话");
   const activity = useMemo(() => {
     const tools = new Map<string, string>();
     const jobs = new Map<string, { command: string; startedAt: number }>();
     const agents = new Map<string, { name: string; prompt: string }>();
-    let added = 0;
-    let removed = 0;
     for (const { event, ts } of events) {
       if (event.type === "tool-start" && event.callId) tools.set(event.callId, event.tool);
       if (event.type === "tool-result" && event.callId) tools.delete(event.callId);
@@ -39,19 +41,17 @@ function ActivityDock({ visible }: { visible: boolean }) {
       if (event.type === "job-done") jobs.delete(event.id);
       if (event.type === "subagent-start") agents.set(event.id, { name: event.name, prompt: event.prompt });
       if (event.type === "subagent-done") agents.delete(event.id);
-      if (event.type === "tool-result" && (event.tool === "write_file" || event.tool === "edit_file" || event.tool === "git_diff")) {
-        for (const match of event.summary.matchAll(/\+(\d+)/g)) added += Number(match[1]);
-        for (const match of event.summary.matchAll(/-(\d+)/g)) removed += Number(match[1]);
-      }
     }
-    return { tools: [...tools.values()], jobs: [...jobs.entries()], agents: [...agents.entries()], added, removed };
+    return { tools: [...tools.values()], jobs: [...jobs.entries()], agents: [...agents.entries()] };
   }, [events]);
+  const [diff, setDiff] = useState({ added: 0, removed: 0 });
   const [menuOpen, setMenuOpen] = useState(false);
   const [position, setPosition] = useState<{ x: number; y: number } | null>(null);
   const [compact, setCompact] = useState(false);
   const [summaryIndex, setSummaryIndex] = useState(0);
   const [, setClockTick] = useState(0);
-  const drag = useRef<{ offsetX: number; offsetY: number; host: DOMRect } | null>(null);
+  const dockRef = useRef<HTMLDivElement>(null);
+  const drag = useRef<{ offsetX: number; offsetY: number; host: DOMRect; width: number; height: number } | null>(null);
   const moved = useRef(false);
   const idleTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const active = activity.tools.length + activity.jobs.length + activity.agents.length > 0;
@@ -59,9 +59,9 @@ function ActivityDock({ visible }: { visible: boolean }) {
     useStore.getState().openRightTab({ id: "trace", kind: "trace", label: "会话追踪" });
     useStore.getState().setDetailsOpen(true);
   };
-  const hasDiff = activity.added > 0 || activity.removed > 0;
+  const hasDiff = diff.added > 0 || diff.removed > 0;
   const summaries = [
-    hasDiff ? `改动 +${activity.added} / -${activity.removed}` : null,
+    hasDiff ? `改动 +${diff.added} / -${diff.removed}` : null,
     activity.jobs.length ? `后台命令 ${activity.jobs.length}` : null,
     activity.agents.length ? `子 Agent ${activity.agents.length}` : null,
     activity.tools[0] ?? null,
@@ -96,13 +96,56 @@ function ActivityDock({ visible }: { visible: boolean }) {
     const timer = setInterval(() => setClockTick((n) => n + 1), 1000);
     return () => clearInterval(timer);
   }, [activity.jobs.length]);
+  // The capsule must show the same current Git state as ReviewPane, never numbers
+  // guessed from historical tool output (which can include line ranges and errors).
+  useEffect(() => {
+    const normalize = (p: string) => p.replace(/[\\/]+$/, "").toLowerCase();
+    const root = useWorktree && worktree && normalize(worktree.path).startsWith(`${normalize(sessionRoot)}\\.infu\\worktrees\\`)
+      ? worktree.path
+      : sessionRoot;
+    if (!root) {
+      setDiff({ added: 0, removed: 0 });
+      return;
+    }
+    let cancelled = false;
+    void fetchReviewFiles(root)
+      .then(({ files }) => {
+        if (!cancelled) setDiff(files.reduce((total, file) => ({ added: total.added + file.added, removed: total.removed + file.removed }), { added: 0, removed: 0 }));
+      })
+      .catch(() => {
+        if (!cancelled) setDiff({ added: 0, removed: 0 });
+      });
+    return () => { cancelled = true; };
+  }, [events, sessionRoot, useWorktree, worktree]);
+  // Grid width changes when the workspace opens/closes. Keep a dragged capsule
+  // inside the chat host instead of letting its stale left coordinate be clipped.
+  useEffect(() => {
+    if (!position) return;
+    const host = dockRef.current?.closest("main");
+    const pill = dockRef.current;
+    if (!host || !pill) return;
+    const clamp = () => {
+      const hostRect = host.getBoundingClientRect();
+      const pillRect = pill.getBoundingClientRect();
+      setPosition((current) => {
+        if (!current) return current;
+        const x = Math.max(8, Math.min(hostRect.width - pillRect.width - 8, current.x));
+        const y = Math.max(8, Math.min(hostRect.height - pillRect.height - 8, current.y));
+        return x === current.x && y === current.y ? current : { x, y };
+      });
+    };
+    const observer = new ResizeObserver(clamp);
+    observer.observe(host);
+    observer.observe(pill);
+    return () => observer.disconnect();
+  }, [position]);
   const onMove = (event: PointerEvent) => {
     const state = drag.current;
     if (!state) return;
     moved.current = true;
     setPosition({
-      x: Math.max(8, Math.min(state.host.width - 152, event.clientX - state.host.left - state.offsetX)),
-      y: Math.max(8, Math.min(state.host.height - 48, event.clientY - state.host.top - state.offsetY)),
+      x: Math.max(8, Math.min(state.host.width - state.width - 8, event.clientX - state.host.left - state.offsetX)),
+      y: Math.max(8, Math.min(state.host.height - state.height - 8, event.clientY - state.host.top - state.offsetY)),
     });
   };
   const onUp = () => {
@@ -117,12 +160,12 @@ function ActivityDock({ visible }: { visible: boolean }) {
     resetIdle();
     setSummaryIndex(0);
     moved.current = false;
-    drag.current = { offsetX: event.clientX - pill.left, offsetY: event.clientY - pill.top, host };
+    drag.current = { offsetX: event.clientX - pill.left, offsetY: event.clientY - pill.top, host, width: pill.width, height: pill.height };
     window.addEventListener("pointermove", onMove);
     window.addEventListener("pointerup", onUp);
   };
-  if (!visible) return null;
-  return <div className="absolute z-30 select-none" style={position ? { left: position.x, top: position.y } : { right: 16, top: 12 }} onPointerDown={resetIdle}>
+  if (!visible || viewMode === "code") return null;
+  return <div ref={dockRef} className="absolute z-40 select-none" style={position ? { left: position.x, top: position.y } : { right: 16, top: 12 }} onPointerDown={resetIdle}>
     <div
       onPointerDown={beginDrag}
       onDoubleClick={() => { if (!moved.current) { resetIdle(); setMenuOpen((v) => !v); } }}
@@ -130,7 +173,7 @@ function ActivityDock({ visible }: { visible: boolean }) {
       className={`task-capsule group inline-flex cursor-grab touch-none items-center rounded-full border bg-elevated/95 text-text backdrop-blur transition-[height,padding,box-shadow,transform] duration-300 active:cursor-grabbing ${compact ? "h-8 w-8 justify-center" : "h-8 max-w-[144px] px-1.5"} ${active ? "border-info/45" : "border-line hover:border-info/25"}`}
       title="拖拽移动 · 双击展开任务菜单"
     >
-      <span className={`flex h-5 w-5 shrink-0 items-center justify-center rounded-full ${active ? "bg-info text-white" : "bg-hover text-sub"}`}>{active ? <Loader2 className="h-3 w-3 animate-spin" /> : <Activity className="h-3 w-3" />}</span>
+      <span className={`flex h-5 w-5 shrink-0 items-center justify-center rounded-full shadow-none ${active ? "bg-info text-white" : "bg-hover text-sub"}`}>{active ? <Loader2 className="h-3 w-3 animate-spin" /> : <Activity className="h-3 w-3" />}</span>
       {!compact && <span key={capsuleText} className="task-capsule-text ml-1.5 max-w-[112px] truncate text-[11px] font-semibold">{capsuleText}</span>}
     </div>
     {menuOpen && !compact && <div className="task-capsule-menu absolute right-0 top-[calc(100%+8px)] w-[286px] overflow-hidden rounded-2xl border border-line bg-elevated">
@@ -138,7 +181,7 @@ function ActivityDock({ visible }: { visible: boolean }) {
       <div className="max-h-52 space-y-1 overflow-y-auto px-1.5 pb-1.5">
         {activity.jobs.map(([id, job]) => <div key={id} className="flex items-center gap-2 rounded-xl px-2.5 py-2 text-[12px] text-sub"><span className="text-warn"><Command className="h-3.5 w-3.5" /></span><span className="min-w-0 flex-1"><span className="block truncate text-text">{job.command}</span><span className="block text-[10px] text-caption">后台命令 · 已运行 {fmtDuration(job.startedAt)}</span></span></div>)}
         {activity.agents.map(([id, agent]) => <button key={id} onClick={() => openAgent(id, agent.name)} className="flex w-full cursor-pointer items-center gap-2 rounded-xl px-2.5 py-2 text-left text-[12px] text-sub transition-colors hover:bg-hover"><span className="text-success"><Bot className="h-3.5 w-3.5" /></span><span className="min-w-0 flex-1"><span className="block truncate text-text">{agent.name}</span><span className="block truncate text-[10px] text-caption">{agent.prompt}</span></span><span className="text-[10px] text-info">查看</span></button>)}
-        {hasDiff && <div className="flex items-center gap-2 rounded-xl px-2.5 py-2 text-[12px] text-sub"><span className="text-info"><Files className="h-3.5 w-3.5" /></span><span className="min-w-0 flex-1 text-text">本会话改动</span><span className="font-mono text-[11px]"><span className="text-success">+{activity.added}</span>{" "}<span className="text-danger">-{activity.removed}</span></span></div>}
+        {hasDiff && <div className="flex items-center gap-2 rounded-xl px-2.5 py-2 text-[12px] text-sub"><span className="text-info"><Files className="h-3.5 w-3.5" /></span><span className="min-w-0 flex-1 text-text">当前工作区改动</span><span className="font-mono text-[11px]"><span className="text-success">+{diff.added}</span>{" "}<span className="text-danger">-{diff.removed}</span></span></div>}
         {!activity.jobs.length && !activity.agents.length && !hasDiff && <div className="px-2.5 py-3 text-center text-[12px] leading-5 text-sub">目前没有内容。</div>}
       </div>
       <button onClick={openTrace} className="flex w-full cursor-pointer items-center gap-2 px-3.5 py-2.5 text-left text-[12px] font-medium text-info transition-colors hover:bg-info-soft"><ListTree className="h-3.5 w-3.5" />打开会话追踪 <span className="ml-auto text-[10px] text-caption">完整事件账本</span></button>

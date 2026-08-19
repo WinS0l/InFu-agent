@@ -112,14 +112,12 @@ function saveWindowState(win: BrowserWindow) {
   } catch { /* 忽略 */ }
 }
 
-// ── 主题联动：titleBarOverlay 系统窗口按钮配色跟随应用主题（v3.0 批 9.5 拍板：
-//    Windows 下 titleBarStyle:hidden 保留原生三按钮（右上角悬浮）——三栏顶部顶到
-//    窗口最顶；height 32 压缩悬浮区（批 9.6：与 tab 条底部内容错开，无需大让位，
-//    背景与右侧栏 bg-ink 同色，视觉融合）──
+// ── 主题联动：Windows 原生窗口按钮与工作区 tab 条共用同一表面。保留系统控件的
+//    可访问性/窗口行为，但让它成为右侧工作区标题栏的一部分，而不是悬浮异物。──
 function themeOverlayColors(theme: string) {
   return theme === "light"
-    ? { color: "#FFFFFF", symbolColor: "#0F1115" }
-    : { color: "#151517", symbolColor: "#F9FAFB" };
+    ? { color: "#F9FAFB", symbolColor: "#0F1115" }
+    : { color: "#1B1B1C", symbolColor: "#F9FAFB" };
 }
 function applyThemeOverlay(win: BrowserWindow, theme?: string) {
   try {
@@ -146,13 +144,9 @@ function createMainWindow() {
     y: state.y,
     show: false,
     backgroundColor: "#151517",
-    // 无边框：隐藏系统标题栏，保留原生窗口按钮（titleBarOverlay 右上角悬浮，随主题配色；
-    // v3.3 补 6/7：height 显式 40px——Electron 不设 height 时用系统默认（Windows 10/11
-    // 100% DPI 下 32px，与本机批 9.6 的 32 相同=用户观感「没恢复」）；Windows 11 原生
-    // 标题栏视觉高度 40px，显式设 40 对齐原生大小（125% 缩放物理 50px < tab 条 3.25rem
-    // 45.5px 逻辑，不越界；折叠 rail 让位区 34.5px+py-3 = 按钮 top≈49px > 40 不被盖））
+    // 无边框：原生窗口按钮覆盖右侧工作区的 3.25rem tab 条，背景和高度与该表面统一。
     titleBarStyle: "hidden",
-    titleBarOverlay: { ...themeOverlayColors(theme), height: 40 },
+    titleBarOverlay: { ...themeOverlayColors(theme), height: 52 },
     webPreferences: {
       preload: join(__dirname, "preload.cjs"),
       contextIsolation: true,

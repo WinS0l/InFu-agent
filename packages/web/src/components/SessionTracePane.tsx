@@ -50,11 +50,10 @@ export default function SessionTracePane() {
   // Selector must return a stable empty value. A fresh [] here makes Zustand believe the
   // selection changed on every render, which can recurse into React's update-depth guard.
   const events = useStore((s) => (activeSessionId ? s.traceBySession[activeSessionId] ?? EMPTY_EVENTS : EMPTY_EVENTS));
-  const [selected, setSelected] = useState<number | null>(null);
-  // Sequence values are only unique inside a session. Never carry a selected row into another session.
-  useEffect(() => setSelected(null), [activeSessionId]);
+  const [expanded, setExpanded] = useState<Set<number>>(() => new Set());
+  // Sequence values are only unique inside a session. Never carry expanded rows into another session.
+  useEffect(() => setExpanded(new Set()), [activeSessionId]);
   const rows = useMemo(() => events.filter((x) => ["model-call", "tool-start", "tool-result", "context-compressed", "model-fallback", "retry", "subagent-start", "subagent-done", "task-notification", "error"].includes(x.event.type)), [events]);
-  const selectedEvent = selected == null ? null : rows.find((x) => x.seq === selected) ?? null;
   const usage = useMemo(() => rows.reduce((a, x) => {
     if (x.event.type === "model-call") {
       a.prompt += x.event.promptTokens;
@@ -80,15 +79,22 @@ export default function SessionTracePane() {
       <div className="min-h-0 flex-1 overflow-y-auto p-2">
         {rows.slice().reverse().map((row) => {
           const kind = classify(row.event);
-          const isSelected = selected === row.seq;
-          return <button key={row.seq} onClick={() => setSelected(isSelected ? null : row.seq)} className={`flex w-full cursor-pointer items-center gap-2 rounded-lg px-2.5 py-2 text-left transition-colors ${isSelected ? "bg-info-soft text-text" : "hover:bg-hover"}`}>
-            <span className={`flex h-6 w-6 shrink-0 items-center justify-center rounded-md ${kind === "recovery" ? "bg-warn-soft text-warn" : kind === "tool" ? "bg-elevated text-sub" : "bg-info-soft text-info"}`}><Icon kind={kind} /></span>
-            <span className="min-w-0 flex-1"><span className="block truncate text-[12px] font-medium">{label(row.event)}</span><span className="block text-[11px] text-caption">{new Date(row.ts).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" })} · #{row.seq}</span></span>
-            <ChevronRight className={`h-3.5 w-3.5 shrink-0 text-caption transition-transform ${isSelected ? "rotate-90" : ""}`} />
-          </button>;
+          const isExpanded = expanded.has(row.seq);
+          return <div key={row.seq} className="mb-1">
+            <button onClick={() => setExpanded((current) => {
+              const next = new Set(current);
+              if (next.has(row.seq)) next.delete(row.seq);
+              else next.add(row.seq);
+              return next;
+            })} className={`flex w-full cursor-pointer items-center gap-2 rounded-lg px-2.5 py-2 text-left transition-colors ${isExpanded ? "bg-info-soft text-text" : "hover:bg-hover"}`}>
+              <span className={`flex h-6 w-6 shrink-0 items-center justify-center rounded-md ${kind === "recovery" ? "bg-warn-soft text-warn" : kind === "tool" ? "bg-elevated text-sub" : "bg-info-soft text-info"}`}><Icon kind={kind} /></span>
+              <span className="min-w-0 flex-1"><span className="block truncate text-[12px] font-medium">{label(row.event)}</span><span className="block text-[11px] text-caption">{new Date(row.ts).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" })} · #{row.seq}</span></span>
+              <ChevronRight className={`h-3.5 w-3.5 shrink-0 text-caption transition-transform ${isExpanded ? "rotate-90" : ""}`} />
+            </button>
+            {isExpanded && <TraceDetails entry={row} />}
+          </div>;
         })}
       </div>
-      {selectedEvent && <TraceDetails entry={selectedEvent} />}
     </div>
   );
 }
@@ -98,7 +104,7 @@ function EmptyState({ text }: { text: string }) { return <div className="flex h-
 function TraceDetails({ entry }: { entry: StoredEvent }) {
   const event = entry.event;
   const summary = eventSummary(event);
-  return <div className="max-h-[45%] shrink-0 overflow-y-auto border-t border-line bg-elevated p-3">
+  return <div className="mt-1 overflow-hidden rounded-xl border border-line bg-elevated p-3">
     <div className="mb-2 flex items-center gap-1.5 text-[12px] font-medium text-text"><Braces className="h-3.5 w-3.5 text-info" />事件详情</div>
     {event.type === "model-call" && <div className="mb-2 rounded-lg bg-panel px-2.5 py-2 text-xs text-sub">输入 {event.promptTokens.toLocaleString()} · 输出 {event.completionTokens.toLocaleString()} · 缓存读 {(event.cacheHit ?? 0).toLocaleString()} · 未命中 {(event.cacheMiss ?? 0).toLocaleString()}</div>}
     {summary && <CodeBlock label={event.type === "error" ? "错误" : "摘要"} text={summary} maxHeight={144} />}

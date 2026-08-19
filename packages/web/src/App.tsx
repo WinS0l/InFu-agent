@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState, lazy, Suspense } from "react";
-import { FolderOpen, PanelRightOpen } from "lucide-react";
+import { FolderOpen, PanelsTopLeft } from "lucide-react";
 import { useStore } from "./store";
 import { fetchModels, fetchSessions, fetchSessionEvents, maybeMigrateV1, fetchConfig, fetchProjects } from "./api";
 import Sidebar from "./components/Sidebar";
@@ -332,7 +332,7 @@ export default function App() {
                 <div
                   className="ml-auto flex items-center"
                   style={{
-                    paddingRight: Math.max(0, 140 - (viewMode === "code" ? 0 : detailsOpen ? detailsWidth : 56)),
+                    paddingRight: Math.max(0, 138 - (viewMode === "code" ? 0 : detailsOpen ? detailsWidth : 56)),
                     WebkitAppRegion: "no-drag",
                   } as React.CSSProperties}
                 >
@@ -382,7 +382,7 @@ export default function App() {
               onClick={() => setDetailsOpen(true)}
               title="展开右侧栏"
             >
-              <PanelRightOpen className="h-5 w-5" />
+              <PanelsTopLeft className="h-5 w-5" />
             </button>
           </aside>
         ))}

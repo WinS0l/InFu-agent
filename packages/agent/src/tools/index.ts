@@ -69,6 +69,11 @@ function normAbs(abs: string): string {
   const r = path.resolve(abs);
   return process.platform === "win32" ? r.toLowerCase() : r;
 }
+/** Git numstat style line count: an empty file contributes zero; a trailing newline is not an extra line. */
+function countContentLines(text: string): number {
+  if (!text) return 0;
+  return text.endsWith("\n") ? text.split("\n").length - 1 : text.split("\n").length;
+}
 function markReadState(sessionId: string, abs: string, entry: ReadStateEntry): void {
   let map = observedFiles.get(sessionId);
   if (!map) {
@@ -223,6 +228,7 @@ export const TOOLS: Record<string, ToolDef> = {
       }
       const desc = `写入文件 ${rel}（${(args.content as string).length} 字符）`;
       if (!(await guard(ctx, "write_file", "low", desc))) return "用户拒绝：未写入";
+      const previous = fs.existsSync(abs) ? fs.readFileSync(abs, "utf-8") : "";
       const recoveryId = fs.existsSync(abs) ? backupForRecovery(ctx.root, abs, rel, ctx.sessionId) : null;
       if (fs.existsSync(abs) && !recoveryId) return "错误：无法创建会话恢复副本，未写入";
       fs.mkdirSync(path.dirname(abs), { recursive: true });
@@ -236,7 +242,8 @@ export const TOOLS: Record<string, ToolDef> = {
         mtimeMs: st.mtimeMs,
         sizeBytes: st.size,
       });
-      const lines = (args.content as string).split("\n").length;
+      const lines = countContentLines(args.content as string);
+      ctx.recordFileDiff?.({ added: lines, removed: countContentLines(previous) });
       return `已写入 ${rel}（${(args.content as string).length} 字符，${lines} 行）${recoveryId ? `；可用 file_ops restore 恢复（记录 ${recoveryId}，7 天有效）` : ""}`;
     },
   },
@@ -291,10 +298,11 @@ export const TOOLS: Record<string, ToolDef> = {
         sizeBytes: st2.size,
       });
       // 行数 diff 统计（+N -M 行）
-      const oldLines = oldText.split("\n").length;
-      const newLines = (args.new_text as string).split("\n").length;
-      const added = newLines > oldLines ? newLines - oldLines : 0;
-      const removed = oldLines > newLines ? oldLines - newLines : 0;
+      const oldLines = countContentLines(oldText);
+      const newLines = countContentLines(args.new_text as string);
+      const added = newLines;
+      const removed = oldLines;
+      ctx.recordFileDiff?.({ added, removed });
       return `已修改 ${rel}（${added > 0 ? `+${added} ` : ""}${removed > 0 ? `-${removed} ` : ""}行）；可用 file_ops restore 恢复（记录 ${recoveryId}，7 天有效）`;
     },
   },

@@ -33,6 +33,8 @@ function renderTree(absRoot: string, depth: number): string {
     for (const ent of entries) {
       if (SKIP.has(ent.name)) continue;
       const full = path.join(dir, ent.name);
+      // v6.0 S6 加固：目录树不显示符号链接/目录联接（防止指向项目外的链接误导/泄出结构）
+      if (ent.isSymbolicLink()) continue;
       if (ent.isDirectory()) {
         lines.push(`${prefix}${ent.name}/`);
         walk(full, prefix + "  ", level + 1);

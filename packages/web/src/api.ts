@@ -280,15 +280,18 @@ export interface SettingsConfig {
     autoContinueQuestions?: boolean;
     showThinking?: boolean;
     showTodos?: boolean;
+    autoCommit?: boolean;
+    autoVerify?: boolean;
     autoArchive?: boolean;
     archiveRetentionDays?: number;
     quickModelId?: string;
     compressArchivedEvents?: boolean;
     compressArchivedAfterDays?: number;
+    taskTokenBudget?: number;
   };
   appearance: { fontSize?: "xs" | "sm" | "base"; streamCursor?: boolean; theme?: "light" | "dark" | "system" };
   browser?: { headless?: boolean; executablePath?: string };
-  memory?: { autoSediment?: boolean };
+  memory?: { autoSediment?: boolean; autoRefine?: boolean };
   defaultModelId: string | null;
 }
 

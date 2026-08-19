@@ -149,8 +149,8 @@ tools: read_file, read_file
 console.log("\n▶ listAgents / readAgentFile：发现与层级");
 {
   check("内置 agent（general-purpose 全工具）", BUILTIN_AGENTS.some((a) => a.name === "general-purpose" && !a.tools));
-  check("内置 agent（explore 只读 15 件）", BUILTIN_AGENTS.some((a) => a.name === "explore" && a.tools?.length === 15));
-  check("内置只读工具集 = 15 件只读（v3.3 补 wait_task）", READONLY_TOOLS.length === 15 && READONLY_TOOLS.every((t) => !["write_file", "edit_file", "run_command", "run_test"].includes(t)));
+  check("内置 agent（explore 只读 20 件）", BUILTIN_AGENTS.some((a) => a.name === "explore" && a.tools?.length === 20));
+  check("内置只读工具集 = 20 件只读（v6.0 补 code_symbols/lsp×3/ocr_image）", READONLY_TOOLS.length === 20 && READONLY_TOOLS.every((t) => !["write_file", "edit_file", "run_command", "run_test"].includes(t)));
   check("readAgentFile 内置 explore 免文件", readAgentFile("explore", root)?.name === "explore");
   writeFileSync(join(projAgents, "reviewer.md"), `---
 description: 项目级审查员

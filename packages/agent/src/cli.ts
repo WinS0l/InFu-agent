@@ -436,7 +436,7 @@ async function main() {
     args.flatMap((a, i) => (a === name && args[i + 1] ? [args[i + 1]] : []));
   // 任务 prompt 提取：跳过全部参数（带值参数连同其值，开关单独跳过）——顺带修复参数值混入 prompt 的既有问题
   const VALUE_ARGS = new Set(["--root", "--model", "--fallback-model", "--max-steps", "--template", "--session", "--thinking",
-    "--planner-model", "--executor-model", "--reviewer-model"]);
+    "--planner-model", "--executor-model", "--reviewer-model", "--budget"]);
   const FLAG_ONLY = new Set(["-y", "--yes", "--no-plan-approval", "--orchestrate"]);
   let prompt = "";
   for (let i = 0; i < args.length; i++) {
@@ -481,11 +481,12 @@ async function main() {
 
 用法：
   infu config   ★ 交互式配置模型与 API Key（推荐）
-  infu "任务描述" [--root <项目路径>] [--model <模型id>] [-y]
+  infu "任务描述" [--root <项目路径>] [--model <模型id>] [-y] [--budget <tokens>]
   infu sessions 会话历史（每次任务自动保存，可继续）
   infu mcp add/list/remove/status   MCP 服务器管理（v2.3：工具动态注入执行阶段）
   infu plugin add/list/remove/status   插件管理（v2.3 批 2：JS 模块 = 工具/钩子/技能）
   infu skill add/list/remove       技能管理（SKILL.md 社区标准）
+  infu skill template list/new     技能模板库（v6.0 P4：内置模板一键生成技能）
   infu agent list                  子智能体列表（v2.5：.infu/agents/<name>.md 文件即注册）
   infu --session <id> "继续的指令"   继续之前的会话（消息级重建：完整恢复历史与进度）
   infu --setup   生成模型配置模板（JSON）
@@ -503,6 +504,9 @@ async function main() {
   infu "任务" --orchestrate     显式启用分层编排（Planner 规划 → 计划确认 → Executor → Reviewer）
   infu "任务" --orchestrate --no-plan-approval  编排但不弹计划确认
 
+预算控制（v6.0 S4）：
+  infu "任务" --budget <tokens>  任务级 Token 预算上限（跨阶段累计真实用量，达到优雅停止输出进度总结；缺省读 config general.taskTokenBudget，0=不限制）
+
 示例：
   infu config
   infu "分析这个项目的技术栈和结构" --root .
@@ -512,6 +516,11 @@ async function main() {
   }
 
   const config = loadConfig();
+  // v6.0（S4）：任务级 Token 预算——--budget 显式覆盖 > config general.taskTokenBudget（0=不限制）
+  const budgetArg = parseInt(getArg("--budget") || "", 10);
+  const taskTokenBudget = !Number.isNaN(budgetArg) && budgetArg >= 0
+    ? budgetArg
+    : (config?.general?.taskTokenBudget ?? 0);
   const modelCfg = resolveModel(config, modelId);
   // v2.2 降级链：显式 --fallback-model 优先，否则用模型自身 fallbackModelIds（未知 id 警告）
   const fallbackModels = resolveFallbackModels(config, modelCfg, fallbackModelIds);
@@ -669,6 +678,8 @@ async function main() {
     confirmPlan: cliConfirmPlan,
     askUser: cliAskUser,
     abortSignal: abortController.signal,
+    // v6.0（S4）：任务级 Token 预算（--budget 覆盖 > config general.taskTokenBudget）
+    taskTokenBudget,
     // v2.3：MCP 工具 + 插件工具只进 Executor（Planner/Reviewer 架构级只读不暴露）；
     // 插件钩子随 Executor 生效；skill 描述注入 Executor system；
     // 阶段级续跑：跳过已完成的规划阶段（计划沿用上次确认的）

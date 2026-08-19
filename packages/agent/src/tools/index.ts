@@ -36,8 +36,9 @@ import { sessionTools } from "./session-tools.js";
 import { visionTools } from "./vision.js";
 import { semanticSearch } from "./semantic.js";
 import { execPersistent, closeShellSession } from "./persistent-shell.js";
-import { lspDiagnose } from "./lsp.js";
+import { lspDiagnose, lspGotoDefinition, lspCompletions, lspFindReferences } from "./lsp.js";
 import { loadIndex } from "../index/index.js";
+import { searchSymbols, type SymbolKind } from "../index/symbols.js";
 import { fsTools } from "./fs-tools.js";
 import { envTools } from "./env-tools.js";
 
@@ -333,6 +334,40 @@ export const TOOLS: Record<string, ToolDef> = {
       }
       if (!hits.length) return `未找到匹配 "${args.pattern}"`;
       return `找到 ${hits.length} 处：\n${hits.join("\n")}`;
+    },
+  },
+
+  // ── v6.0（S5）符号级代码索引：类/函数/接口/类型/枚举/变量 语义级定位 ──
+  code_symbols: {
+    name: "code_symbols",
+    description:
+      "在项目内按符号（声明）搜索代码：类/函数/接口/类型/枚举/模块/变量。返回 file:行号:签名。\n" +
+      "与 search_code 的区别：这是语义级声明识别（TS 语法解析，排除注释/字符串/同名变量噪声），\n" +
+      "search_code 是正则文本匹配。何时用：想找「哪里定义了 X / 谁导出了 Y / 有没有叫 foo 的接口」；\n" +
+      "不确定关键词时用 search_code 或 semantic_search。首次调用需构建索引（秒级），refresh=true 强制重建。",
+    risk: "low",
+    schema: z.object({
+      query: z.string().describe("符号名（子串匹配；大小写不敏感）"),
+      kind: z.enum(["class", "function", "interface", "type", "enum", "variable", "module"]).optional().describe("限定符号类型"),
+      max: z.number().int().min(1).max(50).optional().describe("最大结果数（默认 20）"),
+      refresh: z.boolean().optional().describe("强制重建符号索引（代码改动后结果陈旧时用）"),
+    }),
+    async execute(args, ctx) {
+      const hits = searchSymbols(
+        ctx.root,
+        args.query as string,
+        args.kind as SymbolKind | undefined,
+        (args.max as number | undefined) || 20,
+        args.refresh === true
+      );
+      if (!hits.length) {
+        const kindNote = args.kind ? `（类型 ${args.kind}）` : "";
+        return `未找到符号 "${args.query}"${kindNote}。提示：符号索引在首次调用/refresh 时构建；若刚改过代码可用 refresh=true 重建；想按文本搜用 search_code。`;
+      }
+      const lines = hits.map(
+        (s) => `${s.file}:${s.line} ${s.exported ? "export " : ""}${s.signature}${s.members != null ? `  [成员 ${s.members}]` : ""}`
+      );
+      return `找到 ${hits.length} 个符号：\n${lines.join("\n")}`;
     },
   },
 
@@ -635,7 +670,7 @@ export const TOOLS: Record<string, ToolDef> = {
       "· explore（只读，免审批）：探索/调研/摸清现状——回答需要跨多文件扫描、只需结论不要文件转储时；指定搜索广度（medium/very thorough）\n" +
       "· general-purpose（全工具，写能力需一次授权）：复杂多步任务——深度审计/代码审查/实现功能等需要多步推理执行时\n" +
       "· 单点查找（已知文件/符号/值）直接搜索即可，不要委派\n" +
-      "· 有多个独立子任务时用 tasks 数组并行（最多 6 个）\n" +
+      "· 团队并行（v6.0 S3）：大型任务拆成互相独立、边界清晰的子任务后用 tasks 数组一次并行委派（最多 6 个）——不同模块改动/独立调研/可并行验证的产出；子任务间不能有共享写冲突，依赖关系必须清晰\n" +
       "· 需要后台跑（不阻塞当前任务、稍后回收结果）时设 background=true：立即返回子智能体 id，用 list_agents 查看状态 / report 回收结果 / send_message 与等待中的子智能体交互 / interrupt_agent 中止\n" +
       "agent 参数可引用内置角色（explore / general-purpose）或 .infu/agents/<name>.md 角色文件；只读委派免审批，写能力委派需一次授权审批。",
     risk: "high",
@@ -1194,6 +1229,53 @@ export const TOOLS: Record<string, ToolDef> = {
     },
   },
 
+  // ── v6.0（P3）LSP 跳转定义 / 查找引用 / 补全（tsserver 语义级；诊断的互补能力）──
+  lsp_definition: {
+    name: "lsp_definition",
+    description:
+      "跳到符号定义处（TypeScript 语义级，tsserver 驱动）：给定文件 + 行号（1-based）+ 列号，返回定义位置（相对路径:行:列 + 上下文行）。何时用：想找某符号「在哪定义」、阅读引用链、code_symbols 命中后深挖。对内置/三方包符号会提示项目外不展示。",
+    risk: "low",
+    schema: z.object({
+      file: z.string().describe("相对项目根的 TS/JS 文件路径（如 src/agent/loop.ts）"),
+      line: z.number().int().min(1).describe("光标所在行（1-based）"),
+      offset: z.number().int().min(1).optional().describe("光标所在列（1-based，默认 1）"),
+    }),
+    async execute(args, ctx) {
+      const r = await lspGotoDefinition(ctx.root, (args.file as string) || "", args.line as number, (args.offset as number | undefined) ?? 1);
+      return r.message;
+    },
+  },
+  lsp_references: {
+    name: "lsp_references",
+    description:
+      "查找符号的全部引用位置（TypeScript 语义级）：给定文件 + 行 + 列，返回项目内引用列表（相对路径:行:列，含声明本身）。何时用：改接口/函数前评估影响面、找调用方。项目外（三方包）引用只计数不展示。",
+    risk: "low",
+    schema: z.object({
+      file: z.string().describe("相对项目根的 TS/JS 文件路径"),
+      line: z.number().int().min(1).describe("光标所在行（1-based）"),
+      offset: z.number().int().min(1).optional().describe("光标所在列（1-based，默认 1）"),
+    }),
+    async execute(args, ctx) {
+      const r = await lspFindReferences(ctx.root, (args.file as string) || "", args.line as number, (args.offset as number | undefined) ?? 1);
+      return r.message;
+    },
+  },
+  lsp_completion: {
+    name: "lsp_completion",
+    description:
+      "获取某位置的补全候选（TypeScript 语义级）：给定文件 + 行 + 列，返回候选名称 + 类型（类/函数/变量/关键字等）。何时用：不确定某位置可用 API、想确认导入名/成员名、审查补全体验。候选按 tsserver 排序截前 40 个，过滤内部与废弃符号。",
+    risk: "low",
+    schema: z.object({
+      file: z.string().describe("相对项目根的 TS/JS 文件路径"),
+      line: z.number().int().min(1).describe("光标所在行（1-based）"),
+      offset: z.number().int().min(1).optional().describe("光标所在列（1-based，默认 1）"),
+    }),
+    async execute(args, ctx) {
+      const r = await lspCompletions(ctx.root, (args.file as string) || "", args.line as number, (args.offset as number | undefined) ?? 1);
+      return r.message;
+    },
+  },
+
   // ── v3.0 批 11 语义检索（BM25 + 中文分词；零依赖本地相关度排序）──
   semantic_search: {
     name: "semantic_search",
@@ -1263,6 +1345,14 @@ export function getReadOnlyTools(): Record<string, ToolDef> {
     project_tree: TOOLS.project_tree,
     os_info: TOOLS.os_info,
     current_time: TOOLS.current_time,
+    // v6.0（S5）：符号级代码索引（只读语义检索——声明定位比正则更精准）
+    code_symbols: TOOLS.code_symbols,
+    // v6.0（P3）：LSP 跳转定义 / 查找引用 / 补全（tsserver 语义级，只读）
+    lsp_definition: TOOLS.lsp_definition,
+    lsp_references: TOOLS.lsp_references,
+    lsp_completion: TOOLS.lsp_completion,
+    // v6.0（B5）：OCR 图片文字识别（Windows 自带引擎，只读）
+    ocr_image: TOOLS.ocr_image,
   };
 }
 

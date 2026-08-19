@@ -21,12 +21,15 @@ import { resolveContextWindow, buildThinkingParamsForModel, mapThinkingLevel } f
 import {
   compressMessages, estimateTokens, SUMMARIZE_PROMPT,
   COMPRESS_TRIGGER_RATIO,
+  recordUsageCalibration, contextCalibrationFactor,
 } from "./context.js";
 import { currentApprovalPolicy, isToolDisabled, resolveToolRisk } from "../approval/policy.js";
 // v3.6：runAgent 收尾清理本层后台子 Agent/job（子任务随父循环结束；顶层 server/cli
 // finally 清全部 depth<0，此处互补清本级——修复子智能体/定时任务内部启动的后台任务孤儿）
 import { abortBackgroundAgentsByDepth } from "./subagent.js";
 import { abortJobsByDepth } from "../tools/jobs.js";
+// v6.0（S1）：写后自动验证（写工具成功后自动跑测试，结果回填模型）
+import { maybeAutoVerify } from "./auto-verify.js";
 
 export interface AgentRunOptions {
   /** 模型配置（provider/model/baseURL/apiKey） */
@@ -99,6 +102,8 @@ export interface AgentRunOptions {
   agentChannel?: { waitForMessage: (message: string) => Promise<string | null> };
   /** v2.14 批 18：沙箱档位覆盖（子智能体 agent 文件 sandbox 字段 → 工具执行） */
   sandboxMode?: "off" | "soft" | "restricted" | "docker" | "auto";
+  /** v6.0（S4）：任务级 Token 预算（累计真实用量 prompt+completion 上限；0/缺省=不限制） */
+  taskTokenBudget?: number;
 }
 
 /** runAgent 运行结果（供编排层汇总报告 / 调用方打印） */
@@ -181,9 +186,14 @@ export const DEFAULT_SYSTEM_PROMPT = `你是"InFu"，一个务实的 AI 助手�
 12. 后台任务完成时你会收到一条 <task-notification> 系统消息（含 task-id/status/summary）——看到通知后：结果有用就回收（子智能体用 report，job 用 job_output），需要继续驱动就用 send_message，任务已死就中断（interrupt_agent / job_kill）。
 13. 需要结果才能继续时才等待：wait_task（阻塞等待指定任务完成，可设超时）；未完成会返回进度——此时要么继续等，要么先做别的，不要反复轮询同一任务。
 
+Agent Team 拆解纪律（v6.0 S3，复杂任务的并行协作模式）：
+14. 大型任务（多模块改动、跨领域调研、可独立验证的多项产出）优先拆解为**团队并行**：识别互相独立、边界清晰的子任务（如「A 模块重构」「B 模块测试补齐」「调研某库的用法」），用 delegate_task 的 tasks 数组一次并行委派（最多 6 个，各子智能体独立上下文互不干扰），或 background=true 后台拆分后回收。
+15. 拆解边界：子任务必须**无共享写冲突**（不同文件/模块）、依赖关系清晰（有依赖的串行做，先做上游再委派下游）；需要同一文件的改动不要拆给多个子智能体。汇总由你自己完成——委派前先想清楚各子任务产出的整合方式。
+16. 小任务（单文件改动、单点查找、简单问答）**不要拆**——团队拆解有启动开销，只有"拆了明显更快"时才拆；拆解失败或结果冲突时，亲自重做该子任务，不要反复重派。
+
 修复与自检闭环（v5.0）：
-14. 任务涉及「修复测试失败/报错」时按收敛闭环执行：先 run_test 复现失败 → 根据失败信息定位修复 → 再 run_test 验证 → 循环直到全绿；连续 3 轮无进展必须**改变策略**（换方案/换文件/缩小范围）或如实说明卡点，不要原样重试同一命令。
-15. 交付前自检：任务改动过代码且项目有测试框架时，交付前用 run_test 验证一次（自动检测框架即可）；测试失败先修复再交付，不要带着已知失败收尾。`;
+17. 任务涉及「修复测试失败/报错」时按收敛闭环执行：先 run_test 复现失败 → 根据失败信息定位修复 → 再 run_test 验证 → 循环直到全绿；连续 3 轮无进展必须**改变策略**（换方案/换文件/缩小范围）或如实说明卡点，不要原样重试同一命令。
+18. 交付前自检：任务改动过代码且项目有测试框架时，交付前用 run_test 验证一次（自动检测框架即可）；测试失败先修复再交付，不要带着已知失败收尾。`;
 
 /**
  * v3.1 附件：用户消息内容 parts（text + 图片视觉 base64）。
@@ -367,6 +377,7 @@ export async function runAgent(opts: AgentRunOptions): Promise<RunResult> {
     emit, requestApproval, maxSteps = 30, abortSignal,
     phase, suppressFinal = false, initialMessages, thinkingLevel = 2, hooks,
     delegationDepth = 0, scopeRules, askUser, extraReadDirs, sessionId, agentChannel, sandboxMode,
+    taskTokenBudget = 0,
   } = opts;
 
   /**
@@ -500,7 +511,9 @@ export async function runAgent(opts: AgentRunOptions): Promise<RunResult> {
       model: chain.active.model,
       contextWindow: chain.active.contextWindow, // 显式配置优先（模型弹窗可配）
     });
-    if (!force && estimateTokens(messages) <= window * COMPRESS_TRIGGER_RATIO) return;
+    // v6.0（D1/S2）：触发判定用校准因子（API 真实用量 vs 本地估算的 EWMA 比值）修正估算
+    const calibFactor = contextCalibrationFactor(sessionId ?? "cli");
+    if (!force && estimateTokens(messages) * calibFactor <= window * COMPRESS_TRIGGER_RATIO) return;
     const summarize = async (history: ChatMessageLike[]): Promise<string> => {
       const out: string[] = [];
       // v2.10 缓存友好：摘要请求 = 当前 system（稳定前缀）+ 原样历史消息 + 末尾摘要指令
@@ -544,7 +557,7 @@ export async function runAgent(opts: AgentRunOptions): Promise<RunResult> {
     };
     // v3.9 审计修复（C1）：force 透传 compressMessages——原实现 ensureContextBudget(true)
     // 只跳过 loop 侧估算早退，compressMessages 内部仍按 trigger 早退（400 恢复 = 空操作）
-    const r = await compressMessages(messages, window, summarize, force);
+    const r = await compressMessages(messages, window, summarize, force, calibFactor);
     // v3.5 审计修复（H5）：压缩降级死代码——原 `if (r.summary)` 门槛导致「摘要过大拒绝/
     // 摘要生成失败 → 直接丢弃最老部分」的降级路径永不生效（messages 保持未压缩，
     // 上下文持续超限）。改为「压缩确实变小才应用」（无论摘要是否可用）。
@@ -588,6 +601,16 @@ export async function runAgent(opts: AgentRunOptions): Promise<RunResult> {
       const msg = "任务已停止（用户中止）";
       emit({ type: "error", message: msg });
       return { text: msg, steps: step, toolCount, approvals, toolLogs, usage };
+    }
+    // v6.0（S4）：任务级 Token 预算守卫——已达预算则优雅停止（不再产生任何模型调用）
+    if (taskTokenBudget > 0) {
+      const spent = usage.promptTokens + usage.completionTokens;
+      if (spent >= taskTokenBudget) {
+        const msg = `任务 Token 预算已用尽（已用 ${spent.toLocaleString("en-US")} / 预算 ${taskTokenBudget.toLocaleString("en-US")}），任务在此停止。已完成的工作已保存，可调整预算后发送「继续」接着干。`;
+        emit({ type: "error", message: msg });
+        if (!suppressFinal) emit({ type: "done", text: msg, toolCount, steps: step, usage });
+        return { text: msg, steps: step, toolCount, approvals, toolLogs, usage };
+      }
     }
     // 阶段边界事件（前端 Timeline 按此分组）
     emit({ type: "step-start", step: step + 1 });
@@ -705,6 +728,11 @@ export async function runAgent(opts: AgentRunOptions): Promise<RunResult> {
     usage.cacheMiss += stepUsage.cacheMiss;
     usage.promptTokens += stepUsage.promptTokens;
     usage.completionTokens += stepUsage.completionTokens;
+    // v6.0（D1/S2）：usage 校准——API 真实 prompt 用量 vs 本地估算（发送前的 messages），
+    // 按会话 EWMA 更新因子；压缩触发判定时用因子修正估算（主流双轨制：真实为基准、估算作预测）
+    if (stepUsage.promptTokens > 0) {
+      recordUsageCalibration(sessionId ?? "cli", stepUsage.promptTokens, estimateTokens(messages));
+    }
     // v3.0 UI 审查：单次模型调用落库（统计页真实数据源——时间/模型/prompt/completion；
     // 模型 = 当前活跃（降级切换后即备用模型）；provider 未返回 usage 时跳过，由估算兜底）
     if (stepUsage.promptTokens > 0 || stepUsage.completionTokens > 0) {
@@ -834,6 +862,16 @@ export async function runAgent(opts: AgentRunOptions): Promise<RunResult> {
           out,
           emit
         );
+        // ── v6.0（S1）写后自动验证：写工具成功改动后自动跑测试（general.autoVerify 开关；
+        //    按会话+根去抖 60s；结果附在工具结果回填模型；失败静默不阻塞写操作）──
+        out = await maybeAutoVerify({
+          tool: call.toolName,
+          ok,
+          out,
+          root: ctx.root,
+          sessionId: ctx.sessionId,
+          phase: phase?.id,
+        });
       } catch (e) {
         ok = false;
         out = `工具执行异常: ${(e as Error).message}`;

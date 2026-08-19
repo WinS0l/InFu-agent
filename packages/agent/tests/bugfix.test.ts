@@ -58,10 +58,58 @@ function check(name: string, cond: boolean, detail = "") {
   check("win32 大小写变体拦截", isPathInside("E:\\work", "E:\\WORK2\\x.ts") === false);
   check("父目录相对路径 resolve 后拦截", isPathInside("E:\\work", "E:\\work\\..\\work2\\x.ts") === false);
 
+  // ── 3.2. 符号链接/目录联接逃逸（v6.0 S6：junction 越界回归 + fail-closed）──
+  console.log("\n▶ junction 逃逸拦截（真实目录联接）");
+  {
+    const { execFileSync } = await import("node:child_process");
+    const { mkdtempSync, mkdirSync, writeFileSync, existsSync } = await import("node:fs");
+    const { tmpdir } = await import("node:os");
+    const { join } = await import("node:path");
+    const base = mkdtempSync(join(tmpdir(), "infu-junc-"));
+    const proj = join(base, "proj");
+    const outside = join(base, "outside");
+    mkdirSync(proj, { recursive: true });
+    mkdirSync(join(outside, "subdir"), { recursive: true });
+    writeFileSync(join(outside, "secret.txt"), "secret");
+    writeFileSync(join(outside, "subdir", "inner.txt"), "inner");
+    const junc = join(proj, "j");
+    if (process.platform === "win32") {
+      execFileSync("cmd.exe", ["/c", "mklink", "/J", junc, outside], { stdio: "ignore" });
+    } else {
+      // POSIX：真实符号链接同样验证（逃逸路径等价）
+      const { symlinkSync } = await import("node:fs");
+      symlinkSync(outside, junc, "dir");
+    }
+    try {
+      check("junction 直达外部已有文件拦截", isPathInside(proj, join(junc, "secret.txt")) === false);
+      check("junction 子目录已有文件拦截", isPathInside(proj, join(junc, "subdir", "inner.txt")) === false);
+      check("junction 内写新文件拦截", isPathInside(proj, join(junc, "new.txt")) === false);
+      check("junction 内深层新目录拦截", isPathInside(proj, join(junc, "deep", "new", "deep.txt")) === false);
+      check("junction 自身拦截（目标在根外）", isPathInside(proj, junc) === false);
+      check("根内普通文件放行", isPathInside(proj, join(proj, "real.txt")) === true);
+      check("根内不存在的普通文件放行（新建合法）", isPathInside(proj, join(proj, "sub", "future.txt")) === true);
+      // fail-closed（v6.0）：整条祖先链不可解析（盘符不存在）→ 无法 realpath 验证 → 拒绝而非词法放行
+      {
+        const { existsSync } = await import("node:fs");
+        const letters = "ABCDEFGHIJKLMNOPQRSTUVWXYZ".split("");
+        const free = letters.find((l) => !existsSync(`${l}:\\`));
+        if (free) {
+          const ghostRoot = `${free}:\\nope\\proj`;
+          check("祖先链不可解析 fail-closed 拦截", isPathInside(ghostRoot, `${ghostRoot}\\x.txt`) === false);
+          check("祖先链不可解析同根外也拦截", isPathInside(ghostRoot, `${free}:\\nope\\other\\x`) === false);
+        } else {
+          console.log("  ⏭ 无空闲盘符，跳过 fail-closed 用例");
+        }
+      }
+    } finally {
+      const { rmSync } = await import("node:fs");
+      rmSync(base, { recursive: true, force: true });
+    }
+  }
+
   // ── 3.5. SSRF 防护（webfetch 内网拦截）──
   console.log("\n▶ SSRF 防护");
-  const oldEnv = process.env.INFU_ALLOW_PRIVATE_URL;
-  delete process.env.INFU_ALLOW_PRIVATE_URL; // 确保默认拦截路径
+  // v6.0 S6：env 后门已移除；测试默认即拦截路径（setPrivateUrlAllowedForTests 未开启时）
   check("回环地址拦截", (await isPrivateTarget("http://127.0.0.1:8080/x")).ok === false);
   check("本地主机名拦截", (await isPrivateTarget("http://localhost:3000/")).ok === false);
   check("私网 192.168 拦截", (await isPrivateTarget("http://192.168.1.1/")).ok === false);
@@ -77,8 +125,6 @@ function check(name: string, cond: boolean, detail = "") {
   check("IPv6 公网 hex mapped 放行（::ffff:8.8.8.8）", (await isPrivateTarget("http://[::ffff:8.8.8.8]/")).ok === true);
   check("公网 IP 放行", (await isPrivateTarget("http://8.8.8.8/")).ok === true);
   check("非 http 协议拒绝", (await isPrivateTarget("ftp://example.com/x")).ok === false);
-  if (oldEnv !== undefined) process.env.INFU_ALLOW_PRIVATE_URL = oldEnv;
-  else delete process.env.INFU_ALLOW_PRIVATE_URL;
 
   // ── 4. stopped 终态保护 ──
   console.log("\n▶ updateStatus stopped 保护");

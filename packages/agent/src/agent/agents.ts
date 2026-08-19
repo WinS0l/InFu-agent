@@ -63,6 +63,8 @@ export const READONLY_TOOLS = [
   "wait_task",
   // v3.1：目录树 / 环境 / 时间（只读探索）
   "project_tree", "os_info", "current_time",
+  // v6.0：符号索引 / LSP 跳转·引用·补全 / OCR（纯只读语义工具）
+  "code_symbols", "lsp_definition", "lsp_references", "lsp_completion", "ocr_image",
 ];
 
 /** 内置 agent（调用时机——explore=只读探索/调研（占调用大头），general-purpose=复杂多步任务） */

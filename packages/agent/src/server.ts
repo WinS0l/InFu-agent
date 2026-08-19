@@ -1560,6 +1560,8 @@ const pendingQuestions = new Map<string, { sessionId: string; resolve: (answer: 
             extraReadDirs,
             // v2.9：会话 id（per-session 子 Agent 上限计数）
             sessionId,
+            // v6.0（S4）：任务级 Token 预算（读 config general.taskTokenBudget；0=不限制）
+            taskTokenBudget: config?.general?.taskTokenBudget ?? 0,
             // 阶段级续跑：跳过已完成的规划阶段（计划沿用上次确认的）
             startPhase: resumePoint.startPhase,
             resumePlanText: resumePoint.planText,

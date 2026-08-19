@@ -16,6 +16,41 @@ export const COMPRESS_TRIGGER_RATIO = 0.8;
 /** 压缩目标阈值（窗口占比；留生成空间） */
 export const COMPRESS_TARGET_RATIO = 0.6;
 
+// ── v6.0（P1 D1/S2）上下文 usage 校准（主流双轨制）──
+// API 真实 usage（prompt_tokens）是事实基准，本地估算（estimateTokens）用于触发预测——
+// 两者比值漂移时（reasoning 长/工具结果大/tokenizer 差异），压缩触发时机失真：
+// 估算偏低 → 压缩过晚（依赖 400 强制压缩兜底）；估算偏高 → 压缩过早（浪费上下文）。
+// 每成功一轮模型调用记录 ratio = actual / estimate，按会话 EWMA 平滑（α=0.3），
+// 触发判定时把估算乘到与真实用量一致的量纲。零依赖、无 tokenizer。
+const EWMA_ALPHA = 0.3;
+/** 单次比值钳制（防单轮异常样本把因子带飞） */
+const CALIB_CLAMP: [number, number] = [0.25, 4];
+const CALIB = new Map<string, { factor: number; n: number }>();
+
+/** 记录一轮真实用量 vs 本地估算的比值（loop 成功轮调用） */
+export function recordUsageCalibration(sessionId: string, actualTokens: number, estimatedTokens: number): void {
+  if (!Number.isFinite(actualTokens) || actualTokens <= 0) return;
+  const est = Math.max(1, estimatedTokens);
+  const ratio = Math.min(CALIB_CLAMP[1], Math.max(CALIB_CLAMP[0], actualTokens / est));
+  const prev = CALIB.get(sessionId);
+  if (!prev) {
+    CALIB.set(sessionId, { factor: ratio, n: 1 });
+    return;
+  }
+  const factor = EWMA_ALPHA * ratio + (1 - EWMA_ALPHA) * prev.factor;
+  CALIB.set(sessionId, { factor, n: prev.n + 1 });
+}
+
+/** 当前校准因子（无记录 = 1） */
+export function contextCalibrationFactor(sessionId: string): number {
+  return CALIB.get(sessionId)?.factor ?? 1;
+}
+
+/** 测试专用：清空校准状态 */
+export function resetContextCalibration(): void {
+  CALIB.clear();
+}
+
 /** 单条消息内容提取（string 或 content 数组） */
 function contentText(msg: ChatMessageLike): string {
   if (typeof msg.content === "string") return msg.content;
@@ -157,16 +192,20 @@ export async function compressMessages(
   messages: ChatMessageLike[],
   budget: number,
   summarize: (history: ChatMessageLike[]) => Promise<string>,
-  force = false
+  force = false,
+  // v6.0（D1/S2）：usage 校准因子（本地估算 × 因子 ≈ API 真实用量；缺省 1 保持旧语义）
+  calibrationFactor = 1
 ): Promise<CompressResult> {
   // v2.10：先剪超长工具结果（零模型成本；剪完可能不再超预算）
   const pruned = pruneToolResults(messages);
-  const before = estimateTokens(pruned);
+  const beforeRaw = estimateTokens(pruned);
+  // 校准后的估算（乘性缩放不改变 keep 边界的相对决策，只校准与窗口的绝对比较）
+  const before = beforeRaw * calibrationFactor;
   // 预算换算：触发 = 窗口×80%，目标 = 窗口×60%
   const trigger = budget * COMPRESS_TRIGGER_RATIO;
   const target = budget * COMPRESS_TARGET_RATIO;
   if (!force && before <= trigger) {
-    return { messages: pruned, before, after: before, summary: "" };
+    return { messages: pruned, before: beforeRaw, after: beforeRaw, summary: "" };
   }
 
   // system 消息（角色提示词/INFU.md/技能/工具纪律）永不参与压缩——提取出来，
@@ -175,9 +214,9 @@ export async function compressMessages(
   // 模型失去全部工具纪律与角色指令；compress.test.ts 弱断言恰好掩盖）
   const systemMsgs = pruned.filter((m) => m.role === "system");
   const others = pruned.filter((m) => m.role !== "system");
-  const othersBefore = estimateTokens(others);
+  const othersBefore = estimateTokens(others) * calibrationFactor;
   if (!force && othersBefore <= trigger) {
-    return { messages: pruned, before, after: before, summary: "" };
+    return { messages: pruned, before: beforeRaw, after: beforeRaw, summary: "" };
   }
 
   // 找压缩边界：从后往前保留最近消息直到 ≤ target
@@ -186,15 +225,17 @@ export async function compressMessages(
   let keepFrom = others.length;
   let acc = 0;
   for (let i = others.length - 1; i >= 1; i--) {
-    acc += estimateTokens([others[i]]);
+    acc += estimateTokens([others[i]]) * calibrationFactor;
     if (acc > target - RESERVED_FOR_SUMMARY) break;
     keepFrom = i;
   }
   // 至少要压缩掉一条（keepFrom 前进至少 1）
   if (keepFrom <= 1) keepFrom = 2; // 保底：压缩最老的一条（system 已剔除，此处必为非 system）
   if (keepFrom >= others.length) {
-    // 全部在预算内（理论上不会走到）：不压缩
-    return { messages: pruned, before, after: before, summary: "" };
+    // v6.0（D1/S2）修复：已过触发线但边界回退仍装不下（预算过小，或校准因子放大后
+    // 单条消息估算 > target-RESERVED）——原实现直接返回未压缩，压缩在「估算低估 +
+    // 小窗口」时系统性失效（恰是 400 恢复最需要的场景）。触发后保证至少压缩最老一条。
+    keepFrom = others.length - 1;
   }
   // v3.2：工具对平衡——边界前移保证 assistant(tool_calls)/tool 结果对完整（防 API 400）
   keepFrom = balanceToolPairs(others, keepFrom);
@@ -213,13 +254,14 @@ export async function compressMessages(
   const summaryMsg: ChatMessageLike[] = summary
     ? [{ role: "user", content: `【此前会话摘要（历史已压缩，原内容可从会话记录恢复）】\n${summary}` }]
     : [];
+  // 摘要对比是相对决策（摘要 vs 被替换内容），因子乘性缩放后对比不变，无需校准
   if (SUMMARY_MUST_BE_SMALLER && summaryMsg.length && estimateTokens(summaryMsg) >= estimateTokens(toCompress)) {
     summary = ""; // 摘要不比原文小：丢弃，用 kept 裸保留
   }
   const compressed: ChatMessageLike[] = summary
     ? [...systemMsgs, summaryMsg[0], ...kept]
     : [...systemMsgs, ...kept];
-  return { messages: compressed, before, after: estimateTokens(compressed), summary };
+  return { messages: compressed, before: beforeRaw, after: estimateTokens(compressed), summary };
 }
 
 /** 序列化历史给摘要生成器（context.ts 内部用） */

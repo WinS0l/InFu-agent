@@ -28,9 +28,9 @@ saveConfig({ models: [], approvalPolicy: { mode: "smart" } });
 
 // ── 本地 HTTP 服务器（webfetch 目标）──
 // v2.13：SSRF 防护默认拦截本地地址——测试场景显式豁免（仅本套件；生产默认不设）
-// v3.6：记录原值并在末尾恢复（原实现设置后不恢复——本进程内后续 SSRF 拦截全部失效）
-const ORIG_ALLOW_PRIVATE = process.env.INFU_ALLOW_PRIVATE_URL;
-process.env.INFU_ALLOW_PRIVATE_URL = "1";
+// v6.0 S6：全局 env 后门（INFU_ALLOW_PRIVATE_URL）已移除——改用模块级测试开关
+import { setPrivateUrlAllowedForTests } from "../src/tools/web.js";
+setPrivateUrlAllowedForTests(true);
 let server: Server;
 let base = "";
 await new Promise<void>((resolve) => {
@@ -113,9 +113,7 @@ const ws = await run("web_search", { query: "infu" });
 check("web_search 返回合理结果", typeof ws === "string" && ws.length > 0, ws);
 
 server.close();
-// v3.6：恢复 INFU_ALLOW_PRIVATE_URL 原值（原实现遗留——同进程后续 SSRF 拦截全失效）
-if (ORIG_ALLOW_PRIVATE === undefined) delete process.env.INFU_ALLOW_PRIVATE_URL;
-else process.env.INFU_ALLOW_PRIVATE_URL = ORIG_ALLOW_PRIVATE;
+setPrivateUrlAllowedForTests(false);
 // 清理临时数据目录（v3.6：只删测试自己的临时目录，绝不动用户 ~/.infu）
 try { rmSync(tmpData, { recursive: true, force: true }); } catch { /* 忽略 */ }
 console.log(`\n=== 结果：${passed} 通过 / ${failed} 失败 ===`);

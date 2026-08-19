@@ -467,10 +467,8 @@ export async function closeBrowser(): Promise<void> {
   page = null;
 }
 
-/** 清空页缓存（browser_tab_select 切换 tab 后强制重匹配） */
-export function clearPageCache(): void {
-  // 批 8：tab 注册表实时读主进程标记，无缓存可清（保留导出兼容）
-}
+/** 清空页缓存（browser_tab_select 切换 tab 后强制重匹配）——v6.0 S6：tab 注册表实时读
+ * 主进程标记，无缓存可清；本函数与 hasPage 均无任何调用点（死代码），已删除 */
 
 /** 自由尺寸（viewport）：Agent 设置 → CDP Emulation + 通知 UI 面板贴合 */
 export async function desktopSetViewport(opts: { width?: number; height?: number; fit?: boolean }): Promise<void> {
@@ -483,17 +481,6 @@ export async function desktopSetViewport(opts: { width?: number; height?: number
     const notify = g.__infuNotifyViewport as ((o: { width?: number; height?: number; fit?: boolean }) => void) | undefined;
     try { notify?.(opts); } catch { /* 忽略 */ }
   }
-}
-
-/** 页面上是否已有打开的页面（跨工具调用状态仍在） */
-export function hasPage(): boolean {
-  if (isDesktopMode()) return mainTabs().length > 0;
-  return page !== null && !page.isClosed();
-}
-
-/** 注册桌面模式全局标记（主进程 import 本模块时激活 viewport 桥） */
-if (isDesktopMode()) {
-  (globalThis as Record<string, unknown>).__infuSetViewport = desktopSetViewport;
 }
 
 /**

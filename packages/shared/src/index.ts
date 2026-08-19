@@ -249,6 +249,9 @@ export interface GeneralConfig {
   showTodos?: boolean;
   /** 任务完成自动提交（v3.5）：git 仓库中任务成功且有改动时自动 git add -A + commit（消息=任务摘要，绝不 push；缺省 false） */
   autoCommit?: boolean;
+  /** 写后自动验证（v6.0 S1）：写工具（write/edit/file_ops）成功改动后自动运行测试
+   *  （自动检测框架，按会话去抖 60s；结果附在工具结果回填模型）；缺省 true */
+  autoVerify?: boolean;
   /** 自动归档旧任务（v3.5）：定时扫描已完成、未置顶、最后更新早于保留期的会话自动归档（缺省 true） */
   autoArchive?: boolean;
   /** 归档保留时长（天，v3.5）：任务最后更新早于该时长才进入自动归档候选（缺省 7） */
@@ -260,6 +263,10 @@ export interface GeneralConfig {
   compressArchivedEvents?: boolean;
   /** 归档压缩等待天数（v5.0）：归档会话最后更新早于该天数才压缩（缺省 30） */
   compressArchivedAfterDays?: number;
+  /** 任务级 Token 预算（v6.0 S4）：单次任务（本轮对话）累计消耗的
+   *  API token 上限（prompt+completion 真实用量），达到即优雅停止并输出进度总结；
+   *  0/缺省 = 不限制。CLI 可用 --budget <tokens> 按任务覆盖。 */
+  taskTokenBudget?: number;
 }
 
 /** 外观设置（v2.4：Web 界面偏好，随配置持久化） */
@@ -732,6 +739,8 @@ export const generalConfigSchema = z
     showThinking: z.boolean().optional(),
     showTodos: z.boolean().optional(),
     autoCommit: z.boolean().optional(),
+    // v6.0（S1）：写后自动验证（默认开；写工具后自动跑测试，按会话去抖）
+    autoVerify: z.boolean().optional(),
     autoArchive: z.boolean().optional(),
     archiveRetentionDays: z.number().int().min(1).max(365).optional(),
     // v5.0（B4）：快速回复模型（可选）——寒暄/极短非任务消息自动用快模型，省钱提速
@@ -739,6 +748,8 @@ export const generalConfigSchema = z
     // v5.0（A4）：归档事件压缩（显式选项，默认关——保持 DB 无损语义）
     compressArchivedEvents: z.boolean().optional(),
     compressArchivedAfterDays: z.number().int().min(7).max(365).optional(),
+    // v6.0（S4）：任务级 Token 预算（0/缺省 = 不限制）
+    taskTokenBudget: z.number().int().min(0).optional(),
   })
   .passthrough();
 
@@ -760,6 +771,9 @@ export const browserConfigSchema = z
 export const memoryConfigSchema = z
   .object({
     autoSediment: z.boolean().optional(),
+    // v6.0 S6 修复：autoRefine 此前缺失——PUT /api/config 的 strip() 会把该字段剥掉，
+    // 界面保存「自动提炼」实际不生效；接口与 MemoryConfig 均有该字段，仅 schema 漏
+    autoRefine: z.boolean().optional(),
   })
   .passthrough();
 

@@ -1224,10 +1224,14 @@ export function MemoryPane() {
   const [error, setError] = useState("");
   const [open, setOpen] = useState<string | null>(null);
   const [autoSediment, setAutoSediment] = useState(true);
+  const [autoRefine, setAutoRefine] = useState(true);
   useEffect(() => {
     // v3.3 补 25：按当前项目读取记忆（自由会话 root 空 → 后端回退默认目录）
     fetchMemory(useStore.getState().root).then(setMem).catch((e) => setError((e as Error).message));
-    fetchConfig().then((c) => setAutoSediment(c.memory?.autoSediment !== false)).catch(() => {});
+    fetchConfig().then((c) => {
+      setAutoSediment(c.memory?.autoSediment !== false);
+      setAutoRefine(c.memory?.autoRefine !== false);
+    }).catch(() => {});
   }, []);
 
   const toggleSediment = async () => {
@@ -1235,6 +1239,13 @@ export function MemoryPane() {
     setAutoSediment(v);
     try { await updateConfig({ memory: { autoSediment: v } }); }
     catch (e) { setError((e as Error).message); setAutoSediment(!v); }
+  };
+
+  const toggleRefine = async () => {
+    const v = !autoRefine;
+    setAutoRefine(v);
+    try { await updateConfig({ memory: { autoRefine: v } }); }
+    catch (e) { setError((e as Error).message); setAutoRefine(!v); }
   };
 
   const renderGroup = (label: string, dir: string, topics: MemoryInfo["global"]) => (
@@ -1278,6 +1289,14 @@ export function MemoryPane() {
           <div className="mt-0.5 text-[11px] text-sub">任务完成后自动归档 .infu/history/（报告 + 改动概览）；关闭后不再自动记录</div>
         </div>
         <Toggle checked={autoSediment} onChange={() => void toggleSediment()} title={autoSediment ? "已开启" : "已关闭"} />
+      </div>
+
+      <div className="mb-3 flex items-center justify-between rounded-lg border border-line bg-muted/30 px-3 py-2.5">
+        <div>
+          <div className="text-xs text-text">自动提炼记忆</div>
+          <div className="mt-0.5 text-[11px] text-sub">任务完成后用轻量模型把任务摘要分类提炼为 conventions/lessons/preferences 写入项目记忆（v3.5；失败静默不影响交付）</div>
+        </div>
+        <Toggle checked={autoRefine} onChange={() => void toggleRefine()} title={autoRefine ? "已开启" : "已关闭"} />
       </div>
 
       {mem?.instruction && (

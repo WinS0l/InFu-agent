@@ -5,7 +5,7 @@
  * 覆盖：estimateTokens 粗估 / resolveContextWindow（显式>模型名>provider>兜底）/
  *      compressMessages（触发边界、保留最新、摘要注入、摘要失败降级丢弃）
  */
-import { estimateTokens, compressMessages, serializeHistory, balanceToolPairs } from "../src/agent/context.js";
+import { estimateTokens, compressMessages, serializeHistory, balanceToolPairs, recordUsageCalibration, contextCalibrationFactor, resetContextCalibration } from "../src/agent/context.js";
 import { resolveContextWindow } from "../src/providers/registry.js";
 import type { ChatMessageLike } from "../src/providers/chat.js";
 
@@ -160,6 +160,40 @@ console.log("\n▶ serializeHistory");
 const huge: ChatMessageLike[] = [{ role: "user", content: "y".repeat(50000) }];
 const ser = serializeHistory(huge);
 check("超长历史序列化有总长上限", ser.length <= 30000 + 800, String(ser.length));
+
+// 8. v6.0（D1/S2）usage 校准：EWMA 因子 + 压缩触发修正
+console.log("\n▶ usage 校准（recordUsageCalibration / calibrationFactor）");
+resetContextCalibration();
+check("无记录因子 = 1", contextCalibrationFactor("s-c") === 1);
+recordUsageCalibration("s-c", 500, 1000); // 实际只有估算一半 → 因子 0.5
+check("首轮因子 = 比值", Math.abs(contextCalibrationFactor("s-c") - 0.5) < 1e-9);
+recordUsageCalibration("s-c", 1000, 1000); // ratio=1 → EWMA: 0.3*1 + 0.7*0.5 = 0.65
+check("EWMA 平滑更新", Math.abs(contextCalibrationFactor("s-c") - 0.65) < 1e-9);
+recordUsageCalibration("s-c", 0, 1000); // 无效样本忽略
+check("0/负实际用量忽略", Math.abs(contextCalibrationFactor("s-c") - 0.65) < 1e-9);
+recordUsageCalibration("s-other", 10_000, 100); // ratio=100 → 钳制 4
+check("比值钳制上限 4", contextCalibrationFactor("s-other") === 4);
+recordUsageCalibration("s-other2", 1, 100); // ratio=0.01 → 钳制 0.25
+check("比值钳制下限 0.25", contextCalibrationFactor("s-other2") === 0.25);
+check("会话隔离（不同会话因子独立）", contextCalibrationFactor("s-c") !== contextCalibrationFactor("s-other"));
+// 校准后触发语义：估算 495/窗口 990（80% 触发线 = 792）——裸估算不触发；
+// 因子 4（估算低估 4 倍）→ 1980 > 792 触发压缩（摘要调用 1 次）
+const calMsgs: ChatMessageLike[] = [
+  { role: "system", content: "s" },
+  ...Array.from({ length: 20 }, (_, i) => ({
+    role: (i % 2 === 0 ? "user" : "assistant") as "user" | "assistant",
+    content: `第 ${i} 轮内容 ${"x".repeat(60)}`,
+  })),
+];
+const calRaw = estimateTokens(calMsgs);
+resetContextCalibration();
+summarizeCalls.length = 0;
+const calNo = await compressMessages(calMsgs, 2 * calRaw, fakeSummarize, false, 1);
+check("因子 1（无校准）时估算≤50% 窗口不触发", calNo.messages.length === calMsgs.length && summarizeCalls.length === 0, `raw=${calRaw} calls=${summarizeCalls.length}`);
+summarizeCalls.length = 0;
+const calHi = await compressMessages(calMsgs, 2 * calRaw, fakeSummarize, false, 4);
+check("因子 4（估算低估）触发压缩", summarizeCalls.length === 1 && calHi.messages.length <= calMsgs.length, `calls=${summarizeCalls.length}`);
+check("校准后返回的 before/after 仍为原始估算（量纲不变）", calHi.before === calRaw, String(calHi.before));
 
 console.log(`\n=== 结果：${passed} 通过 / ${failed} 失败 ===`);
 process.exit(failed ? 1 : 0);

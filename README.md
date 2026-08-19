@@ -2,13 +2,13 @@
 
 软件工程智能体平台 — 让 AI 从"代码补全工具"升级为能理解项目、规划任务并执行工程工作的开发伙伴。
 
-> 状态：v5.0（Agent 核心 + Web UI + Windows 桌面端 + 嵌入式浏览器均可用；44 套测试套件全绿——含生产模式页面级 E2E）
+> 状态：v6.0（Agent 核心 + Web UI + Windows 桌面端 + 嵌入式浏览器均可用；50 套测试套件 1480 断言全绿——含生产模式页面级 E2E、符号索引/LSP 导航/OCR/skill 模板库）
 > 相关文档：[技术选型方案](docs/TECHNICAL-SELECTION.md)、[路线图](docs/ROADMAP.md)
 
 ## 核心能力
 
 - **AI 对话中心**：自然语言任务输入，流式输出（思考过程/工具调用/审批请求实时可见）
-- **53 个内置工具**：文件读写（read-before-edit 三层门禁）、shell 命令（沙箱分派）、Git、测试、搜索、语义检索、LSP 诊断、记忆、子智能体委派（并行/后台）、异步任务编排、计算机操作（桌面截图/点击/输入）等
+- **58 个内置工具**：文件读写（read-before-edit 三层门禁）、shell 命令（沙箱分派）、Git、测试、搜索、语义检索、符号索引（code_symbols）、LSP（诊断/跳转定义/引用/补全）、OCR 截图文字识别、记忆、子智能体委派（并行/后台）、异步任务编排、计算机操作（桌面截图/点击/输入）等
 - **任意大模型接入**：DeepSeek / OpenAI / Anthropic / Google / 智谱 GLM / 通义千问 / Ollama / 任意 OpenAI 兼容网关；备用模型降级链 + 上下文自动压缩
 - **分层编排（可选）**：Planner（只读规划 + 计划确认三态）→ Executor → Reviewer（只读审查）；默认单一 Agent 循环直接执行（主流做法），`--orchestrate` 显式开启
 - **Windows 桌面端（Electron）**：嵌入式真浏览器（Agent 可驱动网页操作）、computer-use 桌面控制、系统通知/托盘、开机自启（可选）
@@ -23,7 +23,7 @@ packages/
 ├── shared/      # 共享类型 + 网络地址判定工具（ModelConfig / AgentEvent / ToolDef…）
 ├── agent/       # Agent 服务层
 │   ├── src/providers/  # 模型配置注册表 + OpenAI 兼容流式客户端
-│   ├── src/tools/      # 52 个工具（文件/Git/命令/网络/记忆/子智能体/computer-use）
+│   ├── src/tools/      # 58 个工具（文件/Git/命令/网络/记忆/子智能体/computer-use/LSP/OCR/符号索引）
 │   ├── src/agent/      # Agent 循环（工具调用 + 审批 + 上下文压缩）+ 分层编排
 │   ├── src/sandbox/    # 沙箱（软/L1.5 受限令牌/Docker/断网策略）
 │   ├── src/server.ts   # Hono HTTP + SSE 服务（本地令牌鉴权）
@@ -112,6 +112,13 @@ npm run infu -- --template init-project --root . -y     # 一键初始化新项�
 # 分层编排（显式开启：Planner→计划确认→Executor→Reviewer；默认单一循环直接执行）
 npm run infu -- "任务" --root . --orchestrate           # 显式启用分层编排（计划确认后执行）
 npm run infu -- "任务" --root . --orchestrate --no-plan-approval   # 编排但不弹计划确认
+
+# 成本预算（v6.0 S4：累计真实 API usage 达预算优雅停止；0=不限制，缺省读 config general.taskTokenBudget）
+npm run infu -- "任务" --root . --budget 1000000        # 限制本次任务最多消耗 100 万 tokens
+
+# 技能模板库（v6.0 P4：内置 4 个高质量 SKILL.md 模板一键生成）
+npm run infu -- skill template list                     # 列出模板（code-review/test-runner/docs-writer/refactor）
+npm run infu -- skill template new review-gate --template code-review   # 生成技能到 ~/.infu/skills/<name>/
 
 # 会话（v2.1+ 持久化，v2.2 消息级重建续跑）
 npm run infu -- sessions                                # 会话历史列表

@@ -431,23 +431,25 @@ export default function SettingsModal({ onClose, initialTab = "general" }: Props
                     { key: "autoContinueQuestions" as const, label: "提问自动继续", desc: "Agent 提问 5 分钟未回答自动继续执行；关闭 = 一直等待你的回答（可随时中止任务）" },
                     { key: "showThinking" as const, label: "显示思考过程", desc: "对话流中显示模型思考折叠行（点击即时生效）" },
                     { key: "showTodos" as const, label: "显示待办列表", desc: "对话输入框上方显示任务清单面板（点击即时生效）" },
+                    { key: "autoCommit" as const, label: "任务完成自动提交", desc: "git 仓库中任务成功且有改动时自动 git add -A + commit（消息=任务摘要，绝不 push；需已配置 git 身份；默认关）" },
+                    { key: "autoVerify" as const, defaultOn: true, label: "写后自动验证", desc: "写文件/编辑文件成功后自动运行测试（自动检测框架，按会话去抖 60s），结果反馈给 Agent 及时修复（默认开）" },
                     { key: "autoArchive" as const, label: "自动归档旧会话", desc: "超过保留期的会话自动移入归档（不删除；侧栏「归档」可恢复）" },
                     { key: "compressArchivedEvents" as const, label: "归档事件压缩", desc: "归档超 30 天的会话事件压缩为「摘要 + 最近 200 条」，控制会话库长期膨胀（默认关——开启后继续被压缩会话时早期历史为摘要）" },
-                  ].map(({ key, label, desc }) => (
+                  ].map(({ key, label, desc, defaultOn }) => (
                     <div key={key} className="flex items-center justify-between gap-3 rounded-xl border border-line bg-elevated px-3 py-2.5">
                       <div className="min-w-0">
                         <div className="text-[13px] font-medium text-text">{label}</div>
                         <div className="mt-0.5 text-xs leading-4 text-sub">{desc}</div>
                       </div>
                       <Toggle
-                        checked={general[key] === true}
+                        checked={(general[key] ?? defaultOn) === true}
                         onChange={(v) => {
                           patch({ general: { ...general, [key]: v } });
                           if (key === "showThinking" || key === "showTodos") {
                             useStore.getState().setUiFlags({ showThinking: key === "showThinking" ? v : undefined, showTodos: key === "showTodos" ? v : undefined });
                           }
                         }}
-                        title={general[key] === true ? "已开启" : "未开启（默认）"}
+                        title={(general[key] ?? defaultOn) === true ? "已开启" : "已关闭（默认）"}
                       />
                     </div>
                   ))}

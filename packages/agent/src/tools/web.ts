@@ -49,9 +49,19 @@ const BROWSER_UA =
  * v3.6：内部判定改用 @infu/shared isPrivateHostText（IPv4 简写归一化 + IPv6 完整解包，
  *       修复 ::ffff:7f00:1 / ::7f00:1 / 0:0:0:0:0:0:0:1 等变体绕过）；域名仍逐 IP 复查。
  */
+/** 测试专用豁免（本地 HTTP mock 场景）——v6.0 S6 修复：原为 process.env
+ *  INFU_ALLOW_PRIVATE_URL 全局后门（任何进程/脚本设一个环境变量即可整体关闭
+ *  SSRF 防护），改为模块级测试专用开关：仅当前进程内存态、不随 env 传播、
+ *  生产代码路径零可达（无任何生产代码读取/设置它）。 */
+let privateUrlAllowedForTests = false;
+/** 测试专用：允许访问内网地址（web-tools/bugfix 套件本地 mock 用；生产零调用） */
+export function setPrivateUrlAllowedForTests(v: boolean): void {
+  privateUrlAllowedForTests = v;
+}
+
 export async function isPrivateTarget(url: string): Promise<{ ok: boolean; reason: string }> {
   // 测试专用豁免（本地 HTTP mock 场景；默认不设）
-  if (process.env.INFU_ALLOW_PRIVATE_URL === "1") return { ok: true, reason: "" };
+  if (privateUrlAllowedForTests) return { ok: true, reason: "" };
   let u: URL;
   try {
     u = new URL(url);

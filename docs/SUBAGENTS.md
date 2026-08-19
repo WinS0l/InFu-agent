@@ -34,7 +34,7 @@ subagent-done 事件（完整摘要）+ 结果文本回填父级
 | 名称 | 工具 | 说明 |
 |---|---|---|
 | `general-purpose` | **全部内置工具**（缺省） | 通用子智能体：写能力委派需一次授权审批；批准后内部自主执行 |
-| `explore` | 只读 15 件（read_file / search_code / list_directory / project_scan / git_status / git_diff / use_skill + project_tree / os_info / current_time + list_agents / report / job_list / job_output / wait_task） | 只读探索：**委派免审批**（对齐 ZCode Explore 随便调） |
+| `explore` | 只读 20 件（read_file / search_code / list_directory / project_scan / git_status / git_diff / use_skill + project_tree / os_info / current_time + list_agents / report / job_list / job_output / wait_task + code_symbols / lsp_definition / lsp_references / lsp_completion / ocr_image） | 只读探索：**委派免审批**（对齐 ZCode Explore 随便调） |
 
 ## 四、agent 文件化定义（文件系统即注册）
 

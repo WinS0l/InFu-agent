@@ -3,13 +3,17 @@
  *  - read_image：读图片文件 → 注入视觉上下文（ctx.visionQueue → loop 下一轮合并为 image part）
  *  - screen_capture / screen_click / screen_type：computer-use 桌面操作（仅桌面模式，
  *    主进程 PowerShell 截图 + SendInput 零依赖）
+ *  - ocr_image（v6.0 B5）：Windows 自带 OCR（Windows.Media.Ocr，PowerShell WinRT）——无视觉
+ *    模型时的截图文字兜底：图片 → 纯文本，零依赖、支持中文
  * 非视觉模型：图片注入后由既有降级机制（loop 图片特征错误 → 转文本重试）兜底。
  */
 import { z } from "zod";
 import { join, resolve } from "node:path";
-import { existsSync, readFileSync, mkdirSync, writeFileSync, statSync } from "node:fs";
+import { existsSync, readFileSync, mkdirSync, writeFileSync, statSync, readdirSync } from "node:fs";
+import { spawn } from "node:child_process";
 import type { ToolDef, ToolContext } from "@infu/shared";
 import { isPathInside } from "./util.js";
+import { resolveDataDir } from "../data-dir.js";
 
 /** 图片类型白名单 → data URL 前缀 */
 const MIME: Record<string, string> = {
@@ -37,7 +41,130 @@ function pushVision(ctx: ToolContext, dataUrl: string, label: string) {
   return `已注入视觉上下文（${label}）——模型下一轮将看到该图片；若模型不支持视觉会自动降级`;
 }
 
+// ══════════════════ v6.0（B5）OCR 截图文字兜底 ══════════════════
+// Windows 自带 OCR（Windows.Media.Ocr，WinRT）——PowerShell 5.1 可直接投影 WinRT 类型，
+// 零外部依赖；支持中文（zh-CN 语言包随系统）。触发场景：无视觉模型时把截图/图片的
+// 文字提取为纯文本供模型阅读。
+
+const OCR_PS1 = `param([string]$ImagePath, [string]$Lang = "")
+$ErrorActionPreference = "Stop"
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+Add-Type -AssemblyName System.Runtime.WindowsRuntime
+$null = [Windows.Media.Ocr.OcrEngine, Windows.Foundation, ContentType = WindowsRuntime]
+$null = [Windows.Graphics.Imaging.BitmapDecoder, Windows.Foundation, ContentType = WindowsRuntime]
+$null = [Windows.Storage.StorageFile, Windows.Foundation, ContentType = WindowsRuntime]
+$asTaskGeneric = ([System.WindowsRuntimeSystemExtensions].GetMethods() | Where-Object { $_.Name -eq 'AsTask' -and $_.GetParameters().Count -eq 1 -and $_.GetParameters()[0].ParameterType.Name -eq 'IAsyncOperation\x601' })[0]
+function Await($WinRtTask, $ResultType) {
+  $asTask = $asTaskGeneric.MakeGenericMethod($ResultType)
+  $netTask = $asTask.Invoke($null, @($WinRtTask))
+  $netTask.Wait(-1) | Out-Null
+  $netTask.Result
+}
+try {
+  $file = Await ([Windows.Storage.StorageFile]::GetFileFromPathAsync($ImagePath)) ([Windows.Storage.StorageFile])
+  $stream = Await ($file.OpenAsync([Windows.Storage.FileAccessMode]::Read)) ([Windows.Storage.Streams.IRandomAccessStream])
+  $decoder = Await ([Windows.Graphics.Imaging.BitmapDecoder]::CreateAsync($stream)) ([Windows.Graphics.Imaging.BitmapDecoder])
+  $bitmap = Await ($decoder.GetSoftwareBitmapAsync()) ([Windows.Graphics.Imaging.SoftwareBitmap])
+  $engine = $null
+  if ($Lang) {
+    $engine = [Windows.Media.Ocr.OcrEngine]::TryCreateFromLanguage((New-Object Windows.Globalization.Language $Lang))
+  }
+  if (-not $engine) {
+    $langs = [Windows.Media.Ocr.OcrEngine]::AvailableRecognizerLanguages
+    $pref = $langs | Where-Object { $_.LanguageTag -like 'zh*' } | Select-Object -First 1
+    if ($pref) { $engine = [Windows.Media.Ocr.OcrEngine]::TryCreateFromLanguage($pref) }
+  }
+  if (-not $engine) { $engine = [Windows.Media.Ocr.OcrEngine]::TryCreateFromUserProfileLanguages() }
+  if (-not $engine) { Write-Output "OCR_ERR:无可用 OCR 识别引擎（系统未安装 OCR 语言包）"; exit 1 }
+  $result = Await ($engine.RecognizeAsync($bitmap)) ([Windows.Media.Ocr.OcrResult])
+  foreach ($line in $result.Lines) { Write-Output $line.Text }
+} catch {
+  Write-Output ("OCR_ERR:" + $_.Exception.Message)
+  exit 1
+}`;
+
+/** OCR 单张图片（Windows.Media.Ocr；非 Windows / 无引擎 → 明确报错） */
+export async function ocrImageFile(
+  abs: string,
+  lang?: string,
+  timeoutMs = 30000
+): Promise<{ ok: boolean; message: string; text?: string }> {
+  if (process.platform !== "win32") return { ok: false, message: "OCR 仅 Windows 可用（依赖系统自带 Windows.Media.Ocr 引擎）" };
+  if (!existsSync(abs)) return { ok: false, message: `错误：文件不存在 ${abs}` };
+  const ext = abs.slice(abs.lastIndexOf(".")).toLowerCase();
+  if (![".png", ".jpg", ".jpeg", ".bmp"].includes(ext)) {
+    return { ok: false, message: `错误：OCR 仅支持 png/jpg/jpeg/bmp（${ext}）` };
+  }
+  const psFile = join(resolveDataDir(), "ocr.ps1");
+  try { writeFileSync(psFile, OCR_PS1, "utf-8"); } catch { /* 落盘失败用已有文件 */ }
+  return new Promise((res) => {
+    let proc;
+    try {
+      proc = spawn("powershell.exe", ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", psFile, "-ImagePath", abs, ...(lang ? ["-Lang", lang] : [])], {
+        windowsHide: true,
+      });
+    } catch {
+      return res({ ok: false, message: "PowerShell 启动失败（OCR 不可用）" });
+    }
+    let out = "";
+    let err = "";
+    proc.stdout.on("data", (d: Buffer) => { out += d.toString("utf-8"); });
+    proc.stderr.on("data", (d: Buffer) => { err += d.toString("utf-8"); });
+    const timer = setTimeout(() => {
+      try { proc.kill(); } catch { /* 忽略 */ }
+      res({ ok: false, message: "OCR 超时" });
+    }, timeoutMs);
+    proc.on("close", () => {
+      clearTimeout(timer);
+      const t = out.trim();
+      if (!t) return res({ ok: false, message: `OCR 无输出（引擎不可用？）${err ? `：${err.slice(0, 200)}` : ""}` });
+      if (t.startsWith("OCR_ERR:")) return res({ ok: false, message: t.slice("OCR_ERR:".length) });
+      return res({ ok: true, message: `OCR 识别完成${lang ? `（${lang}）` : "（自动）"}`, text: t });
+    });
+  });
+}
+
+/** 项目内最新截图路径（无则返回 null） */
+function latestShot(ctx: ToolContext): string | null {
+  const dir = join(ctx.root, ".infu", "screenshots");
+  if (!existsSync(dir)) return null;
+  try {
+    const files = readdirSync(dir).filter((f) => /\.(png|jpe?g|bmp)$/i.test(f));
+    if (!files.length) return null;
+    const latest = files.map((f) => ({ f, m: statSync(join(dir, f)).mtimeMs })).sort((a, b) => b.m - a.m)[0];
+    return join(dir, latest.f);
+  } catch {
+    return null;
+  }
+}
+
 export const visionTools: Record<string, ToolDef> = {
+  "ocr_image": {
+    name: "ocr_image",
+    description:
+      "对图片做 OCR 文字识别（Windows 自带引擎 Windows.Media.Ocr，零依赖，支持中文）——无视觉模型时的截图文字兜底：把图片里的文字提取为纯文本，模型可直接阅读。何时用：模型不支持视觉、或需要精确读取界面文字/报错信息时（配合 screen_capture 截图后识别）。何时不用：模型支持视觉时 read_image 信息更完整（含布局/颜色）。path 省略时自动识别项目 .infu/screenshots/ 里最新一张截图。",
+    risk: "low",
+    schema: z.object({
+      path: z.string().optional().describe("相对项目根的图片路径（png/jpg/jpeg/bmp；省略 = 最新截图）"),
+      lang: z.string().optional().describe("识别语言（如 zh-CN/en-US；省略 = 自动优先中文）"),
+    }),
+    async execute(args, ctx) {
+      let abs: string;
+      if (args.path) {
+        const rel = args.path as string;
+        abs = resolve(ctx.root, rel);
+        if (!isPathInside(ctx.root, abs)) return "错误：路径越界（不允许访问项目根之外）";
+      } else {
+        const shot = latestShot(ctx);
+        if (!shot) return "错误：.infu/screenshots/ 下没有截图（先 screen_capture，或用 path 指定图片）";
+        abs = shot;
+      }
+      const r = await ocrImageFile(abs, args.lang as string | undefined);
+      if (!r.ok) return r.message;
+      const text = r.text ?? "";
+      return `OCR 文字识别结果（${text.length} 字符，图片 ${abs.split(/[\\/]/).pop()}）：\n${text.slice(0, 4000)}${text.length > 4000 ? "\n…（已截断，完整文本过长）" : ""}`;
+    },
+  },
   "read_image": {
     name: "read_image",
     description:

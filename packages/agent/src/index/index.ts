@@ -27,8 +27,8 @@ function indexPath(root: string): string {
   return path.join(dir, hash + ".json");
 }
 
-/** 递归收集项目文件（跳过噪音目录；上限 20000） */
-function collectFiles(root: string): IndexEntry[] {
+/** 递归收集项目文件（跳过噪音目录；上限 20000）——v6.0（S5）导出供符号索引复用 */
+export function collectFiles(root: string): IndexEntry[] {
   const results: IndexEntry[] = [];
   const stack = [root];
   while (stack.length && results.length < 20000) {
@@ -37,6 +37,8 @@ function collectFiles(root: string): IndexEntry[] {
     try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { continue; }
     for (const ent of entries) {
       const full = path.join(dir, ent.name);
+      // v6.0 S6 加固：显式跳过符号链接/目录联接（junction）——防止外部目录被索引进项目清单
+      if (ent.isSymbolicLink()) continue;
       if (ent.isDirectory()) {
         if (!SKIP_DIRS.has(ent.name)) stack.push(full);
       } else if (ent.isFile()) {

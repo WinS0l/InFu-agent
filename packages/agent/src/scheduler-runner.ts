@@ -50,6 +50,8 @@ export async function runScheduledTask(entry: ScheduleEntry): Promise<{ ok: bool
       requestApproval: makeApprovalHandler(emit, unattendedDecide),
       orchestrate: false, // 定时任务直接执行（主流式）
       planApproval: false,
+      // v6.0（S4）：定时任务同样受预算约束（config general.taskTokenBudget；0=不限制）
+      taskTokenBudget: config.general?.taskTokenBudget ?? 0,
     });
     store.updateStatus(sessionId, "done");
     console.log(`[infu-agent] ⏰ 定时任务 ${entry.id} 完成（${result.text.slice(0, 60)}…）`);

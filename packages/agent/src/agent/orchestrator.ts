@@ -144,6 +144,8 @@ export interface OrchestratedRunOptions {
     question: string,
     options?: Array<string | { label: string; desc?: string; recommended?: boolean }>
   ) => Promise<string | null>;
+  /** v6.0（S4）：任务级 Token 预算（跨 Planner/Executor/Reviewer 各阶段累计扣减；0/缺省=不限制） */
+  taskTokenBudget?: number;
 }
 
 /** 编排运行结果（含各阶段产出） */
@@ -164,7 +166,7 @@ export async function runOrchestratedTask(opts: OrchestratedRunOptions): Promise
     maxSteps, abortSignal, planApproval = true, orchestrate = false,
     confirmPlan, templateId, thinkingLevel, roleThinking, executorTools, startPhase, resumePlanText,
     hooks, skillsPrompt, agentsPrompt, infuPrompt, memoryPrompt, scopeRules, askUser,
-    attachmentText, attachmentImages, extraReadDirs, sessionId,
+    attachmentText, attachmentImages, extraReadDirs, sessionId, taskTokenBudget = 0,
   } = opts;
 
   /** v3.1 附件引用块（各阶段纯文本注入；planner/reviewer 无需图片 parts） */
@@ -178,15 +180,17 @@ export async function runOrchestratedTask(opts: OrchestratedRunOptions): Promise
   let userInstruction = "";
 
   // v3：LLM usage 聚合（各阶段 runAgent 汇总 → done 携带缓存命中统计；v2.12 四桶）
-  const usageAgg = { cacheHit: 0, cacheMiss: 0, promptTokens: 0, completionTokens: 0 };
+const usageAgg = { cacheHit: 0, cacheMiss: 0, promptTokens: 0, completionTokens: 0 };
   const accUsage = (r?: { usage?: { cacheHit: number; cacheMiss: number; promptTokens: number; completionTokens: number } }) => {
-    if (r?.usage) {
-      usageAgg.cacheHit += r.usage.cacheHit;
-      usageAgg.cacheMiss += r.usage.cacheMiss;
-      usageAgg.promptTokens += r.usage.promptTokens;
-      usageAgg.completionTokens += r.usage.completionTokens;
-    }
+    if (!r?.usage) return;
+    usageAgg.cacheHit += r.usage.cacheHit;
+    usageAgg.cacheMiss += r.usage.cacheMiss;
+    usageAgg.promptTokens += r.usage.promptTokens;
+    usageAgg.completionTokens += r.usage.completionTokens;
   };
+  // v6.0（S4）：跨阶段预算扣减——每阶段下发「剩余预算」，阶段内用尽即停
+  const remainBudget = () =>
+    taskTokenBudget > 0 ? Math.max(0, taskTokenBudget - (usageAgg.promptTokens + usageAgg.completionTokens)) : 0;
 
   const aborted = () => abortSignal?.aborted === true;
 
@@ -245,6 +249,8 @@ export async function runOrchestratedTask(opts: OrchestratedRunOptions): Promise
       phase: { id: "executor", label: "执行", model: rc.modelConfig.model },
       // 终态由本层按「是否真实干活」决定：纯文本回复（寒暄/问答）不发交付报告不沉淀
       suppressFinal: true,
+      // v6.0（S4）：直接模式预算全量下发
+      taskTokenBudget,
     });
     if (aborted()) {
       return { text: ABORTED_MSG, steps: 0, toolCount: 0, approvals: exec.approvals, toolLogs: exec.toolLogs, planText: "", reviewText: "" };
@@ -301,6 +307,7 @@ export async function runOrchestratedTask(opts: OrchestratedRunOptions): Promise
       askUser,
       phase: { id: "planner", label: "规划", model: rc.modelConfig.model },
       suppressFinal: true,
+      taskTokenBudget: remainBudget(),
     });
     accUsage(plan);
     if (aborted()) {
@@ -382,6 +389,7 @@ export async function runOrchestratedTask(opts: OrchestratedRunOptions): Promise
             askUser,
             phase: { id: "planner", label: "规划（修订）", model: rc.modelConfig.model },
             suppressFinal: true,
+            taskTokenBudget: remainBudget(),
           });
           if (aborted()) {
             return { text: ABORTED_MSG, steps: 0, toolCount: 0, approvals: plan.approvals, toolLogs: plan.toolLogs, planText, reviewText: "" };
@@ -438,10 +446,13 @@ export async function runOrchestratedTask(opts: OrchestratedRunOptions): Promise
     askUser,
     phase: { id: "executor", label: "执行", model: rcExec.modelConfig.model },
     suppressFinal: true,
+    taskTokenBudget: remainBudget(),
   });
   if (aborted()) {
     return { text: ABORTED_MSG, steps: exec.steps, toolCount: exec.toolCount, approvals: exec.approvals, toolLogs: exec.toolLogs, planText, reviewText: "" };
   }
+  // v6.0（S4）：先并入执行用量，Reviewer 阶段预算按剩余下发
+  accUsage(exec);
 
   // ④ Reviewer：只读审查（执行未中止；v2.2 按角色路由模型）
   if (exec.text && exec.text !== ABORTED_MSG) {
@@ -465,6 +476,7 @@ export async function runOrchestratedTask(opts: OrchestratedRunOptions): Promise
       askUser,
       phase: { id: "reviewer", label: "审查", model: rc.modelConfig.model },
       suppressFinal: true,
+      taskTokenBudget: remainBudget(),
     });
     accUsage(review);
     reviewText = review.text.trim();
@@ -472,7 +484,6 @@ export async function runOrchestratedTask(opts: OrchestratedRunOptions): Promise
   }
 
   // ⑤ 收尾（v3.1 交付报告已移除）：任务完成事件 + 自动沉淀（L4 项目历史）
-  accUsage(exec);
   emit({ type: "done", text: exec.text, toolCount: exec.toolCount, steps: exec.steps, usage: usageAgg });
 
   // v3.5：自动 git 提交（可选）+ 记忆自动提炼（默认开，失败静默）

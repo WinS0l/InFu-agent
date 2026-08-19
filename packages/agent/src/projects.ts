@@ -16,6 +16,7 @@ import { randomUUID } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import { cleanupOldBackups } from "./cleanup.js";
 import { deleteIndex } from "./index/index.js";
+import { deleteSymbolIndex } from "./index/symbols.js";
 import { resolveDataDir } from "./data-dir.js";
 
 export interface Project {
@@ -132,7 +133,9 @@ export function removeProject(id: string): { ok: boolean; message: string } {
   saveProjects(next);
   // v3.5 数据生命周期：~/.infu/index/<root-hash>.json 按 root 哈希命名——项目移除后
   // 索引永久孤儿；这里同步删除（仅索引文件，不动项目文件夹）；失败不影响移除
+  // v6.0（S5）：符号索引同规则清理
   try { deleteIndex(removed.root); } catch { /* ignore */ }
+  try { deleteSymbolIndex(removed.root); } catch { /* ignore */ }
   return { ok: true, message: `已移除项目「${removed.name}」（会话保留为自由会话，文件夹未删除）` };
 }
 

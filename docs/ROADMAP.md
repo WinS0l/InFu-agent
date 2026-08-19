@@ -25,11 +25,21 @@
 - **A4 归档事件压缩（显式选项默认关）**——`general.compressArchivedEvents`（+compressArchivedAfterDays 默认 30 天）：启动扫描超期归档会话，事件压缩为「摘要 + 最近 200 条」（rebuild 兼容）；默认关保持 DB 无损语义
 - **D3 增量构建**——agent/web/shared tsconfig 加 incremental + tsBuildInfoFile（node_modules/.cache，不入库）
 - **验证**：**44/44 套件全绿 1341 断言 0 失败**（e2e-prod 12 断言新入链；startServer 返回 httpServer 供 E2E close）+ agent/web/desktop tsc + vite build + cargo check 全过；真实 E2E 与 /api/audit 探针实测
-- **后续待办（2026-08-18 用户定稿：仅此 4 项，其余全部收官）**：
-  ① **D1 上下文计数校准**——方向 = 主流双轨制：API 每次响应返回的真实 usage（prompt_tokens）作事实基准每轮校准 + 本地估算仅作发送前预测；InFu 已收 usage 四桶但未用于压缩触发（零依赖可补）；tokenizer 非必需（词表对不上模型仍是近似）。触发：长会话 API 成本/压缩质量成为真实痛点。量级：半小时~半天
-  ② **B5 OCR 截图文字兜底**——无视觉模型时 screen_capture 整链路无效；Windows 自带 OCR 可把截图文字补进上下文。触发：无视觉模型用户的真实需求出现。量级：中
-  ③ **skill 模板库**——导入/导出已做，模板库/社区示例可选。量级：半小时
-  ④ **LSP 跳转/补全**——lsp_diagnostics 已有，完整 LSP（跳转/补全）留后续。量级：中
+- ✅ **v6.0 收官批（2026-08-19，用户 14 项列表全量落地）**：
+  - **P0-1 autoRefine schema 断裂修复**——refine.ts 产出与 memory 自动沉淀 schema 不一致（append 成非法条目，refine 套件 12/0 侥幸未覆盖）→ 输出严格对齐 memory entry schema（{topic, content, createdAt}）+ 失败静默不变
+  - **P0-2 autoCommit/autoVerify/autoRefine 设置 UI**——shared 三配置入 generalConfigSchema（zod 显式字段）+ 设置弹窗常规 Tab 三开关（自动提交/写后验证/自动沉淀，默认保持既有默认值）
+  - **P0-3 junction 越界加固**——fs walker/readFile/writeFile/delete 全部走 isPathInside（junction 解析后比对 + FAIL_CLOSED 哨兵，空串哨兵撞车修复）+ isProtectedPath 同式收口；fs-tools 回归 48/0
+  - **P0-4 SSRF 全局 env 后门移除**——webfetch/web_search 不再读 INFU_ALLOW_PRIVATE_URLS 环境变量（审计发现绕过门禁的后门），改模块级 setPrivateUrlAllowedForTests（仅测试）;web-tools 41/0
+  - **S1 写后自动验证**——`general.autoVerify`（默认关，纯增量）：edit_file/write_file 改动既有 .test.ts 套件后自动以 debug 模式仅跑被改套件（超时 180s 兜底，不阻塞主流程），结果附在工具结果回填给模型（自纠错闭环）；loop 内置调用（非插件钩子）；auto-verify.test.ts 17/0
+  - **D1/S2 上下文计数校准（补 6 前批遗留 ① 完成）**——`context.ts` recordUsageCalibration（每次成功轮 API 真实 usage 校准本地估算）/contextCalibrationFactor（EWMA α=0.3，比值钳制 [0.25,4]，按会话键）/compressMessages 第 5 参 calibrationFactor；loop.ts 成功轮并入校准 + ensureContextBudget 早退与压缩乘因子。**顺带根治真实缺陷**：校准因子放大后单条估算 > target−512 时 compressMessages 原实现永不压缩（触发即失败）→ keepFrom 回退保底至少压缩一条；compress 套件 50/0（含校准 8 断言）
+  - **S3 Agent Team 拆解纪律**——DEFAULT_SYSTEM_PROMPT 加「Agent Team（v6.0 S3）」14-16 条（复杂任务拆解并行委派、团队间无共享写冲突、小任务不拆）+ delegate_task 描述同步团队并行语义（tasks 数组最多 6 个并行）
+  - **S4 成本预算守卫**——`general.taskTokenBudget`（tokens，0=不限制）+ CLI `--budget`（覆盖 config）：累计**真实 API usage**（prompt+completion）达预算优雅停止（不再发新模型调用，本轮已请求工具照常执行，error 事件 + 明确文案）；编排模式跨阶段扣减（remainBudget 随 usageAgg 累计）；server/scheduler 从 config 下发；budget.test.ts 15/0
+  - **S5 符号级代码索引**——新 `index/symbols.ts`：TypeScript 编译器 API 语法级声明提取（类/函数/接口/类型/枚举/模块/变量 + 导出/行号/签名/成员数，无类型检查零新依赖）；持久化 data-dir index/<hash>-symbols.json；新工具 **code_symbols（第 54 个，low 只读进白名单）**——「哪里定义了 X」语义级定位（与 search_code 正则互补）；collectFiles 导出复用 + removeProject 清理孤儿索引；symbols.test.ts 26/0
+  - **LSP 跳转/补全（补 6 前批遗留 ④ 完成）**——lsp.ts 扩展三新工具 **lsp_definition / lsp_references / lsp_completion（第 55-57 个，low 只读进白名单）**：tsserver definition/references/completionInfo（**踩坑实锤**：① 请求必须按序等待响应（并行发出在项目未加载时返回空——sequential await 修复）；② references 响应体是 `{refs:[...]}` 非裸数组；③ 可选参数 `?` 在参数节点不在名字上）；项目外定义/引用只提示不展示；lsp-nav.test.ts 16/0
+  - **skill 模板库（补 6 前批遗留 ③ 完成）**——新 `plugin/skill-templates.ts` 4 个内置高质量模板（code-review 只读审查/test-runner TDD 修复闭环/docs-writer/refactor 小步重构）；CLI `infu skill template list/new <name> --template <id>`（目录名校验防穿越、已存在不覆盖、占位符替换）；skill-templates.test.ts 16/0
+  - **B5 OCR 截图文字兜底（补 6 前批遗留 ② 完成）**——新工具 **ocr_image（第 58 个，low 只读进白名单）**：Windows 自带 Windows.Media.Ocr（PowerShell 5.1 WinRT 投影，零依赖，中文优先语言链 zh-CN→zh*→用户配置）；path 省略自动识别 .infu/screenshots/ 最新截图（无视觉模型整链路补全）；**踩坑实锤**：AsTask 泛型筛选 `'IAsyncOperation`1'` 的模板字符（TS `\x60` 转义）与空格错位各一次；PS 输出必须 [Console]::OutputEncoding=UTF8；ocr.test.ts 13/0（真实识别 HELLO123/VERSION42，O/0、I/l 容错断言）
+  - **P0-6 文档过期修复**——README/ROADMAP 工具数 53→58、套件 44→50、CLI 新命令（--budget/skill template）、AGENTS.md v6.0 状态
+  - **验证**：50 套件全绿（新增 auto-verify 17/budget 15/symbols 26/lsp-nav 16/skill-templates 16/ocr 13 六套件）+ agent tsc 全过 + CLI 实测（skill template new 全链路）
 - **条件触发项（单独挂起，条件未到不动）**：团队版 v3（第二个真实用户）、microVM 沙箱（多租户/不可信代码）、C5 中英文统一（未定产品方向，不优先）
 - **记录不改**：runRestricted 无 abort 通道（timeout 兜底）、browser_eval low 免审批（设计权衡）、terminal AttachConsole 环境噪声；**永久不做**：远程插件市场、开机自启（设置项默认关）
 - ⚠️ **补 6（2026-08-18 用户询问后实施）**：**B3 桌面 UI 树读取完成**（此前误判高成本——实际 = 系统自带 UIAutomationClient，与 screen_* 同款「主进程 PowerShell 零依赖」模式）。新工具 **screen_tree（第 53 个，low 只读）**：读取前台窗口（或指定 pid 窗口）的控件树——类型/名称/位置矩形/可用状态，交互控件带 [n] 编号 + 物理像素坐标（与截图/点击同坐标系），对齐 Codex get_app_state；Agent 操作桌面应用前先读树（名称直接可读），不再只靠截图猜坐标。实现要点：`[Console]::OutputEncoding=UTF8`（PS5.1 默认 GBK 输出会乱码，本机冒烟实证）；-Command 单行模式语句间必须 `;` 分隔（`')'if(` 拼接是解析错误，冒烟实证）；10s 超时 + 深度/元素数上限 + 8K 截断。**验证**：本机真实冒烟（前台 ZCode 窗口读到 最小化/恢复/关闭 按钮+坐标，中文正常）；vision.test 新增 5 断言（返回/参数透传/不注入视觉队列/超长截断/非桌面拒绝）30/0；全量 44 套件全绿

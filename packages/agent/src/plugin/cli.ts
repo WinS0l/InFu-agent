@@ -13,6 +13,7 @@ import { resolveDataDir } from "../data-dir.js";
 import { loadPlugins } from "./index.js";
 import { listSkills, readSkillMeta } from "./skills.js";
 import { listMarketplacePlugins, findMarketplacePlugin } from "./marketplace.js";
+import { listSkillTemplates, createSkillFromTemplate } from "./skill-templates.js";
 
 // ── 终端着色（与 cli.ts 一致）──
 const C = {
@@ -215,6 +216,7 @@ export async function skillCli(args: string[]): Promise<void> {
   if (cmd === "remove") return skillRemove(args[1]);
   if (cmd === "export") return skillExport(args.slice(1));
   if (cmd === "import") return skillImport(args[1]);
+  if (cmd === "template") return skillTemplate(args.slice(1));
   console.log(`InFu 技能管理（v2.3 批 2：SKILL.md 社区标准，progressive disclosure）
 
 用法：
@@ -223,9 +225,49 @@ export async function skillCli(args: string[]): Promise<void> {
   infu skill remove <name>                      移除显式引用（不删除文件）
   infu skill export <name> [--to <目录>]        导出技能目录（复制 SKILL.md + references/scripts/assets）
   infu skill import <技能目录路径>               导入技能到 ~/.infu/skills/<name>/（校验 SKILL.md 合法）
+  infu skill template list                      列出内置技能模板（v6.0 P4）
+  infu skill template new <name> --template <id> 从模板生成技能到 ~/.infu/skills/<name>/
 
 SKILL.md 标准：技能目录下必须有 SKILL.md（frontmatter：name=目录名 + description），
 可选 references/ scripts/ assets/ 子目录。任务匹配描述时 Agent 会调用 use_skill 读取全文。`);
+}
+
+/** v6.0（P4）：skill 模板库——list / new <name> --template <id> */
+async function skillTemplate(args: string[]): Promise<void> {
+  const sub = args[0];
+  if (sub === "list") {
+    const templates = listSkillTemplates();
+    console.log(C.cyan(`\n═══ 内置技能模板（${templates.length}）═══`));
+    templates.forEach((t, i) => {
+      console.log(` ${String(i + 1).padStart(2)}. ${C.green(t.id)} — ${t.title}`);
+      console.log(C.dim(`     ${t.description}`));
+    });
+    console.log(C.dim(`\n生成技能：infu skill template new <name> --template <id>`));
+    return;
+  }
+  if (sub === "new") {
+    const name = args[1];
+    const templateId = argValue(args, "--template") ?? (await ask("模板 id（infu skill template list 查看）"));
+    if (!name || !templateId) {
+      console.error(C.red("用法：infu skill template new <name> --template <id>"));
+      return;
+    }
+    const r = createSkillFromTemplate(name, templateId);
+    if (!r.ok) {
+      console.error(C.red(r.message));
+      return;
+    }
+    console.log(C.green(`✅ ${r.message}`));
+    console.log(C.dim("   下一任务自动发现（描述注入 system，use_skill 读取全文）；infu skill list 可查看"));
+    return;
+  }
+  console.log(`InFu 技能模板库（v6.0 P4）
+
+用法：
+  infu skill template list                       列出内置模板
+  infu skill template new <name> --template <id> 从模板生成技能到 ~/.infu/skills/<name>/
+
+模板：code-review（代码审查）/ test-runner（测试运行与修复）/ docs-writer（文档编写）/ refactor（重构）`);
 }
 
 async function skillAdd(args: string[]): Promise<void> {

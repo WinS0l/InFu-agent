@@ -48,20 +48,30 @@ export function isPathInside(root: string, abs: string): boolean {
   const lexTarget = path.resolve(abs);
   if (!insideLex(lexBase, lexTarget)) return false;
 
-  const realResolve = (p: string): string => {
+  /** v6.0 S6：realpath 无法验证（祖先链全部不可解析）的哨兵——见 isPathInside fail-closed */
+const UNRESOLVED_PATH = "\u0000infu-unresolved\u0000";
+
+const realResolve = (p: string): string => {
     let cur = p;
     for (let depth = 0; depth < 64; depth++) {
       try {
         return fs.realpathSync.native(cur);
       } catch {
         const parent = path.dirname(cur);
-        if (parent === cur) return p; // 回溯到根仍失败（路径不可访问）→ 原样返回
+        // v6.0 S6 修复（fail-closed）：回溯到卷根仍无法解析（路径链完全不存在，
+        // 如根盘符不存在）时，原实现返回词法路径 → 词法在内即放行，符号链接
+        // 逃逸在「根不可解析」场景下失去 realpath 第二道校验。改为返回哨兵，
+        // 调用方命中哨兵一律拒绝——无法验证的真实位置宁可误杀不越界。
+        if (parent === cur) return UNRESOLVED_PATH;
         cur = parent;
       }
     }
-    return p;
+    return UNRESOLVED_PATH; // 64 层回溯耗尽仍不可解析 → fail-closed
   };
-  return insideLex(realResolve(lexBase), realResolve(lexTarget));
+  const realBase = realResolve(lexBase);
+  const realTarget = realResolve(lexTarget);
+  if (realBase === UNRESOLVED_PATH || realTarget === UNRESOLVED_PATH) return false;
+  return insideLex(realBase, realTarget);
 }
 
 /** 工具结果截断 */
@@ -271,6 +281,10 @@ export function walkFiles(root: string, maxFiles = 2000): string[] {
     }
     for (const ent of entries) {
       const full = path.join(dir, ent.name);
+      // v6.0 S6 加固：显式跳过符号链接/目录联接（junction）——指向项目外的链接若被
+      // 当作目录/文件遍历，搜索结果会把外部内容带入上下文（readdir 的 dirent 在
+      // 各 Node 版本对 junction 的报告不一致，显式判断为跨版本确定性防线）
+      if (ent.isSymbolicLink()) continue;
       if (ent.isDirectory()) {
         if (!SKIP.has(ent.name)) stack.push(full);
       } else if (ent.isFile()) {

@@ -81,16 +81,13 @@ async function isGitRepo(root: string): Promise<boolean> {
   }
 }
 
-/** 读取配置（损坏/缺失返回空配置；写入统一走 registry.saveConfig） */
+/** 读取供写端点修改的配置。损坏文件必须拒绝覆盖，避免一次普通 UI 保存抹掉凭据。 */
 function readConfigRaw(): InfuConfig {
   const CONFIG_PATH = configPath();
   if (!existsSync(CONFIG_PATH)) return { models: [] };
-  try {
-    const r = parseInfuConfig(JSON.parse(readFileSync(CONFIG_PATH, "utf-8")));
-    return r.ok ? r.config : { models: [] };
-  } catch {
-    return { models: [] };
-  }
+  const config = loadConfig();
+  if (config) return config;
+  throw new Error("配置文件损坏，已备份原文件；请修复或恢复 config.json 后再保存设置");
 }
 
 // ── 后台运行日志（服务窗口实时打印 + 落盘 <dataDir>/logs/agent.log）──
@@ -939,7 +936,9 @@ const pendingQuestions = new Map<string, { sessionId: string; resolve: (answer: 
     const prompt = String(body.prompt ?? "");
     const root = String(body.root ?? opts.defaultRoot ?? process.cwd());
     if (!cron.trim() || !prompt.trim()) return c.json({ ok: false, message: "cron 与任务描述必填" });
-    const r = addSchedule(cron.trim(), prompt.trim(), root);
+    const safeRoot = authorizedRoot(root);
+    if (!safeRoot) return c.json({ ok: false, message: "root 未授权或位于受保护区域" }, 403);
+    const r = addSchedule(cron.trim(), prompt.trim(), safeRoot);
     return c.json(r);
   });
   app.patch("/api/schedules/:id", async (c) => {
@@ -1015,6 +1014,7 @@ const pendingQuestions = new Map<string, { sessionId: string; resolve: (answer: 
     if (!owner.root || !existsSync(owner.root) || !statSync(owner.root).isDirectory()) {
       return c.json({ ok: false, message: "所属会话没有有效的项目根目录" }, 400);
     }
+    if (!authorizedRoot(owner.root)) return c.json({ ok: false, message: "所属会话根目录未授权或位于受保护区域" }, 403);
     // v3.0 批 12：显式 shell > config.general.terminalShell > auto
     // auto = 优先 Git Bash（探测存在即用），找不到回退 cmd.exe（同语义）
     let shell = typeof body.shell === "string" && body.shell ? body.shell : undefined;
@@ -1201,7 +1201,7 @@ const pendingQuestions = new Map<string, { sessionId: string; resolve: (answer: 
       // 隐式回退（defaultRoot/cwd）仅用于本次执行，不写回会话。前端 root 保持为空 →
       // 自由会话的「代码/审查」按钮禁用，不再显示无关目录的所有文件
       let persistRoot: string | undefined = body.root;
-      const execRoot: string = body.execRoot || root;
+      let execRoot: string = body.execRoot || root;
       // v2.6.2 修复：root 必须为已存在目录——不存在/为空直接报错，避免 Agent 在错误目录静默空转
       if (!execRoot.trim()) {
         await stream.writeSSE({ event: "error", data: JSON.stringify({ message: "请先在侧栏选择/创建项目（root 为空）" }) });
@@ -1211,6 +1211,26 @@ const pendingQuestions = new Map<string, { sessionId: string; resolve: (answer: 
         await stream.writeSSE({ event: "error", data: JSON.stringify({ message: `项目根目录不存在：${execRoot}——请先在侧栏选择/创建项目` }) });
         return;
       }
+      // Explicitly selected folders are registered before use; every subsequent API/root path
+      // is then subject to the same authorizedRoot boundary as file, review and screenshot APIs.
+      if (body.root && !authorizedRoot(root)) {
+        if (isProtectedPath(path.resolve(root))) {
+          await stream.writeSSE({ event: "error", data: JSON.stringify({ message: "项目根目录位于受保护区域，拒绝使用" }) });
+          return;
+        }
+        const registered = createProject(root);
+        if (!registered.ok && !findProjectByRoot(root)) {
+          await stream.writeSSE({ event: "error", data: JSON.stringify({ message: `项目根目录未授权：${registered.message}` }) });
+          return;
+        }
+      }
+      const safeRoot = authorizedRoot(root);
+      if (!safeRoot || isProtectedPath(path.resolve(execRoot)) || !isPathInside(safeRoot, execRoot)) {
+        await stream.writeSSE({ event: "error", data: JSON.stringify({ message: "项目根目录或执行目录未授权" }) });
+        return;
+      }
+      root = safeRoot;
+      execRoot = path.resolve(execRoot);
       let effectivePrompt = prompt;
       // v2.2 断点恢复：继续会话 = 从事件流重建完整 messages（工具结果直接来自 DB，不重放副作用）
       let initialMessages: ChatMessageLike[] | undefined;
@@ -1676,6 +1696,8 @@ const pendingQuestions = new Map<string, { sessionId: string; resolve: (answer: 
     const name = c.req.param("name");
     const body = await c.req.json().catch(() => ({}));
     const root: string = body.root || opts.defaultRoot || process.cwd();
+    if (!/^infu-task-[a-z0-9]+$/i.test(name)) return c.json({ ok: false, message: "非法工作树名称" }, 400);
+    if (!authorizedRoot(root)) return c.json({ ok: false, message: "root 未授权" }, 403);
     const wtPath = path.join(root, ".infu", "worktrees", name);
     try {
       // 1) 先把 worktree 里的改动提交（Agent 的改动是未提交状态，直接 merge 会丢失）
@@ -1701,6 +1723,8 @@ const pendingQuestions = new Map<string, { sessionId: string; resolve: (answer: 
     const name = c.req.param("name");
     const body = await c.req.json().catch(() => ({}));
     const root: string = body.root || opts.defaultRoot || process.cwd();
+    if (!/^infu-task-[a-z0-9]+$/i.test(name)) return c.json({ ok: false, message: "非法工作树名称" }, 400);
+    if (!authorizedRoot(root)) return c.json({ ok: false, message: "root 未授权" }, 403);
     const wtPath = path.join(root, ".infu", "worktrees", name);
     try {
       await git(root, ["worktree", "remove", "--force", wtPath]);

@@ -8,6 +8,7 @@ import fs from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ToolContext, AgentEvent } from "@infu/shared";
+import { setDataDirForTest } from "../src/data-dir.js";
 
 let passed = 0;
 let failed = 0;
@@ -17,6 +18,9 @@ function check(name: string, cond: boolean, detail = "") {
 }
 
 const proj = fs.mkdtempSync(join(tmpdir(), "infu-vision-"));
+const dataDir = fs.mkdtempSync(join(tmpdir(), "infu-vision-data-"));
+setDataDirForTest(dataDir);
+fs.writeFileSync(join(dataDir, "config.json"), JSON.stringify({ version: 1, models: [], approvalPolicy: { mode: "confirm" } }));
 fs.mkdirSync(join(proj, "src"), { recursive: true });
 // 1x1 红色像素 PNG
 const PNG_1PX = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==", "base64");
@@ -160,6 +164,7 @@ if (origElectron !== undefined) (process.versions as Record<string, string>).ele
 
 // 清理
 fs.rmSync(proj, { recursive: true, force: true });
+fs.rmSync(dataDir, { recursive: true, force: true });
 
 console.log(`\n=== 结果：${passed} 通过 / ${failed} 失败 ===`);
 process.exit(failed ? 1 : 0);

@@ -714,10 +714,12 @@ export async function runAgent(opts: AgentRunOptions): Promise<RunResult> {
           text = "";
           reasoningText = "";
           rawToolCalls = [];
-          stepUsage.cacheHit = 0;
-          stepUsage.cacheMiss = 0;
-          stepUsage.promptTokens = 0;
-          stepUsage.completionTokens = 0;
+          // The response is discarded, but the provider charged it. Keep budgets/statistics honest.
+          usage.cacheHit += stepUsage.cacheHit;
+          usage.cacheMiss += stepUsage.cacheMiss;
+          usage.promptTokens += stepUsage.promptTokens;
+          usage.completionTokens += stepUsage.completionTokens;
+          stepUsage.cacheHit = stepUsage.cacheMiss = stepUsage.promptTokens = stepUsage.completionTokens = 0;
           emit({ type: "text", text: "（当前模型不支持图片输入，已自动将图片转为文本提示继续任务）" });
           continue;
         }
@@ -738,10 +740,11 @@ export async function runAgent(opts: AgentRunOptions): Promise<RunResult> {
           text = "";
           reasoningText = "";
           rawToolCalls = [];
-          stepUsage.cacheHit = 0;
-          stepUsage.cacheMiss = 0;
-          stepUsage.promptTokens = 0;
-          stepUsage.completionTokens = 0;
+          usage.cacheHit += stepUsage.cacheHit;
+          usage.cacheMiss += stepUsage.cacheMiss;
+          usage.promptTokens += stepUsage.promptTokens;
+          usage.completionTokens += stepUsage.completionTokens;
+          stepUsage.cacheHit = stepUsage.cacheMiss = stepUsage.promptTokens = stepUsage.completionTokens = 0;
           emit({ type: "text", text: "（上下文超出模型窗口，已自动压缩历史后重试）" });
           continue;
         }
@@ -907,6 +910,7 @@ export async function runAgent(opts: AgentRunOptions): Promise<RunResult> {
           root: ctx.root,
           sessionId: ctx.sessionId,
           phase: phase?.id,
+          abortSignal,
         });
       } catch (e) {
         ok = false;
@@ -919,12 +923,14 @@ export async function runAgent(opts: AgentRunOptions): Promise<RunResult> {
     const execResults: Awaited<ReturnType<typeof runOne>>[] = [];
     // 只读组：有界滚动池并行（v2.10：单批 ≤10，防单轮 20+ 只读调用同时跑爆内存；主流 maxParallel 同款）；
     // 写组：串行（按原顺序）
-    const readOnlyExecs = execs.filter((e) => !isMutatingTool(e.call.toolName));
-    for (let i = 0; i < readOnlyExecs.length; i += 10) {
-      execResults.push(...(await Promise.all(readOnlyExecs.slice(i, i + 10).map(runOne))));
-    }
-    for (const e of execs.filter((e) => isMutatingTool(e.call.toolName))) {
-      execResults.push(await runOne(e));
+    // A mixed read/write batch has data dependencies the model expressed by ordering its calls.
+    // Preserve that order; retain bounded parallelism only for truly read-only batches.
+    if (execs.some((e) => isMutatingTool(e.call.toolName))) {
+      for (const e of execs) execResults.push(await runOne(e));
+    } else {
+      for (let i = 0; i < execs.length; i += 10) {
+        execResults.push(...(await Promise.all(execs.slice(i, i + 10).map(runOne))));
+      }
     }
     // 按原调用顺序重组（3.3 回填顺序必须与 assistant tool_calls 一致）
     const byCallId = new Map(execResults.map((r) => [r.call.toolCallId, r]));
@@ -956,7 +962,7 @@ export async function runAgent(opts: AgentRunOptions): Promise<RunResult> {
             tool_calls: validToolCalls.map((c) => ({
               id: c.id,
               type: "function" as const,
-              function: { name: c.name, arguments: c.arguments || "{}" },
+              function: { name: c.name, arguments: calls.find((x) => x.toolCallId === c.id)?.inputError ? "{}" : c.arguments || "{}" },
             })),
           }
         : {}),
@@ -970,6 +976,12 @@ export async function runAgent(opts: AgentRunOptions): Promise<RunResult> {
   // 达到最大步数：不硬断，让模型输出进度总结（用户可继续发"继续"接着干）
   // v3.1 审计修复：总结调用前先压缩上下文——最后一轮工具结果已回填，若已超窗口预算
   // 直接发全量会 API 400 以 error 收尾；先 ensureContextBudget 再调用（与每轮开头一致）
+  if (taskTokenBudget !== 0 && (taskTokenBudget < 0 || usage.promptTokens + usage.completionTokens >= taskTokenBudget)) {
+    const msg = "任务 Token 预算已用尽，跳过最大步数后的总结调用。已完成的工作已保存，可调整预算后发送「继续」。";
+    emit({ type: "error", message: msg });
+    if (!suppressFinal) emit({ type: "done", text: msg, toolCount, steps: maxSteps, usage });
+    return { text: msg, steps: maxSteps, toolCount, approvals, toolLogs, usage };
+  }
   await ensureContextBudget();
   const finalMsg = `已达到本轮最大执行步数（${maxSteps}）。请立即输出当前进度总结，不要调用任何工具：`;
   messages.push({ role: "user", content: finalMsg });
@@ -1041,13 +1053,21 @@ export function makeApprovalHandler(
     description: string,
     risk: ToolDef["risk"],
     requireExplicit?: boolean
-  ) => Promise<boolean>
+  ) => Promise<boolean>,
+  opts: { respectDeciderBeforeFull?: boolean } = {}
 ): (
   description: string,
   risk: ToolDef["risk"],
   requireExplicit?: boolean
 ) => Promise<boolean> {
   return async (description, risk, requireExplicit) => {
+    if (opts.respectDeciderBeforeFull) {
+      const id = randomUUID();
+      emit({ type: "approval-required", id, description, risk });
+      const approved = await decide(description, risk, requireExplicit);
+      emit({ type: "approval-result", id, approved });
+      return approved;
+    }
     if (currentApprovalPolicy().mode === "full") return true;
     const id = randomUUID();
     emit({ type: "approval-required", id, description, risk });

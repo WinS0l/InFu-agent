@@ -23,10 +23,10 @@ import type { ScheduleEntry } from "./schedule.js";
 /** 无人值守审批：等价 CLI -y（low/medium 批准；requireExplicit 拒绝） */
 async function unattendedDecide(
   _description: string,
-  _risk: "low" | "medium" | "high",
+  risk: "low" | "medium" | "high",
   requireExplicit?: boolean
 ): Promise<boolean> {
-  if (requireExplicit) return false; // 安全红线（联网/自注册等）无人值守绝不放行
+  if (requireExplicit || risk === "high") return false; // 安全红线与 high 风险无人值守绝不放行
   return true;
 }
 
@@ -47,7 +47,7 @@ export async function runScheduledTask(entry: ScheduleEntry): Promise<{ ok: bool
       root: entry.root,
       emit,
       sessionId,
-      requestApproval: makeApprovalHandler(emit, unattendedDecide),
+      requestApproval: makeApprovalHandler(emit, unattendedDecide, { respectDeciderBeforeFull: true }),
       orchestrate: false, // 定时任务直接执行（主流式）
       planApproval: false,
       // v6.0（S4）：定时任务同样受预算约束（config general.taskTokenBudget；0=不限制）

@@ -100,10 +100,41 @@ export function resolveModelBaseURL(cfg: InfuConfig | null | undefined, model: M
  */
 
 /** 读取用户配置（~/.infu/config.json；zod schema 校验 + v1 在线迁移 + 损坏备份） */
-import { readFileSync, existsSync, copyFileSync, mkdirSync, writeFileSync, chmodSync, renameSync } from "node:fs";
+import { readFileSync, existsSync, copyFileSync, mkdirSync, writeFileSync, chmodSync, renameSync, rmSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { parseInfuConfig } from "@infu/shared";
 import { resolveDataDir } from "../data-dir.js";
+
+const CONFIG_BASELINE = Symbol("infu.configBaseline");
+const LOCK_STALE_MS = 30_000;
+function sleepSync(ms: number): void {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+function withConfigLock<T>(fn: () => T): T {
+  mkdirSync(resolveDataDir(), { recursive: true });
+  const lock = `${configPath()}.lock`;
+  const deadline = Date.now() + 5_000;
+  for (;;) {
+    try {
+      mkdirSync(lock);
+      break;
+    } catch {
+      try {
+        if (Date.now() - statSync(lock).mtimeMs > LOCK_STALE_MS) rmSync(lock, { recursive: true, force: true });
+      } catch { /* another writer may have released it */ }
+      if (Date.now() >= deadline) throw new Error("配置正被另一个 InFu 进程更新，请稍后重试");
+      sleepSync(25);
+    }
+  }
+  try { return fn(); } finally { try { rmSync(lock, { recursive: true, force: true }); } catch { /* ignore */ } }
+}
+function encoded(value: unknown): string {
+  return JSON.stringify(value) ?? "undefined";
+}
+function attachBaseline(config: InfuConfig): InfuConfig {
+  Object.defineProperty(config, CONFIG_BASELINE, { value: JSON.parse(JSON.stringify(config)), enumerable: false });
+  return config;
+}
 
 export function configPath(): string {
   return join(resolveDataDir(), "config.json");
@@ -111,13 +142,33 @@ export function configPath(): string {
 
 /** 安全写入配置（v2.1 起带 schema 版本号；v2.4 统一收敛：server/cli/mcp-register/plugin-register 共用本实现） */
 export function saveConfig(cfg: InfuConfig): void {
+  withConfigLock(() => {
   const dir = resolveDataDir();
   mkdirSync(dir, { recursive: true });
   const p = join(dir, "config.json");
+  const baseline = (cfg as InfuConfig & { [CONFIG_BASELINE]?: InfuConfig })[CONFIG_BASELINE];
+  let next = cfg;
+  // A caller may have read a stale config while another process updates an unrelated section.
+  // Preserve latest on-disk sections the caller did not change; same-section conflicts remain last-writer-wins.
+  if (baseline && existsSync(p)) {
+    try {
+      const parsed = parseInfuConfig(JSON.parse(readFileSync(p, "utf-8")));
+      if (parsed.ok) {
+        const latest = parsed.config as unknown as Record<string, unknown>;
+        const candidate = cfg as unknown as Record<string, unknown>;
+        const before = baseline as unknown as Record<string, unknown>;
+        const merged: Record<string, unknown> = { ...latest };
+        for (const key of new Set([...Object.keys(latest), ...Object.keys(candidate), ...Object.keys(before)])) {
+          if (encoded(candidate[key]) !== encoded(before[key])) merged[key] = candidate[key];
+        }
+        next = merged as unknown as InfuConfig;
+      }
+    } catch { /* loadConfig already handles/report corrupt files; preserve caller's validated config */ }
+  }
   // v3.5：原子写（tmp + rename）——多进程并发（server/CLI/定时任务）直写会截断
   // 半写内容，读方 JSON.parse 失败 → 反复产生 .corrupt-* 备份
   const tmp = join(dir, `config.json.tmp-${process.pid}`);
-  writeFileSync(tmp, JSON.stringify({ ...cfg, version: cfg.version ?? 1 }, null, 2), "utf-8");
+  writeFileSync(tmp, JSON.stringify({ ...next, version: next.version ?? 1 }, null, 2), "utf-8");
   // v3.4 审计修复：配置文件含 API Key，落盘后收紧权限（win32 无 POSIX 权限位，
   // 靠用户目录 ACL 兜底；POSIX 下 0600 防同机其他用户读取密钥）
   try {
@@ -126,6 +177,7 @@ export function saveConfig(cfg: InfuConfig): void {
     /* 权限设置失败不影响写入（Windows 无此概念） */
   }
   renameSync(tmp, p);
+  });
 }
 
 export function loadConfig(): InfuConfig | null {
@@ -134,7 +186,7 @@ export function loadConfig(): InfuConfig | null {
   try {
     const raw = JSON.parse(readFileSync(CONFIG_PATH, "utf-8"));
     const r = parseInfuConfig(raw);
-    if (r.ok) return r.config;
+    if (r.ok) return attachBaseline(r.config);
     // 格式错误：备份原文件（防数据丢失），返回 null 走"未配置"引导
     const backup = `${CONFIG_PATH}.broken-${Date.now()}`;
     try { copyFileSync(CONFIG_PATH, backup); } catch { /* 备份失败忽略 */ }

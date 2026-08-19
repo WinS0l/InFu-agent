@@ -12,7 +12,7 @@
  *    已产出内容后的失败 → 直接抛（内容已 emit 无法撤回，与重试语义一致）
  */
 
-import { streamChat, type ChatDelta, type ChatMessageLike, type RetryPolicy } from "./chat.js";
+import { streamChat, ModelApiError, type ChatDelta, type ChatMessageLike, type RetryPolicy } from "./chat.js";
 import type { StreamChatOptions } from "./chat.js";
 import { resolveBaseURL } from "./registry.js";
 
@@ -113,6 +113,8 @@ export async function* streamChatWithFailover(opts: FailoverOptions): AsyncGener
     } catch (e) {
       if (signal?.aborted) throw e; // 用户中止：不透出降级逻辑
       if (started) throw e; // 已产出内容后失败：不降级（内容无法撤回）
+      // Credentials and other terminal client errors cannot be recovered by trying every fallback.
+      if (e instanceof ModelApiError && !e.retryable && e.status !== 400) throw e;
       // 未产出任何内容：尝试降级链
       const next = chain.fallbackToNext(`模型失败：${(e as Error).message.slice(0, 120)}`);
       if (!next) throw e; // 链耗尽：透出原始错误

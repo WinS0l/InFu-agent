@@ -717,6 +717,9 @@ export const useStore = create<StoreState>()(
       // v2.13：切换会话 → 视图派生字段跟随该会话（todos/usage/plan 按会话存储后回填）
       // v4.0：askQuestion 同款回填（按会话存储后，切回有挂起提问的会话即可见）
       if (id) {
+        // `running` is a view-local projection of runningIds. Without this refill,
+        // switching from a running uncached session leaves the next session's composer stuck.
+        out.running = s.runningIds.includes(id);
         out.todos = s.todosBySession[id] ?? [];
         out.usage = s.usageBySession[id] ?? { cacheHit: 0, cacheMiss: 0, promptTokens: 0, completionTokens: 0 };
         out.plan = s.plansBySession[id] ?? null;

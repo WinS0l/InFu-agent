@@ -7,6 +7,7 @@ import crypto from "node:crypto";
 import { resolveDataDir } from "../data-dir.js";
 import { SEARCH_SKIP_DIRS } from "../tools/util.js";
 import { isProtectedPath } from "../sandbox/index.js";
+import { isPathInside } from "../tools/util.js";
 
 export interface IndexEntry { file: string; size: number; mtime: number; }
 export interface ProjectIndex { root: string; builtAt: number; files: IndexEntry[]; }
@@ -70,7 +71,9 @@ export function loadIndex(root: string): ProjectIndex | null {
   try {
     const raw = fs.readFileSync(indexPath(root), "utf-8");
     const idx = JSON.parse(raw) as ProjectIndex;
-    if (!idx?.files || !Array.isArray(idx.files)) return null;
+    const resolvedRoot = path.resolve(root);
+    if (!idx?.files || !Array.isArray(idx.files) || path.resolve(idx.root) !== resolvedRoot) return null;
+    if (!idx.files.every((file) => typeof file?.file === "string" && isPathInside(resolvedRoot, path.resolve(resolvedRoot, file.file)))) return null;
     return idx;
   } catch { return null; }
 }

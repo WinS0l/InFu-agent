@@ -29,6 +29,45 @@ const execFileAsync = promisify(execFile);
 export const MAX_OUTPUT = 12000;
 export const MAX_FILE_READ = 512 * 1024; // 512KB
 
+interface ObservedFile {
+  isPartialView: boolean;
+  mtimeMs: number;
+  sizeBytes: number;
+}
+const observedFiles = new Map<string, Map<string, ObservedFile>>();
+function observedFileKey(abs: string): string {
+  const resolved = path.resolve(abs);
+  return process.platform === "win32" ? resolved.toLowerCase() : resolved;
+}
+export function markObservedFile(
+  sessionId: string,
+  abs: string,
+  _content: string,
+  _offset: number,
+  _limit: number | undefined,
+  isPartialView: boolean,
+  stat: { mtimeMs: number; size: number }
+): void {
+  let files = observedFiles.get(sessionId);
+  if (!files) observedFiles.set(sessionId, (files = new Map()));
+  files.set(observedFileKey(abs), { isPartialView, mtimeMs: stat.mtimeMs, sizeBytes: stat.size });
+}
+export function assertObservedFileFresh(sessionId: string, abs: string, stat: { mtimeMs: number; size: number }): string | null {
+  const entry = observedFiles.get(sessionId)?.get(observedFileKey(abs));
+  if (!entry) return "错误：文件尚未读取——write_file/edit_file 必须先 read_file 该文件（基于最新内容修改；新建文件可免读）";
+  if (entry.isPartialView) return "错误：上次读取的内容不完整（输出被截断）——请重新 read_file 全量读取后再编辑";
+  if (entry.mtimeMs !== stat.mtimeMs || entry.sizeBytes !== stat.size) {
+    return "错误：文件已被修改（用户手动编辑/其他进程/linter）——请重新 read_file 获取最新内容后再编辑";
+  }
+  return null;
+}
+export function clearObservedFiles(sessionId: string): void {
+  observedFiles.delete(sessionId);
+}
+export function resetObservedFiles(): void {
+  observedFiles.clear();
+}
+
 /**
  * v2.13：路径边界判断（修复 startsWith 前缀漏洞）——
  * `path.resolve(root, "../work2/evil.txt")` 得 `E:\work2\evil.txt`，`startsWith("E:\work")`

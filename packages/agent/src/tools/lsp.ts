@@ -220,8 +220,17 @@ async function lspRun(
       void (async () => {
         for (let i = 0; i < requests.length; i++) {
           const r = requests[i];
-          const timeout = new Promise<LspOutcome>((res) => setTimeout(() => res({ success: false }), Math.min(15000, timeoutMs)));
-          results[i] = await Promise.race([sendOne(r.command, r.args), timeout]);
+          const id = ++seq;
+          const request = new Promise<LspOutcome>((res) => {
+            pending.set(id, res);
+            try { p.stdin!.write(JSON.stringify({ seq: id, type: "request", command: r.command, arguments: r.args }) + "\n"); }
+            catch { pending.delete(id); res({ success: false }); }
+          });
+          const timeout = new Promise<LspOutcome>((res) => setTimeout(() => {
+            pending.delete(id);
+            res({ success: false });
+          }, Math.min(15000, timeoutMs)));
+          results[i] = await Promise.race([request, timeout]);
         }
         if (!settled) {
           settled = true;

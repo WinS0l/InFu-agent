@@ -27,7 +27,8 @@ import { currentApprovalPolicy, isCommandAllowed, hasShellCombinators } from "..
 import { isEgressAllowed } from "../egress-allow.js";
 import {
   clip, MAX_OUTPUT, MAX_FILE_READ, runShell, execLocal, sandboxTag, walkFiles, guard, isPathInside,
-  isReadOnlySessionRoot, sessionRootReadOnlyBlock,
+  isReadOnlySessionRoot, sessionRootReadOnlyBlock, markObservedFile, assertObservedFileFresh,
+  clearObservedFiles, resetObservedFiles,
 } from "./util.js";
 import { webTools } from "./web.js";
 import { gitTools } from "./git-tools.js";
@@ -52,57 +53,12 @@ import { backupForRecovery } from "./recovery.js";
  * 写成功后用新指纹刷新状态（自己写的算已知，可继续改，无需重读）。
  * 与 v3.2 布尔门禁的区别：v3.2 读一次永久放行（外部改了照样覆盖）；本版带指纹校验。
  */
-interface ReadStateEntry {
-  /** 读取时文件全文（full read 的 content 级 stale 比对用） */
-  content: string;
-  /** 读取起始行（0 基；有 offset/limit = 范围读，仍允许编辑但按指纹校验） */
-  offset: number;
-  /** 读取行数上限（未指定 = 全量读） */
-  limit?: number;
-  /** 输出被截断（模型看到不完整内容）→ 禁止编辑（对齐 ZCode truncatedByTokenCap） */
-  isPartialView: boolean;
-  mtimeMs: number;
-  sizeBytes: number;
-}
-const observedFiles = new Map<string, Map<string, ReadStateEntry>>();
-function normAbs(abs: string): string {
-  const r = path.resolve(abs);
-  return process.platform === "win32" ? r.toLowerCase() : r;
-}
 /** Git numstat style line count: an empty file contributes zero; a trailing newline is not an extra line. */
 function countContentLines(text: string): number {
   if (!text) return 0;
   return text.endsWith("\n") ? text.split("\n").length - 1 : text.split("\n").length;
 }
-function markReadState(sessionId: string, abs: string, entry: ReadStateEntry): void {
-  let map = observedFiles.get(sessionId);
-  if (!map) {
-    map = new Map();
-    observedFiles.set(sessionId, map);
-  }
-  map.set(normAbs(abs), entry);
-}
-function getReadState(sessionId: string, abs: string): ReadStateEntry | undefined {
-  return observedFiles.get(sessionId)?.get(normAbs(abs));
-}
-/** 写前校验（对齐 ZCode assertWritableExistingFileIsFresh）：未读 / partial / stale → 返回错误文案；通过返回 null */
-function assertFreshForWrite(sessionId: string, abs: string, stat: { mtimeMs: number; size: number }): string | null {
-  const entry = getReadState(sessionId, abs);
-  if (!entry) return "错误：文件尚未读取——write_file/edit_file 必须先 read_file 该文件（基于最新内容修改；新建文件可免读）";
-  if (entry.isPartialView) return "错误：上次读取的内容不完整（输出被截断）——请重新 read_file 全量读取后再编辑";
-  if (entry.mtimeMs !== stat.mtimeMs || entry.sizeBytes !== stat.size) {
-    return "错误：文件已被修改（用户手动编辑/其他进程/linter）——请重新 read_file 获取最新内容后再编辑";
-  }
-  return null;
-}
-/** 测试/调试：清空观察；会话结束调用（防长驻服务内存增长） */
-export function clearObservedFiles(sessionId: string): void {
-  observedFiles.delete(sessionId);
-}
-/** 测试/调试：清空全部观察 */
-export function resetObservedFiles(): void {
-  observedFiles.clear();
-}
+export { clearObservedFiles, resetObservedFiles } from "./util.js";
 
 // ─────────────────────────── 工具定义 ───────────────────────────
 
@@ -182,15 +138,7 @@ export const TOOLS: Record<string, ToolDef> = {
       const full = head + "\n```\n" + lines.map((l, i) => `${offset + i + 1}\t${l}`).join("\n") + "\n```";
       const clipped = clip(full);
       // v3.5：记录读取指纹（read-before-edit 依据——未读/截断/文件变更都影响后续编辑）
-      markReadState(ctx.sessionId ?? "", abs, {
-        content: all.join("\n"),
-        offset,
-        limit: args.limit as number | undefined,
-        // 输出被截断（模型看到不完整内容）→ partial，禁止编辑（对齐 ZCode truncatedByTokenCap）
-        isPartialView: clipped.length < full.length,
-        mtimeMs: st.mtimeMs,
-        sizeBytes: st.size,
-      });
+      markObservedFile(ctx.sessionId ?? "", abs, all.join("\n"), offset, args.limit as number | undefined, clipped.length < full.length, st);
       return clipped;
     },
   },
@@ -223,11 +171,16 @@ export const TOOLS: Record<string, ToolDef> = {
       if (roBlock) return `错误：${roBlock}`;
       // v3.5 read-before-edit：覆盖已存在文件必须先读（未读/partial/stale 拒绝）；新建免读
       if (fs.existsSync(abs)) {
-        const gateErr = assertFreshForWrite(ctx.sessionId ?? "", abs, fs.statSync(abs));
+        const gateErr = assertObservedFileFresh(ctx.sessionId ?? "", abs, fs.statSync(abs));
         if (gateErr) return gateErr;
       }
       const desc = `写入文件 ${rel}（${(args.content as string).length} 字符）`;
       if (!(await guard(ctx, "write_file", "low", desc))) return "用户拒绝：未写入";
+      // An approval can wait for minutes. Recheck immediately before touching an existing file.
+      if (fs.existsSync(abs)) {
+        const gateErr = assertObservedFileFresh(ctx.sessionId ?? "", abs, fs.statSync(abs));
+        if (gateErr) return gateErr;
+      }
       const previous = fs.existsSync(abs) ? fs.readFileSync(abs, "utf-8") : "";
       const recoveryId = fs.existsSync(abs) ? backupForRecovery(ctx.root, abs, rel, ctx.sessionId) : null;
       if (fs.existsSync(abs) && !recoveryId) return "错误：无法创建会话恢复副本，未写入";
@@ -235,13 +188,7 @@ export const TOOLS: Record<string, ToolDef> = {
       fs.writeFileSync(abs, args.content as string, "utf-8");
       // v3.5：写成功 → 用新指纹刷新状态（自己写的算已知，可继续改无需重读）
       const st = fs.statSync(abs);
-      markReadState(ctx.sessionId ?? "", abs, {
-        content: args.content as string,
-        offset: 0,
-        isPartialView: false,
-        mtimeMs: st.mtimeMs,
-        sizeBytes: st.size,
-      });
+      markObservedFile(ctx.sessionId ?? "", abs, args.content as string, 0, undefined, false, st);
       const lines = countContentLines(args.content as string);
       ctx.recordFileDiff?.({ added: lines, removed: countContentLines(previous) });
       return `已写入 ${rel}（${(args.content as string).length} 字符，${lines} 行）${recoveryId ? `；可用 file_ops restore 恢复（记录 ${recoveryId}，7 天有效）` : ""}`;
@@ -275,7 +222,7 @@ export const TOOLS: Record<string, ToolDef> = {
       if (!fs.existsSync(abs)) return `错误：文件不存在 ${rel}`;
       // v3.5 read-before-edit：编辑必须先读（未读/partial/stale 拒绝）
       const st = fs.statSync(abs);
-      const gateErr = assertFreshForWrite(ctx.sessionId ?? "", abs, st);
+      const gateErr = assertObservedFileFresh(ctx.sessionId ?? "", abs, st);
       if (gateErr) return gateErr;
       const content = fs.readFileSync(abs, "utf-8");
       const oldText = args.old_text as string;
@@ -284,19 +231,20 @@ export const TOOLS: Record<string, ToolDef> = {
       }
       const desc = `修改文件 ${rel}（替换 ${oldText.length} 字符）`;
       if (!(await guard(ctx, "edit_file", "low", desc))) return "用户拒绝：未修改";
+      const freshStat = fs.statSync(abs);
+      const freshGateErr = assertObservedFileFresh(ctx.sessionId ?? "", abs, freshStat);
+      if (freshGateErr) return freshGateErr;
+      const freshContent = fs.readFileSync(abs, "utf-8");
+      if (!freshContent.includes(oldText)) {
+        return "错误：文件在审批期间已被修改，old_text 不再匹配——请重新 read_file 后再编辑";
+      }
       const recoveryId = backupForRecovery(ctx.root, abs, rel, ctx.sessionId);
       if (!recoveryId) return "错误：无法创建会话恢复副本，未修改";
-      const updated = content.replace(oldText, args.new_text as string);
+      const updated = freshContent.replace(oldText, args.new_text as string);
       fs.writeFileSync(abs, updated, "utf-8");
       // v3.5：编辑成功 → 用新指纹刷新状态（本会话后续可继续改，无需重读）
       const st2 = fs.statSync(abs);
-      markReadState(ctx.sessionId ?? "", abs, {
-        content: updated,
-        offset: 0,
-        isPartialView: false,
-        mtimeMs: st2.mtimeMs,
-        sizeBytes: st2.size,
-      });
+      markObservedFile(ctx.sessionId ?? "", abs, updated, 0, undefined, false, st2);
       // 行数 diff 统计（+N -M 行）
       const oldLines = countContentLines(oldText);
       const newLines = countContentLines(args.new_text as string);
@@ -729,6 +677,8 @@ export const TOOLS: Record<string, ToolDef> = {
           parentCallId: ctx.callId,
           readOnly,
           sessionId: ctx.sessionId,
+          scopeRules: ctx.scopeRules,
+          extraReadDirs: ctx.extraReadDirs,
           // v3.3 异步任务编排：后台子智能体完成通知 → 父循环上下文注入
           enqueueTaskNotification: ctx.enqueueTaskNotification,
         };

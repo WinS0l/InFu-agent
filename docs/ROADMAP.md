@@ -11,6 +11,17 @@
 
 ## 高优先级（未完成前，每个阶段都要知道）
 
+### ✅ v6.28 单机稳定版收尾（2026-08-19）
+- **注册表并发安全**——`config.json`、`projects.json`、`schedules.json` 增加短时跨进程目录锁与 stale-lock 回收；项目/定时任务操作在锁内重读、修改、原子替换，避免 CLI、服务端、调度器并发读改写导致丢项。配置保存保留非枚举读取基线，在锁内合并其他进程已写入而本次调用未修改的顶层节；同一配置节冲突仍保留最后写入者语义。
+- **验证/CI**——生产 E2E 不再接受缺 `web/dist` 或 Chromium 的跳过路径；test-runner 无断言结果行即失败；GitHub Actions 增加 Web 生产构建及 Playwright Chromium 安装。当前仓库未配置 Git remote，故无法在本会话触发远端 CI。
+- **本地验证**——`npm test` **51/51、1558 断言 0 失败**；根/WEB build、shared/agent/web/desktop tsc、cargo check、lint 0 error 通过。运行中服务锁定 native `index.node` 时备用产物正常生成。
+
+### ✅ v6.27 审计 H1-M14 修复批（2026-08-19）
+- **会话与服务边界**——修复非缓存会话切换未回填 `running` 导致 composer 队列永久卡死；`/api/chat` 显式 root 先注册并统一授权，执行 root 禁止受保护路径/越出会话项目；终端、定时任务与工作树 merge/discard 同步收口 root，工作树名白名单阻断路径/选项注入；损坏 config 不再静默空配置覆盖，复用 `loadConfig` 备份并拒绝写入。
+- **Agent 与工具一致性**——`scopeRules`/附件只读目录完整传入同步与后台子 Agent，纯文本子 Agent 不再误标失败；失败重试 API usage 仍入账，max-steps 总结调用先检查预算，认证等终态模型错误不盲目轮询 fallback；混合读写工具调用按模型顺序执行；`read_files` 与 `read_file` 共用 read-before-edit 观察状态；写/编辑在审批后再次校验 stale，避免 confirm 等待窗口覆盖外部修改。
+- **安全与可靠性**——定时任务不再因 full 档自动放行 high/requireExplicit；补解释器 `del /f`、`os.unlink`/`Path.unlink` 删除载荷；索引加载校验 root 与每条路径边界；LSP 请求超时清 pending；搜索响应复用 1MB 限制；computer-use 接统一 guard 获得会话审批记忆；egress 检测移除可绕过的固定字符窗口。
+- **验证**——`npm test` **51/51、1558 断言 0 失败**；根 build、web build、shared/agent/web/desktop tsc、cargo check、lint 0 error 通过。运行中服务锁定 native `index.node` 时备用产物正常生成。
+
 ### ✅ v6.2 安全/可恢复性/交互可靠性批（2026-08-19，用户授权 P0+P1+P2 全量）
 - **P0 信任边界**——所有 API 模式统一随机本地令牌（static 注入、Vite proxy、桌面启动参数三通道）+ 文件/审查/截图/记忆/索引 API root 仅限默认根、已注册项目或会话根且拒绝受保护路径 + 子 Agent root 复用 `isPathInside` + 插件生成强制数据目录安全文件名 + MCP HTTP URL 协议/userinfo/私网解析门禁 + 命令所有长度输出统一脱敏；终端不再信任客户端 `confirmed` 绕过鉴权。
 - **P1 可恢复性**——会话级 data-dir recovery（写/编辑覆盖、删除、移动、复制覆盖均预备份；7 天 TTL；会话删除清理；`file_ops restore` 可逆恢复）+ 连续两次同工具同参数操作失败后阻止第三次原样执行（审批拒绝不计失败）。
@@ -124,6 +135,14 @@
 
 ### ✅ v6.24 会话胶囊内部图标去阴影（2026-08-19）
 - **视觉**——会话胶囊内的圆形状态图标显式 `shadow-none`，去除内部圆点的阴影感；外层胶囊近场阴影与 hover 悬浮效果保留。
+- **验证**——web tsc + vite build 通过。
+
+### ✅ v6.25 欢迎字标收敛（2026-08-19）
+- **视觉**——欢迎页「无限未来」保留原有大字号，去除三段高对比光带和呼吸 drop-shadow，改为从下至上由浅至深的半粗渐变字面与 12px 近场柔光；移除常驻动画，保留简洁大方的中心视觉焦点。
+- **验证**——web tsc + vite build 通过。
+
+### ✅ v6.26 Composer 权限入口邻接（2026-08-19）
+- **交互**——输入框工具行的「临时联网」从模型组前移到全局审批模式按钮紧后方，使审批策略与单会话联网放行作为相邻的权限入口；既有 full 档隐藏、无会话待定和倒计时语义不变。
 - **验证**——web tsc + vite build 通过。
 
 ### ✅ v5.0 产品增强批（2026-08-18，审计建议清单全量落地——A1-A5/B1/B2/B4/C1-C4/A4/D3）

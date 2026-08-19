@@ -1266,10 +1266,9 @@ export default function ChatPanel() {
             </div>
           )}
         </span>
+        {/* 会话级临时联网紧邻审批模式：两者都是命令权限边界，便于先看策略再临时放行。 */}
+        <EgressPill />
         <span className="ml-auto flex min-w-0 items-center gap-2">
-          {/* v5.0（C1）：会话级临时联网开关（断网策略轻量出口——npm install 等高频外传命令
-              不再每次被拦；到期自动失效；命令审计照常） */}
-          <EgressPill />
           {/* 上下文用量环（v3：模型选择左侧；窄视口隐藏防溢出） */}
           <span className="hidden min-[560px]:block">
             <ContextMeter />
@@ -1403,7 +1402,7 @@ export default function ChatPanel() {
         )}
 
         {messages.length === 0 ? (
-          /* ── 空态 Hero（v2.14 批 17：去正方体图标；标题艺术字——大号粗体 + 单色渐变，深色主题白→灰）
+           /* ── 空态 Hero（克制字标：低对比渐变 + 柔和近场光，不使用装饰性常驻动画）
              v3.3 补 8：无消息时无 header（拖拽区）——顶部加透明 drag 条，窗口最上方任何状态都可拖动（ZCode 式） ── */
           <div className="relative flex h-full flex-col">
             <div className="shrink-0" style={{ WebkitAppRegion: "drag", height: "3.25rem" } as React.CSSProperties} />
@@ -1412,9 +1411,9 @@ export default function ChatPanel() {
               <div className="relative flex flex-col items-center gap-4 text-center">
                <div>
                  <h1
-                   className="infinite-future-mark text-[62px] font-black leading-[76px] tracking-[0.2em]"
-                   style={{
-                     background: "linear-gradient(135deg, var(--text-primary) 8%, #b9d0ff 42%, var(--text-primary) 76%)",
+                    className="infinite-future-mark text-[62px] font-semibold leading-[76px] tracking-[0.16em]"
+                    style={{
+                      background: "linear-gradient(to top, color-mix(in srgb, var(--text-primary) 58%, var(--info)) 0%, var(--text-primary) 78%)",
                      WebkitBackgroundClip: "text",
                      backgroundClip: "text",
                      color: "transparent",

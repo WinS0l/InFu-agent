@@ -21,6 +21,7 @@ import path from "node:path";
 import { isPathInside } from "../tools/util.js";
 import type { AgentEvent, RuntimeModelInfo, ToolContext, ToolDef } from "@infu/shared";
 import { runAgent } from "./loop.js";
+import type { ScopeRule } from "@infu/shared";
 import { readAgentFile, READONLY_TOOLS } from "./agents.js";
 import { loadConfig, resolveFallbackModels, resolveModel, toRuntimeModel } from "../providers/registry.js";
 
@@ -189,6 +190,10 @@ export interface DelegationContext {
   /** 全量工具注册表（白名单解析；不含 MCP/插件——子智能体 v1 仅内置工具） */
   tools: Record<string, ToolDef>;
   root: string;
+  /** Parent INFU.md path scope must constrain delegated tools too. */
+  scopeRules?: ScopeRule[];
+  /** User-provided attachments remain read-only but available to delegated tasks. */
+  extraReadDirs?: string[];
   /** Project identity remains stable when the execution root is a worktree. */
   projectRoot?: string;
   emit: (e: AgentEvent) => void;
@@ -403,6 +408,8 @@ export async function runSubagent(spec: SubagentSpec, ctx: DelegationContext): P
       maxSteps: p.maxSteps,
       abortSignal: ctx.abortSignal,
       askUser: ctx.askUser,
+      scopeRules: ctx.scopeRules,
+      extraReadDirs: ctx.extraReadDirs,
       // 子循环阶段标识：前端按 phase 分组；suppressFinal 抑制 report/done（终态由本层回收）
       phase: { id: "executor", label: `子智能体 · ${p.name}`, model: p.modelConfig.model },
       suppressFinal: true,
@@ -417,7 +424,7 @@ export async function runSubagent(spec: SubagentSpec, ctx: DelegationContext): P
       text: result.text,
       steps: result.steps,
       toolCount: result.toolCount,
-      ok: result.steps > 0 && !result.text.startsWith("任务已停止"),
+      ok: !result.text.startsWith("任务已停止"),
     };
     ctx.emit({
       type: "subagent-done",
@@ -547,7 +554,9 @@ export function startBackgroundSubagent(spec: SubagentSpec, ctx: DelegationConte
         requestApproval: p.agentDef?.permission === "ask" ? ctx.requestApproval : makeSubagentApproval(ctx),
         maxSteps: p.maxSteps,
         abortSignal: handle.abort.signal,
-        askUser: ctx.askUser,
+      askUser: ctx.askUser,
+      scopeRules: ctx.scopeRules,
+      extraReadDirs: ctx.extraReadDirs,
         phase: { id: "executor", label: `子智能体 · ${p.name}`, model: handle.model },
         suppressFinal: true,
         delegationDepth: (ctx.delegationDepth ?? 0) + 1,

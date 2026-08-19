@@ -29,6 +29,20 @@ export interface Project {
 function projectsFilePath(): string {
   return path.join(resolveDataDir(), "projects.json");
 }
+function withProjectsLock<T>(fn: () => T): T {
+  fs.mkdirSync(resolveDataDir(), { recursive: true });
+  const file = projectsFilePath();
+  const lock = `${file}.lock`;
+  const deadline = Date.now() + 5_000;
+  for (;;) {
+    try { fs.mkdirSync(lock); break; } catch {
+      try { if (Date.now() - fs.statSync(lock).mtimeMs > 30_000) fs.rmSync(lock, { recursive: true, force: true }); } catch { /* retry */ }
+      if (Date.now() >= deadline) throw new Error("项目注册表正被另一个 InFu 进程更新，请稍后重试");
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 25);
+    }
+  }
+  try { return fn(); } finally { try { fs.rmSync(lock, { recursive: true, force: true }); } catch { /* ignore */ } }
+}
 
 /** root 归一化（去尾部分隔符；Windows 大小写不敏感比较用 lower） */
 export function normalizeRoot(root: string): string {
@@ -41,7 +55,7 @@ export function sameRoot(a: string, b: string): boolean {
 }
 
 /** 读取注册表（文件缺失/损坏返回空列表；损坏备份后重建） */
-export function listProjects(): Project[] {
+function readProjects(): Project[] {
   const PROJECTS_FILE = projectsFilePath();
   try {
     if (!fs.existsSync(PROJECTS_FILE)) return [];
@@ -57,6 +71,7 @@ export function listProjects(): Project[] {
     return [];
   }
 }
+export function listProjects(): Project[] { return readProjects(); }
 
 function saveProjects(projects: Project[]) {
   const PROJECTS_FILE = projectsFilePath();
@@ -75,18 +90,20 @@ export function createProject(root: string, name?: string): { ok: boolean; proje
   if (!fs.existsSync(r) || !fs.statSync(r).isDirectory()) {
     return { ok: false, message: `目录不存在：${r}` };
   }
-  const projects = listProjects();
-  if (projects.some((p) => sameRoot(p.root, r))) {
-    return { ok: false, message: `该项目已存在：${r}` };
-  }
   const project: Project = {
     id: `p-${randomUUID().slice(0, 8)}`,
     name: (name?.trim() || path.basename(r) || r).slice(0, 60),
     root: r,
     createdAt: Date.now(),
   };
-  projects.push(project);
-  saveProjects(projects);
+  const saved = withProjectsLock(() => {
+    const projects = readProjects();
+    if (projects.some((p) => sameRoot(p.root, r))) return false;
+    projects.push(project);
+    saveProjects(projects);
+    return true;
+  });
+  if (!saved) return { ok: false, message: `该项目已存在：${r}` };
   // v3.3 补 23（对齐 opencode project git init API）：新建项目自动初始化 git 仓库——
   // 非 git 目录 git init（失败静默不阻塞创建）；审查/代码界面的改动 diff 立即可用
   let initNote = "";
@@ -126,11 +143,14 @@ export function isGitRepoDir(dir: string): boolean {
 
 /** 移除项目（只删注册；会话保留为自由会话；v3.5：连带清理孤儿索引文件） */
 export function removeProject(id: string): { ok: boolean; message: string } {
-  const projects = listProjects();
-  const next = projects.filter((p) => p.id !== id);
-  if (next.length === projects.length) return { ok: false, message: "项目不存在" };
-  const removed = projects.find((p) => p.id === id)!;
-  saveProjects(next);
+  const removed = withProjectsLock(() => {
+    const projects = readProjects();
+    const found = projects.find((p) => p.id === id);
+    if (!found) return null;
+    saveProjects(projects.filter((p) => p.id !== id));
+    return found;
+  });
+  if (!removed) return { ok: false, message: "项目不存在" };
   // v3.5 数据生命周期：~/.infu/index/<root-hash>.json 按 root 哈希命名——项目移除后
   // 索引永久孤儿；这里同步删除（仅索引文件，不动项目文件夹）；失败不影响移除
   // v6.0（S5）：符号索引同规则清理

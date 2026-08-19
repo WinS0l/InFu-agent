@@ -9,7 +9,7 @@
  */
 import { randomUUID } from "node:crypto";
 import { join } from "node:path";
-import { existsSync, mkdirSync, readFileSync, writeFileSync, copyFileSync, renameSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync, copyFileSync, renameSync, rmSync, statSync } from "node:fs";
 import { cleanupOldBackups } from "./cleanup.js";
 import { resolveDataDir } from "./data-dir.js";
 
@@ -27,6 +27,23 @@ export interface ScheduleEntry {
 
 function schedPath(): string {
   return join(resolveDataDir(), "schedules.json");
+}
+function withSchedulesLock<T>(fn: () => T): T {
+  mkdirSync(resolveDataDir(), { recursive: true });
+  const file = schedPath();
+  const lock = `${file}.lock`;
+  const deadline = Date.now() + 5_000;
+  for (;;) {
+    try { mkdirSync(lock); break; } catch {
+      try {
+        const age = Date.now() - statSync(lock).mtimeMs;
+        if (age > 30_000) rmSync(lock, { recursive: true, force: true });
+      } catch { /* retry */ }
+      if (Date.now() >= deadline) throw new Error("定时任务注册表正被另一个 InFu 进程更新，请稍后重试");
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 25);
+    }
+  }
+  try { return fn(); } finally { try { rmSync(lock, { recursive: true, force: true }); } catch { /* ignore */ } }
 }
 
 function isValidEntry(x: unknown): x is ScheduleEntry {
@@ -151,9 +168,11 @@ export function addSchedule(cron: string, prompt: string, root: string): { ok: b
     enabled: true,
     nextRun: nextCronRun(cron, t)?.toISOString(),
   };
-  const list = loadSchedules();
-  list.push(entry);
-  saveSchedules(list);
+  withSchedulesLock(() => {
+    const list = loadSchedules();
+    list.push(entry);
+    saveSchedules(list);
+  });
   return { ok: true, message: `已添加定时任务 ${entry.id}（cron "${cron}"，下次 ${entry.nextRun}）`, entry };
 }
 
@@ -162,30 +181,37 @@ export function listSchedules(): ScheduleEntry[] {
 }
 
 export function removeSchedule(id: string): { ok: boolean; message: string } {
-  const list = loadSchedules().filter((s) => s.id !== id);
-  if (list.length === loadSchedules().length) return { ok: false, message: `定时任务不存在：${id}` };
-  saveSchedules(list);
-  return { ok: true, message: `已删除定时任务 ${id}` };
+  return withSchedulesLock(() => {
+    const current = loadSchedules();
+    const list = current.filter((s) => s.id !== id);
+    if (list.length === current.length) return { ok: false, message: `定时任务不存在：${id}` };
+    saveSchedules(list);
+    return { ok: true, message: `已删除定时任务 ${id}` };
+  });
 }
 
 export function setScheduleEnabled(id: string, enabled: boolean): { ok: boolean; message: string } {
-  const list = loadSchedules();
-  const e = list.find((s) => s.id === id);
-  if (!e) return { ok: false, message: `定时任务不存在：${id}` };
-  e.enabled = enabled;
-  saveSchedules(list);
-  return { ok: true, message: `定时任务 ${id} 已${enabled ? "启用" : "暂停"}` };
+  return withSchedulesLock(() => {
+    const list = loadSchedules();
+    const e = list.find((s) => s.id === id);
+    if (!e) return { ok: false, message: `定时任务不存在：${id}` };
+    e.enabled = enabled;
+    saveSchedules(list);
+    return { ok: true, message: `定时任务 ${id} 已${enabled ? "启用" : "暂停"}` };
+  });
 }
 
 /** 标记执行结果（调度器回调） */
 export function markScheduleRun(id: string, status: string): void {
-  const list = loadSchedules();
-  const e = list.find((s) => s.id === id);
-  if (!e) return;
-  e.lastRun = new Date().toISOString();
-  e.lastStatus = status;
-  e.nextRun = nextCronRun(e.cron)?.toISOString();
-  saveSchedules(list);
+  withSchedulesLock(() => {
+    const list = loadSchedules();
+    const e = list.find((s) => s.id === id);
+    if (!e) return;
+    e.lastRun = new Date().toISOString();
+    e.lastStatus = status;
+    e.nextRun = nextCronRun(e.cron)?.toISOString();
+    saveSchedules(list);
+  });
 }
 
 /**

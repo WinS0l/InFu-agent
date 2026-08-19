@@ -39,7 +39,7 @@ export function detectTestCommand(root: string): string | null {
   if (
     fs.existsSync(path.join(root, "pyproject.toml")) ||
     fs.existsSync(path.join(root, "requirements.txt"))
-  ) return "python -m pytest -q 2>&1 || python -m unittest -v 2>&1";
+  ) return "python -m pytest -q";
   if (fs.existsSync(path.join(root, "go.mod"))) return "go test ./...";
   if (fs.existsSync(path.join(root, "Cargo.toml"))) return "cargo test";
   return null;
@@ -58,6 +58,7 @@ export interface AutoVerifyInput {
   root: string;
   sessionId?: string;
   phase?: string;
+  abortSignal?: AbortSignal;
 }
 
 /**
@@ -98,7 +99,7 @@ export async function maybeAutoVerify(input: AutoVerifyInput): Promise<string> {
   }
 
   try {
-    const r = await execLocal(cmd, input.root, VERIFY_TIMEOUT_MS);
+    const r = await execLocal(cmd, input.root, VERIFY_TIMEOUT_MS, input.abortSignal);
     auditCommand(input.root, cmd, r.ok, r.out, r.sandbox);
     const status = r.ok ? "通过" : "失败";
     const hint = r.ok

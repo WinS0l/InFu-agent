@@ -31,7 +31,7 @@ export const DANGEROUS =
  */
 const INTERPRETER_RUN = /\b(node|nodejs|python|python3|py|perl|ruby|php|powershell|pwsh|sh|bash|cmd|deno|bun)\s+(-e|-c|\/c|-Command|-command|-r|-R|-EncodedCommand|-enc)\s*/i;
 const DESTRUCTIVE_CALLS =
-  /rmSync\s*\(|rmdirSync\s*\(|promises?\.rm\s*\(|removeSync\s*\(|unlinkSync\s*\(|shutil\.rmtree\s*\(|os\.remove\s*\(|Remove-Item|Remove-Folder|rm\s+-rf|del\s+\/s|rd\s+\/s|drop\s+(table|database)/i;
+  /rmSync\s*\(|rmdirSync\s*\(|promises?\.rm\s*\(|removeSync\s*\(|unlinkSync\s*\(|(?:os|pathlib\.Path)\.(?:remove|unlink)\s*\(|shutil\.rmtree\s*\(|Remove-Item|Remove-Folder|rm\s+-rf|del\s+\/(?:[a-z]*[sq][a-z]*|[a-z]*[fq][a-z]*)|rd\s+\/s|drop\s+(table|database)/i;
 
 /** 解释器载荷是否含破坏性调用（-e/-c 等内嵌代码形态） */
 export function hasDestructiveRuntimePayload(command: string): boolean {

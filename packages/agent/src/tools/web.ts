@@ -208,6 +208,25 @@ export async function fetchText(
   }
 }
 
+/** Read third-party search payloads with the same hard cap as webfetch. */
+async function readLimitedText(resp: Response, maxBytes = MAX_BODY): Promise<string> {
+  if (!resp.body) throw new Error("响应无内容");
+  const reader = resp.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    size += value.byteLength;
+    if (size > maxBytes) {
+      await reader.cancel().catch(() => {});
+      throw new Error(`响应过大（>${maxBytes >> 10}KB）`);
+    }
+    chunks.push(value);
+  }
+  return new TextDecoder("utf-8").decode(Buffer.concat(chunks.map((c) => Buffer.from(c))));
+}
+
 /**
  * v2.10 Bing RSS 搜索（免 Key 主后端——实测本网络环境 DuckDuckGo 全家不可达、Bing HTML
  * 含反爬 challenge 页，而 Bing `format=rss` 返回标准 XML 稳定可用）：
@@ -223,7 +242,7 @@ export async function bingSearch(query: string, max: number): Promise<Array<{ ti
       redirect: "follow",
     });
     if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-    const xml = await resp.text();
+    const xml = await readLimitedText(resp);
     const out: Array<{ title: string; url: string; text: string }> = [];
     const items = xml.split("<item>").slice(1);
     for (const it of items) {
@@ -288,7 +307,7 @@ export async function duckduckgoHtmlSearch(query: string, max: number): Promise<
       signal: controller.signal,
     });
     if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-    const html = await resp.text();
+    const html = await readLimitedText(resp);
     const out: Array<{ title: string; url: string; text: string }> = [];
     // 结果块按 class="result 切分（DDG HTML 结构稳定多年）
     const blocks = html.split('class="result').slice(1);

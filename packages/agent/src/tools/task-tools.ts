@@ -12,7 +12,7 @@ import fg from "fast-glob";
 import type { ToolDef, ToolContext } from "@infu/shared";
 import { checkPathScope } from "../memory/index.js";
 import { isProtectedPath } from "../sandbox/index.js";
-import { clip, MAX_FILE_READ, isPathInside } from "./util.js";
+import { clip, MAX_FILE_READ, isPathInside, markObservedFile } from "./util.js";
 
 // ── read_files ──
 
@@ -36,7 +36,10 @@ export function readOneFile(rel: string, ctx: ToolContext, offset = 0, limit = 2
   const lim = limit || 200;
   const lines = all.slice(off, off + lim);
   const head = `文件 ${rel}（共 ${all.length} 行，显示 ${off + 1}-${off + lines.length} 行）`;
-  return head + "\n```\n" + lines.map((l, i) => `${off + i + 1}\t${l}`).join("\n") + "\n```";
+  const full = head + "\n```\n" + lines.map((l, i) => `${off + i + 1}\t${l}`).join("\n") + "\n```";
+  const clipped = clip(full);
+  markObservedFile(ctx.sessionId ?? "", abs, all.join("\n"), off, limit, clipped.length < full.length, fs.statSync(abs));
+  return clipped;
 }
 
 // ── todo_write 内存态任务清单（按会话 + 项目根隔离；会话结束清理）──

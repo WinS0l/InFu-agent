@@ -164,7 +164,7 @@ async function main() {
       continue;
     }
     const r = await runSuite(file);
-    const ok = r.code === 0 && !r.timedout && (r.asserts ? r.asserts.failed === 0 : true);
+    const ok = r.code === 0 && !r.timedout && r.asserts !== null && r.asserts.failed === 0;
     const tag = r.timedout ? "⏱ 超时" : r.code === 0 ? "✓" : "✗";
     const detail = r.asserts ? `（断言 ${r.asserts.passed} 通过 / ${r.asserts.failed} 失败）` : "（无结果行）";
     console.log(`  ${tag} ${f}  ${((r.ms) / 1000).toFixed(1)}s ${detail}`);
@@ -175,7 +175,7 @@ async function main() {
     }
   }
 
-  const failed = results.filter((r) => r.code !== 0 || r.timedout || (r.asserts ? r.asserts.failed > 0 : false));
+  const failed = results.filter((r) => r.code !== 0 || r.timedout || r.asserts === null || r.asserts.failed > 0);
   const ran = results.filter((r) => r.code !== null || r.timedout);
   const totalAsserts = results.reduce((acc, r) => acc + (r.asserts?.passed ?? 0), 0);
   const failedAsserts = results.reduce((acc, r) => acc + (r.asserts?.failed ?? 0), 0);

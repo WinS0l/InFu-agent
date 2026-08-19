@@ -40,21 +40,25 @@ writeFileSync(
   "utf-8"
 );
 
-// ── 静态目录 = web 生产构建（缺失则跳过浏览器层，API 层断言 dist 存在性）──
+// ── 静态目录 = web 生产构建。生产页面 E2E 不允许静默跳过。──
 const distDir = fileURLToPath(new URL("../../web/dist", import.meta.url));
 const distOk = existsSync(join(distDir, "index.html"));
-if (!distOk) console.log("⚠ web/dist 不存在（先运行 npm run build -w @infu/web）——浏览器层跳过，API 层仅测 401 中间件");
 
 console.log("\n=== v5.0 生产模式 E2E ===\n");
 
 let server: Server | null = null;
 let base = "";
 try {
+  check("web/dist 生产构建存在", distOk, distDir);
+  if (!distOk) throw new Error("web/dist 不存在：生产页面 E2E 需要先构建 Web");
+  const chromePath = resolveChromiumPath();
+  check("Chromium 可用（生产页面 E2E 必需）", !!chromePath, String(chromePath));
+  if (!chromePath) throw new Error("未找到 Chromium：请安装 Playwright Chromium 或配置系统 Chromium");
   // 真实服务器：staticDir 生产模式（端口 0 = 系统分配，onListening 回传实际端口）
   const started = await new Promise<Server | null>((resolve) => {
     const srv = startServer({
       port: 0,
-      staticDir: distOk ? distDir : undefined,
+      staticDir: distDir,
       onListening: (port) => {
         base = `http://127.0.0.1:${port}`;
         resolve(srv);
@@ -75,7 +79,7 @@ try {
     const noToken = await get("/api/projects");
     check("无令牌 /api/projects → 401（鉴权生效）", noToken.status === 401, String(noToken.status));
 
-    if (distOk) {
+    {
       const home = await get("/");
       const csp = home.csp ?? "";
       const nonce = /'nonce-([a-f0-9]+)'/.exec(csp)?.[1] ?? "";
@@ -90,14 +94,11 @@ try {
       check("theme-init.js 外置脚本可加载（'self' 放行）", theme.status === 200, String(theme.status));
       const asset = await get("/assets/");
       check("SPA fallback 带 CSP 头", (asset.csp ?? "").includes("frame-ancestors 'none'"), String(asset.status));
-    } else {
-      check("web/dist 缺失（跳过页面层断言）", true);
     }
   }
 
-  // ── 浏览器层（chromium 可用时跑：真实加载生产页面）──
-  const chromePath = resolveChromiumPath();
-  if (distOk && chromePath) {
+  // ── 浏览器层（真实加载生产页面）──
+  {
     console.log("\n▶ 浏览器层：真实加载生产页面");
     const { chromium } = await import("playwright-core");
     const browser = await chromium.launch({ executablePath: chromePath, headless: true });
@@ -185,8 +186,6 @@ try {
     } finally {
       await browser.close().catch(() => {});
     }
-  } else {
-    console.log(distOk ? "⚠ chromium 不可用——浏览器层跳过" : "⚠ web/dist 缺失——浏览器层跳过");
   }
 } finally {
   if (server) {

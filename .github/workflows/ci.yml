@@ -25,6 +25,12 @@ jobs:
       - name: Build (shared → sandbox-rs native → agent)
         run: npm run build
 
+      - name: Build web production bundle
+        run: npm run build -w @infu/web
+
+      - name: Install Chromium for production E2E
+        run: npx playwright-core install chromium
+
       - name: TypeScript check (web / desktop)
         run: |
           npx tsc -p packages/web/tsconfig.json --noEmit

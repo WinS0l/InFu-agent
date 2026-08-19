@@ -12,7 +12,7 @@ import { join, resolve } from "node:path";
 import { existsSync, readFileSync, mkdirSync, writeFileSync, statSync, readdirSync } from "node:fs";
 import { spawn } from "node:child_process";
 import type { DesktopScreenCapture, DesktopScreenInput, ToolDef, ToolContext } from "@infu/shared";
-import { isPathInside } from "./util.js";
+import { isPathInside, guard } from "./util.js";
 import { resolveDataDir } from "../data-dir.js";
 
 /** 图片类型白名单 → data URL 前缀 */
@@ -255,7 +255,7 @@ export const visionTools: Record<string, ToolDef> = {
     }),
     async execute(args, ctx) {
       if (!isDesktop()) return "错误：screen_click 仅桌面版可用";
-      if (!(await ctx.requestApproval(`桌面鼠标点击 (${args.x}, ${args.y})`, "medium"))) return "用户拒绝：未点击";
+      if (!(await guard(ctx, "screen_click", "medium", `桌面鼠标点击 (${args.x}, ${args.y})`))) return "用户拒绝：未点击";
       const g = globalThis as Record<string, unknown>;
       const input = g.__infuScreenInput as DesktopScreenInput | undefined;
       if (typeof input !== "function") return "错误：桌面输入通道不可用（主进程未接线）";
@@ -274,7 +274,7 @@ export const visionTools: Record<string, ToolDef> = {
     }),
     async execute(args, ctx) {
       if (!isDesktop()) return "错误：screen_type 仅桌面版可用";
-      if (!(await ctx.requestApproval(`桌面键盘输入：${(args.text as string).slice(0, 40)}`, "medium"))) return "用户拒绝：未输入";
+      if (!(await guard(ctx, "screen_type", "medium", `桌面键盘输入：${(args.text as string).slice(0, 40)}`))) return "用户拒绝：未输入";
       const g = globalThis as Record<string, unknown>;
       const input = g.__infuScreenInput as DesktopScreenInput | undefined;
       if (typeof input !== "function") return "错误：桌面输入通道不可用（主进程未接线）";
@@ -295,7 +295,7 @@ export const visionTools: Record<string, ToolDef> = {
       if (!isDesktop()) return "错误：screen_scroll 仅桌面版可用";
       const dir = String(args.direction ?? "down");
       const amount = Number(args.amount ?? 1);
-      if (!(await ctx.requestApproval(`桌面滚动：${dir} ×${amount}`, "medium"))) return "用户拒绝：未滚动";
+      if (!(await guard(ctx, "screen_scroll", "medium", `桌面滚动：${dir} ×${amount}`))) return "用户拒绝：未滚动";
       const g = globalThis as Record<string, unknown>;
       const input = g.__infuScreenInput as DesktopScreenInput | undefined;
       if (typeof input !== "function") return "错误：桌面输入通道不可用（主进程未接线）";
@@ -313,7 +313,7 @@ export const visionTools: Record<string, ToolDef> = {
     }),
     async execute(args, ctx) {
       if (!isDesktop()) return "错误：screen_key 仅桌面版可用";
-      if (!(await ctx.requestApproval(`桌面按键：${(args.keys as string).slice(0, 40)}`, "medium"))) return "用户拒绝：未按键";
+      if (!(await guard(ctx, "screen_key", "medium", `桌面按键：${(args.keys as string).slice(0, 40)}`))) return "用户拒绝：未按键";
       const g = globalThis as Record<string, unknown>;
       const input = g.__infuScreenInput as DesktopScreenInput | undefined;
       if (typeof input !== "function") return "错误：桌面输入通道不可用（主进程未接线）";
@@ -355,7 +355,7 @@ export const visionTools: Record<string, ToolDef> = {
     async execute(args, ctx) {
       if (!isDesktop()) return "错误：screen_drag 仅桌面版可用";
       const desc = `桌面拖拽 (${args.x1}, ${args.y1}) → (${args.x2}, ${args.y2})`;
-      if (!(await ctx.requestApproval(desc, "medium"))) return "用户拒绝：未拖拽";
+      if (!(await guard(ctx, "screen_drag", "medium", desc))) return "用户拒绝：未拖拽";
       const g = globalThis as Record<string, unknown>;
       const input = g.__infuScreenInput as DesktopScreenInput | undefined;
       if (typeof input !== "function") return "错误：桌面输入通道不可用（主进程未接线）";
@@ -378,7 +378,7 @@ export const visionTools: Record<string, ToolDef> = {
       const name = String(args.name ?? "").trim();
       if (action === "activate") {
         if (!name) return "错误：activate 需要 name 参数（进程名或窗口标题关键词）";
-        if (!(await ctx.requestApproval(`激活窗口：${name}`, "medium"))) return "用户拒绝：未激活";
+        if (!(await guard(ctx, "screen_windows", "medium", `激活窗口：${name}`))) return "用户拒绝：未激活";
       }
       const g = globalThis as Record<string, unknown>;
       const win = g.__infuScreenWindows as ((action: string, name?: string, signal?: AbortSignal) => Promise<string>) | undefined;

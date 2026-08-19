@@ -5,7 +5,7 @@
  * 复用 v2.7 文件索引（loadIndex 加速文件清单），按行建倒排，BM25 打分。
  */
 import { readFileSync } from "node:fs";
-import { resolve } from "node:path";
+import { resolve, relative } from "node:path";
 import { isPathInside } from "./util.js";
 
 /** 中文 bigram + 英文词分词 */
@@ -96,7 +96,7 @@ export function semanticSearch(
   scored.sort((a, b) => b.score - a.score);
   return scored.slice(0, maxResults).map((h) => ({
     ...h,
-    file: isPathInside(root, h.file) ? h.file.slice(root.length + 1) : h.file,
+    file: isPathInside(root, h.file) ? relative(root, h.file).split("\\").join("/") : h.file,
   }));
 }
 

@@ -96,9 +96,9 @@ check(
   r1
 );
 
-// 2b. 普通命令不受影响（受限沙箱正常执行）
+// 2b. 普通命令不受影响（auto 可选受限或软沙箱，取决于原生模块可用性）
 const r2 = await TOOLS.run_command.execute({ command: "echo net-ok" }, mkCtx(true));
-check("普通命令正常执行（受限沙箱）", r2.includes("net-ok") && r2.includes("受限沙箱"), r2);
+check("普通命令正常执行（有效沙箱）", r2.includes("net-ok") && /（受限沙箱|软沙箱）/.test(r2), r2);
 
 // 2c. network=true 审批通过 → 联网放行执行
 const r3 = await TOOLS.run_command.execute({ command: "echo net-allowed", network: true }, mkCtx(true));

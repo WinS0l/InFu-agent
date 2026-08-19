@@ -163,12 +163,16 @@ export function auditCommand(cwd: string, command: string, ok: boolean, detail: 
 // ── Docker 沙箱 ──
 
 let dockerCache: boolean | null = null;
-/** 检测 Docker 是否可用（结果缓存 60s） */
+/**
+ * 检测 Linux Docker daemon 是否可用（结果缓存 60s）。
+ * 本项目的 L2 参数与镜像均基于 Linux containers；Windows container daemon 接受
+ * `docker info` 却不支持 --pids-limit，会让 auto 档在 CI/Server 上误选 Docker。
+ */
 export async function dockerAvailable(): Promise<boolean> {
   if (dockerCache !== null) return dockerCache;
   try {
-    await execFileAsync("docker", ["info"], { timeout: 5000, windowsHide: true });
-    dockerCache = true;
+    const { stdout } = await execFileAsync("docker", ["info", "--format", "{{.OSType}}"], { timeout: 5000, windowsHide: true });
+    dockerCache = stdout.trim().toLowerCase() === "linux";
   } catch {
     dockerCache = false;
   }

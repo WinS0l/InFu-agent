@@ -41,7 +41,8 @@ jobs:
         working-directory: packages/sandbox-rs
 
       - name: Lint
-        run: npm run lint
+        # Warning baseline is informational; emit normal text rather than GitHub error annotations.
+        run: npm run lint -- --format stylish
 
       - name: Test (full suite via test-runner)
         run: npm test

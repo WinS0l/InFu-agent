@@ -932,7 +932,7 @@ export default function ChatPanel() {
       requestAnimationFrame(() => inputRef.current?.focus());
     };
     return (
-    <div ref={composerRef} className="relative mx-auto w-full max-w-[780px] rounded-[22px] border border-line/60 bg-input px-4 pt-3 shadow-lv2">
+    <div ref={composerRef} className={`relative mx-auto w-full max-w-[780px] rounded-[22px] border bg-input px-4 pt-3 shadow-lv2 transition-[border-color,box-shadow] duration-150 ${hero ? "border-line/70" : "border-line/60 focus-within:border-info/40 focus-within:shadow-[0_8px_30px_rgba(0,0,0,0.12)]"}`}>
       {/* v2.14 批 10：回滚/编辑待定操作组（输入框左上；大胶囊双按钮——确认 / 取消） */}
       {(pendingRollback || editingSeq != null) && (
         <div className="absolute -top-8 left-2 z-20 flex items-center gap-1.5">
@@ -1019,7 +1019,7 @@ export default function ChatPanel() {
       />
       {/* 工具行（v3：与输入框间距两个半字符；左 = 附件 + 审批档位；右 = 用量环 + 模型 + 思考 + 发送。
           压缩时不溢出：按钮 shrink-0、用量环/思考在窄视口隐藏、模型名截断） */}
-      <div className="flex min-w-0 items-center gap-2 pb-2 pt-7">
+       <div className="flex min-w-0 items-center gap-2 border-t border-line/60 pb-2 pt-2.5">
         {/* v3.1 附件（文件/文件夹/图片：内容上传暂存 + 图片视觉；预览条在输入卡上方） */}
         <span className="relative shrink-0">
           <button
@@ -1301,7 +1301,7 @@ export default function ChatPanel() {
           </div>
         ) : (
           /* ── 消息流（用户右侧气泡 r22 / 助手无气泡全宽） ── */
-          <div className="mx-auto flex max-w-[748px] flex-col gap-4 px-8 py-4">
+          <div className="mx-auto flex max-w-[780px] flex-col gap-5 px-8 py-5">
             {messages.map((m, idx) => {
               const pending = rmIdx >= 0 && idx >= rmIdx;
               const turnEnd = idx + 1 >= messages.length || messages[idx + 1].role === "user";
@@ -1330,7 +1330,7 @@ export default function ChatPanel() {
 
         {/* 运行状态行（主流 TurnStatus：左对齐 shimmer + 等宽时钟） */}
         {running && (
-          <div className="mx-auto flex max-w-[748px] items-center gap-2 px-8 pb-3 pt-1 text-[14px] font-medium">
+          <div className="mx-auto flex max-w-[780px] items-center gap-2 px-8 pb-3 pt-1 text-[14px] font-medium">
             <span className="shimmer-text">InFu 运行中</span>
             <span className="text-[13px] text-caption [font-variant-numeric:tabular-nums]">
               已用 <ElapsedClock active={running} /> · 点击输入区方块停止
@@ -1377,11 +1377,11 @@ export default function ChatPanel() {
 
       {/* ── 输入区（仅消息非空时渲染——hero 模式下输入框与 hero 内容一起居中） ── */}
       {messages.length > 0 && (
-      <div className="relative shrink-0 px-8 pb-4 pt-1">
+      <div className="relative shrink-0 px-8 pb-4 pt-2">
         {/* 贴输入卡上方的渐隐遮罩（滚动内容渐入背景） */}
         <div
-          className="pointer-events-none absolute -top-9 left-0 right-0 h-9"
-          style={{ background: "linear-gradient(to bottom, transparent, var(--bg-base))" }}
+          className="pointer-events-none absolute -top-12 left-0 right-0 h-12"
+          style={{ background: "linear-gradient(to bottom, transparent, var(--bg-base) 80%)" }}
         />
 
         {/* v3.1 排队发送 dock（运行中输入的消息；编辑/移除/立即发送/拖拽排序） */}

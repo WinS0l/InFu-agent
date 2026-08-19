@@ -221,16 +221,24 @@ async function* requestOnce(opts: {
     try {
       while (true) {
         const { done, value } = await reader.read();
-        if (done) break;
-        // v3.0 审计修复（B3）：收到数据帧 → 重置空闲计时；v3.5：首个数据帧后进入空闲计时
-        gotData = true;
-        resetIdle();
-        buf += decoder.decode(value, { stream: true });
+        if (value) {
+          // v3.0 审计修复（B3）：收到数据帧 → 重置空闲计时；v3.5：首个数据帧后进入空闲计时
+          gotData = true;
+          resetIdle();
+          buf += decoder.decode(value, { stream: !done });
+        }
+        // EOF 并不保证以 SSE 空行结束。冲刷 TextDecoder，并把未分隔的尾帧作为完整帧解析，
+        // 否则兼容网关会丢掉最后的正文、usage、finish_reason 或工具调用。
+        if (done) buf += decoder.decode();
 
         // SSE 按空行分帧（v3.7：兼容 \r\n\r\n 分帧端点——自定义网关/代理常返回 CRLF，
         // 原只认 \n\n 时帧永不命中 → buf 无限累积 + 整轮零产出直到空闲超时）
         const frames = buf.split(/\r?\n\r?\n/);
         buf = frames.pop() ?? "";
+        if (done && buf.trim()) {
+          frames.push(buf);
+          buf = "";
+        }
         for (const frame of frames) {
           const dataLine = frame.split("\n").find((l) => l.startsWith("data:"));
           if (!dataLine) continue;
@@ -256,7 +264,9 @@ async function* requestOnce(opts: {
           // prompt - hit（保证 cacheHit + cacheMiss == promptTokens 语义一致，命中率不虚高）
           const u = json.usage;
           if (u && (u.prompt_cache_hit_tokens || u.prompt_cache_miss_tokens || u.prompt_tokens || u.completion_tokens)) {
-            const hit = u.prompt_cache_hit_tokens ?? 0;
+            // OpenAI 原生字段在 prompt_tokens_details.cached_tokens，DeepSeek 兼容字段在顶层。
+            // 两者同时存在时优先顶层（供应商已明确给出 hit/miss）。
+            const hit = u.prompt_cache_hit_tokens ?? u.prompt_tokens_details?.cached_tokens ?? 0;
             let miss = u.prompt_cache_miss_tokens;
             if (miss == null && u.prompt_tokens) miss = Math.max(0, (u.prompt_tokens ?? 0) - hit);
             lastUsage = {
@@ -301,6 +311,7 @@ async function* requestOnce(opts: {
             yield { finishReason: finish };
           }
         }
+        if (done) break;
       }
     } catch (e) {
       // 流读取中断：用户中止不可重试；其余（首帧前/流中）由外层按 started 决定

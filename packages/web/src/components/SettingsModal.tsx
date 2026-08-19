@@ -292,20 +292,20 @@ export default function SettingsModal({ onClose, initialTab = "general" }: Props
     >
       <div
         className="flex overflow-hidden rounded-3xl border border-line bg-elevated shadow-lv3"
-        style={{ width: "min(880px, 94vw)", height: "min(800px, calc(100vh - 48px))" }}
+        style={{ width: "min(920px, 94vw)", height: "min(800px, calc(100vh - 48px))" }}
         onClick={(e) => e.stopPropagation()}
       >
         {/* 左侧导航轨（主流 188px：标题 + 分组 + 40px 单元格） */}
-        <nav className="w-[188px] shrink-0 overflow-y-auto border-r border-line px-3 py-5">
-          <div className="px-3 pb-2 text-base font-medium text-text">设置</div>
+        <nav className="w-[204px] shrink-0 overflow-y-auto border-r border-line bg-sidebar px-3 py-5">
+          <div className="px-3 pb-3 text-base font-semibold tracking-tight text-text">设置</div>
           {NAV_GROUPS.map((g) => (
             <div key={g.label} className="mb-1.5">
-              <div className="px-3 pb-1 pt-2 text-[11px] font-medium text-caption">{g.label}</div>
+              <div className="px-3 pb-1 pt-3 text-[10px] font-semibold tracking-[0.1em] text-caption">{g.label}</div>
               {g.items.map((item) => (
                 <button
                   key={item.id}
                   className={`flex h-10 w-full cursor-pointer items-center gap-2.5 rounded-xl px-3 text-left text-[13px] transition-colors ${
-                    tab === item.id ? "bg-hover font-medium text-text" : "text-sub hover:bg-hover/60 hover:text-text"
+                    tab === item.id ? "bg-elevated font-medium text-text shadow-lv1" : "text-sub hover:bg-hover/60 hover:text-text"
                   }`}
                   onClick={() => setTab(item.id)}
                 >
@@ -320,9 +320,9 @@ export default function SettingsModal({ onClose, initialTab = "general" }: Props
         {/* 右侧内容列 */}
         <div className="flex min-w-0 flex-1 flex-col">
           {/* 内容头（54px：标题 + 关闭） */}
-          <div className="flex h-[54px] shrink-0 items-center gap-2 border-b border-line px-6">
-            <span className="text-base font-medium text-text">{currentItem?.label ?? "设置"}</span>
-            <span className="hidden text-xs text-caption sm:inline">基础设置 · Agent 能力 · 数据与统计</span>
+          <div className="flex h-[58px] shrink-0 items-center gap-2 border-b border-line px-7">
+            <span className="text-base font-semibold tracking-tight text-text">{currentItem?.label ?? "设置"}</span>
+            <span className="hidden text-xs text-caption sm:inline">配置将在保存后写入本地</span>
             <button
               className="ml-auto flex h-9 w-9 cursor-pointer items-center justify-center rounded-xl text-sub transition-colors hover:bg-hover hover:text-text"
               onClick={onClose}
@@ -333,10 +333,10 @@ export default function SettingsModal({ onClose, initialTab = "general" }: Props
           </div>
 
           {error && (
-            <div className="shrink-0 border-b border-danger/30 bg-danger-soft px-6 py-2 text-xs text-danger">{error}</div>
+            <div className="shrink-0 border-b border-danger/30 bg-danger-soft px-7 py-2 text-xs text-danger">{error}</div>
           )}
 
-          <div className="min-h-0 flex-1 overflow-y-auto px-6 py-4">
+          <div className="min-h-0 flex-1 overflow-y-auto px-7 py-5">
             {tab === "general" && (
               <div className="space-y-5">
                 <SectionTitle title="常规" desc="任务与界面默认值（写入 ~/.infu/config.json）" />
@@ -744,7 +744,7 @@ export default function SettingsModal({ onClose, initialTab = "general" }: Props
           </div>
 
           {/* 底部操作条 */}
-          <div className="flex shrink-0 items-center gap-3 border-t border-line px-6 py-3">
+          <div className="flex shrink-0 items-center gap-3 border-t border-line bg-sidebar/60 px-7 py-3">
             <div className="min-w-0 flex-1 truncate text-xs text-caption">
               写入 ~/.infu/config.json（服务端白名单：仅设置节可写）；插件/技能/MCP/钩子实时生效
             </div>

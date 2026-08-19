@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState, lazy, Suspense } from "react";
-import { FolderOpen, PanelRightClose, PanelRightOpen } from "lucide-react";
+import { FolderOpen, PanelRightOpen } from "lucide-react";
 import { useStore } from "./store";
 import { fetchModels, fetchSessions, fetchSessionEvents, maybeMigrateV1, fetchConfig, fetchProjects } from "./api";
 import Sidebar from "./components/Sidebar";
@@ -271,7 +271,7 @@ export default function App() {
             v2.14 批 7：右侧直角（rounded-l-only）——与右侧栏融为一体，圆角只保留在左侧
             v3.3 补 4：右侧栏折叠时去掉卡片右边框（border-r-0）——折叠形态与聊天界面之间无分隔线 */}
         <div className="min-h-0 min-w-0 pb-2 pl-2" style={{ gridColumn: 2, gridRow: "1 / span 2" }}>
-          <div className={`flex h-full flex-col overflow-hidden rounded-l-[20px] border border-line bg-ink shadow-lv2 ${detailsOpen ? "" : "border-r-0"}`}>
+          <div className="flex h-full flex-col overflow-hidden rounded-l-[20px] border border-r-0 border-line bg-ink shadow-lv2">
             {/* 顶部区域（v2.14 批 5：进卡片，与聊天界面一体；左侧会话归属 + 推拉居中）
                 v3.0 批 9：整行 = 窗口拖拽区（no-drag 给可交互元素） */}
             {hasMessages && (
@@ -367,14 +367,14 @@ export default function App() {
             代码模式隐藏）
             v2.14 批 6：与聊天卡片无缝贴齐（去掉 border-l——分隔线 = 卡片右边框） */}
         {viewMode === "chat" && (detailsOpen ? (
-          <aside className="row-span-2 flex min-h-0 min-w-0 flex-col bg-ink" style={{ gridColumn: 3 }}>
+          <aside className="row-span-2 flex min-h-0 min-w-0 flex-col border-l border-line bg-sidebar" style={{ gridColumn: 3 }}>
             <RightRail onCollapse={() => setDetailsOpen(false)} />
           </aside>
         ) : (
           // 折叠 rail（56px）：展开按钮放在原生窗口按钮（titleBarOverlay 悬浮
           // 右上角，约 38px 高）正下方——顶部让位，按钮紧贴其下（v3.0 批 9.5 拍板）
           // v3.3 补：去掉分隔细线——折叠形态只有拉出按钮，别的什么都没有（用户拍板）
-          <aside className="row-span-2 flex flex-col items-center gap-1 bg-ink py-3" style={{ gridColumn: 3 }}>
+          <aside className="row-span-2 flex flex-col items-center gap-1 border-l border-line bg-sidebar py-3" style={{ gridColumn: 3 }}>
             {/* 顶部让位区（避开原生窗口按钮悬浮区约 38px 高；无边框无线条 = 视觉空白） */}
             <div className="h-[calc(3.25rem-11px)] shrink-0" />
             <button

@@ -34,7 +34,7 @@ import { resolveDataDir } from "@infu/agent/dist/data-dir.js";
 import { getStore } from "@infu/agent/dist/db/store.js";
 // v3.6：IPv6 解包 / IPv4 简写归一化判定下沉 @infu/shared（与 agent SSRF 共用同一实现，
 // 修复 ::ffff:7f00:1 / ::7f00:1 / 0:0:0:0:0:0:0:1 等 loopback 变体绕过导航守卫）
-import { isLoopbackHostText } from "@infu/shared";
+import { isLoopbackHostText, type DesktopScreenCapture, type DesktopScreenInput } from "@infu/shared";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const IS_DEV = process.env.INFU_DESKTOP_DEV === "1";
@@ -521,8 +521,21 @@ try {
 // v3.2 DPI 修复：PS 进程默认 DPI 非感知时 CopyFromScreen 得到的是**逻辑分辨率**位图，
 // 而 SetCursorPos 是物理像素——125%/150% 缩放下截图与点击坐标系统性偏移（点错位置）。
 // 修复 = 截图脚本先 SetProcessDPIAware()（物理像素）+ VirtualScreen（全显示器合并边界），
-// 并把虚拟原点（可能为负）存全局——click/move 时坐标加回原点偏移。
-let lastShotOrigin = { x: 0, y: 0 };
+// 并把虚拟原点（可能为负）随截图返回；Agent 换算后向输入桥传入绝对物理坐标。
+function delay(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) return reject(new Error("操作已取消"));
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(new Error("操作已取消"));
+    };
+    const timer = setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
+}
 
 
 /**
@@ -605,10 +618,10 @@ const execFileAsync = promisify(execFile);
   }
 };
 
-/** 桌面截图 → 保存 PNG → 返回路径（失败 null）。dir 必须已存在；
+/** 桌面截图 → 保存 PNG 与虚拟桌面原点（失败 null）。dir 必须已存在；
  *  minimize=true 时先最小化 InFu 窗口（单屏用户 InFu 挡在最前 → 永远截到 InFu 界面），
  *  截完 800ms 后恢复窗口（Agent 操作期间用户仍可观察） */
-(globalThis as Record<string, unknown>).__infuScreenCapture = (dir: string, minimize?: boolean, sessionId?: string): string | null => {
+const screenCapture: DesktopScreenCapture = async (dir, minimize, sessionId, signal) => {
   // 会话前缀（批 12：computer use 数据按会话对应——面板按当前会话过滤截图流）
   const sid = sessionId ? sessionId.replace(/[^a-zA-Z0-9-]/g, "").slice(0, 8) : "";
   const file = join(dir, `screen-${sid ? sid + "-" : ""}${Date.now().toString(36)}.png`);
@@ -616,9 +629,13 @@ const execFileAsync = promisify(execFile);
   if (minimize && mainWindow && !mainWindow.isDestroyed() && mainWindow.isVisible() && !mainWindow.isMinimized()) {
     mainWindow.minimize();
     minimized = true;
-    // 等窗口动画完成（~500ms）
-    const t0 = Date.now();
-    while (Date.now() - t0 < 500) { /* busy-wait 极短 */ }
+    // 等窗口动画完成，不阻塞 Electron 主进程。
+    try {
+      await delay(500, signal);
+    } catch {
+      if (mainWindow && !mainWindow.isDestroyed()) mainWindow.restore();
+      return null;
+    }
   }
   // v3.0 审计修复（C1）：PS 单引号字符串内 `'` 需转义为 `''`——原实现只转义反斜杠，
   // root 路径含单引号（如 E:\It's a project）会截断字符串造成脚本注入
@@ -637,32 +654,35 @@ const execFileAsync = promisify(execFile);
     `$g.Dispose();$bmp.Dispose();` +
     `Write-Output "$($b.Location.X),$($b.Location.Y)"`;
   try {
-    const out = execFileSync("powershell", ["-NoProfile", "-Command", script], { timeout: 15000, windowsHide: true, encoding: "utf-8" });
-    // 解析虚拟屏原点（"X,Y"）——click/move 坐标要加回该偏移（位图坐标 → 物理坐标）
-    const m = /(-?\d+)\s*,\s*(-?\d+)/.exec((out ?? "").trim());
-    if (m) lastShotOrigin = { x: Number(m[1]), y: Number(m[2]) };
+    const { stdout } = await execFileAsync("powershell", ["-NoProfile", "-NonInteractive", "-Command", script], {
+      timeout: 15000,
+      windowsHide: true,
+      encoding: "utf-8",
+      signal,
+    });
+    // 图片坐标相对虚拟屏原点；screen_* 输入始终接收 Agent 已换算的绝对物理坐标。
+    const m = /(-?\d+)\s*,\s*(-?\d+)/.exec((stdout ?? "").trim());
+    const origin = m ? { x: Number(m[1]), y: Number(m[2]) } : { x: 0, y: 0 };
     if (minimized && mainWindow && !mainWindow.isDestroyed()) {
       setTimeout(() => {
         if (mainWindow && !mainWindow.isDestroyed()) mainWindow.restore();
       }, 800);
     }
-    return existsSync(file) ? file : null;
+    return existsSync(file) ? { file, origin } : null;
   } catch (e) {
     if (minimized && mainWindow && !mainWindow.isDestroyed()) mainWindow.restore();
     console.log(`[infu-desktop] 截图失败: ${(e as Error).message.slice(0, 120)}`);
     return null;
   }
 };
+(globalThis as Record<string, unknown>).__infuScreenCapture = screenCapture;
 
 /** 桌面输入（SendInput P/Invoke）——返回 "OK" 或错误描述。
  *  action：click（坐标点击）/ type（文本粘贴）/ move（仅移动光标）/
  *          scroll（滚轮：direction up/down/left/right + amount 格数）/
  *          key（按键组合：如 ctrl+c、alt+tab、enter、f5）/
  *          drag（v3.3 拖拽：x1,y1 → x2,y2，steps 分步） */
-(globalThis as Record<string, unknown>).__infuScreenInput = (
-  action: "click" | "type" | "move" | "scroll" | "key" | "drag",
-  ...params: Array<string | number>
-): string => {
+const screenInput: DesktopScreenInput = async (action, params, signal) => {
   try {
     // 统一 P/Invoke 头（一次编译，多方法；user32 SendInput/keybd_event/SetCursorPos）
     const addType =
@@ -714,11 +734,10 @@ public static class InFuKeys {
   }
 }
 '@;`;
-    const shift = lastShotOrigin;
     let script = addType;
     if (action === "click") {
-      const x = Math.round(Number(params[0])) + shift.x;
-      const y = Math.round(Number(params[1])) + shift.y;
+      const x = Math.round(Number(params[0]));
+      const y = Math.round(Number(params[1]));
       const btn = String(params[2] ?? "left");
       const flags = btn === "right" ? 0x0008 : 0x0002; // RButtonDown | LButtonDown
       const upFlags = btn === "right" ? 0x0010 : 0x0004; // RButtonUp | LButtonUp
@@ -726,15 +745,15 @@ public static class InFuKeys {
       script += `[InFuInput]::Click(${x}, ${y}, ${flags}u, ${upFlags}u)` +
         (clicks > 1 ? `;[InFuInput]::Click(${x}, ${y}, ${flags}u, ${upFlags}u)` : "");
     } else if (action === "move") {
-      const x = Math.round(Number(params[0])) + shift.x;
-      const y = Math.round(Number(params[1])) + shift.y;
+      const x = Math.round(Number(params[0]));
+      const y = Math.round(Number(params[1]));
       script += `[InFuInput]::Move(${x}, ${y})`;
     } else if (action === "drag") {
       // v3.3：拖拽（x1,y1 → x2,y2；steps 分步移动，默认 10）
-      const x1 = Math.round(Number(params[0])) + shift.x;
-      const y1 = Math.round(Number(params[1])) + shift.y;
-      const x2 = Math.round(Number(params[2])) + shift.x;
-      const y2 = Math.round(Number(params[3])) + shift.y;
+      const x1 = Math.round(Number(params[0]));
+      const y1 = Math.round(Number(params[1]));
+      const x2 = Math.round(Number(params[2]));
+      const y2 = Math.round(Number(params[3]));
       const steps = Math.max(1, Math.min(50, Math.round(Number(params[4] ?? 10))));
       script += `[InFuInput]::Drag(${x1}, ${y1}, ${x2}, ${y2}, ${steps})`;
     } else if (action === "scroll") {
@@ -770,18 +789,25 @@ public static class InFuKeys {
       script += `[InFuKeys]::Tap(${main}u);`;
       for (const v of [...vks].reverse()) if (v === 0x11 || v === 0x12 || v === 0x10 || v === 0x5b) script += `[InFuKeys]::Release(${v}u);`;
     } else {
-      // type：剪贴板粘贴（Unicode 安全，绕开 SendKeys 特殊字符转义）
+      // type：短暂替换剪贴板粘贴 Unicode 文本，随后恢复用户原有剪贴板内容。
       const text = String(params[0] ?? "").replace(/'/g, "''");
       script +=
-        `[System.Windows.Forms.Clipboard]::SetText('${text}');` +
-        `[InFuKeys]::Paste();[System.Windows.Forms.Clipboard]::Clear();`;
+        `$old=[System.Windows.Forms.Clipboard]::GetDataObject();` +
+        `try{[System.Windows.Forms.Clipboard]::SetText('${text}');[InFuKeys]::Paste()}finally{` +
+        `if($null -ne $old){[System.Windows.Forms.Clipboard]::SetDataObject($old,$true)}else{[System.Windows.Forms.Clipboard]::Clear()}};`;
     }
-    execFileSync("powershell", ["-NoProfile", "-Command", script], { timeout: 15000, windowsHide: true });
+    await execFileAsync("powershell", ["-NoProfile", "-NonInteractive", "-Command", script], {
+      timeout: 15000,
+      windowsHide: true,
+      signal,
+    });
     return "OK";
   } catch (e) {
+    if (signal?.aborted) return "操作已取消";
     return `输入失败：${(e as Error).message.slice(0, 120)}`;
   }
 };
+(globalThis as Record<string, unknown>).__infuScreenInput = screenInput;
 
 /**
  * v3.3 computer use 补齐：窗口管理（PowerShell 零依赖）——

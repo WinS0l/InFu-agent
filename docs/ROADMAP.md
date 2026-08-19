@@ -18,6 +18,17 @@
 - **browser-use / computer-use 主流对齐复核**——基础 observe→act→verify 工具链已有（AX snapshot/JS eval/tab/viewport、UI tree/OCR/窗口/键鼠/拖拽）；本批修快照编号跨调用漂移、桌面 tab close 假成功、截图名穿越、截图/UIA 坐标双偏移、同步 PowerShell 冻结、输入覆盖剪贴板。屏幕输入/UIA 定稿为绝对物理坐标，截图附虚拟屏原点。
 - **依赖与验证**——`npm audit fix --package-lock-only` 后 `npm audit --omit=dev` 为 0 漏洞；`npm test` **51/51、1538 断言 0 失败**；根 build、agent/web/desktop tsc/build、lint 0 error 均过。MCP SDK 无 DNS connection pinning hook，当前每次连接前解析并拒绝私网，DNS rebinding TOCTOU 留作 transport 可替换时处理。
 
+### ✅ v6.3 computer-use 与流式兼容性回归修复（2026-08-19）
+- **computer-use 桥契约实锤并修复**——审计确认 agent `vision.ts` 已按异步 `{file, origin}`/`params[]`/`AbortSignal` 契约调用，而 Electron `main.ts` 仍为同步 `string`/rest 参数旧契约：真实桌面版 `screen_capture` 会解构字符串失败，click/move/drag 传入数组得到 NaN，scroll 误走输入分支。将契约提升至 `@infu/shared` 单一类型源，主进程与工具端都直接引用，三包 tsc 此后可拦截漂移；截图/输入 PowerShell 改 `execFile` 异步并透传 abort、移除 busy-wait；截图返回虚拟桌面原点，输入只接收 Agent 换算后的绝对物理坐标；`screen_type` 临时替换剪贴板后恢复用户原内容。
+- **流式兼容性**——`chat.ts` EOF 时冲刷 `TextDecoder` 并将未以空行结尾的残帧照常解析，兼容自定义网关直接关流；补 OpenAI 原生 `usage.prompt_tokens_details.cached_tokens` 解析（顶层 DeepSeek hit/miss 优先）。
+- **回归验证**——retry.test 新增 EOF 尾文/finish_reason/usage 与 OpenAI cached_tokens 3 断言；全量 **51/51、1541 断言 0 失败**，shared/agent/desktop tsc、web/desktop build、cargo check、lint 0 error 均过。
+
+### ✅ v6.4 工作台 UI 克制增强（2026-08-19）
+- **调研与原则**——对照 `E:\app\deepseek-harness` 的三栏壳、侧栏、消息流、设置与详情检查器，保留 InFu 已有多 Tab 右栏、Modal 焦点陷阱和多会话能力，不复制其较弱能力；延续 Dark OLED/运行绿，采用低噪声表面、统一密度和明确工作区层级。
+- **三栏与右栏**——聊天卡片与右栏恢复清晰边界；右栏 tab 条增加工作区标签、统一背景/分隔/活动表面及新建 Tab 按钮；空态由四个等价按钮升级为分层“工作区”入口卡（审查改动为主入口，浏览器/子 Agent/computer-use 为辅助入口），不改变现有浏览器常驻与 tab 生命周期。
+- **侧栏、聊天与设置**——侧栏新建会话提升为主按钮，技能/搜索降为次操作，区块标题/底部操作加边界，滚动条仅 hover 强调；聊天内容列收敛到 780px、消息节奏加宽，输入框 focus 表面与上方渐隐遮罩增强、工具行使用分隔线；设置面板扩大内容宽度，导航轨/标题/底栏以低对比层次重整。无 API 或状态模型改动。
+- **验证**——web tsc + vite build、根 build、desktop build、cargo check、全量 **51/51、1541 断言 0 失败**、lint 0 error 均过。
+
 ### ✅ v5.0 产品增强批（2026-08-18，审计建议清单全量落地——A1-A5/B1/B2/B4/C1-C4/A4/D3）
 - **A1 页面级 E2E 套件（补测试盲区）**——新 `tests/e2e-prod.test.ts`：真实服务器（staticDir=web/dist）+ playwright chromium 加载生产页面——API 层断言 CSP nonce 与注入脚本匹配 / 无令牌 401 / 带令牌 200 / 主题脚本与资源可加载；浏览器层断言页面零 401（CSP 回归的直接判据——v4.0 补 1 那类回归从此被自动拦截）/ 零 CSP 违规 / React 真实渲染 / theme-init.js 在 CSP 下执行（阻断 bundle 两阶段）/ 服务端配置主题管线。12 断言，入 npm test（43→44 套件）；startServer 补返回 httpServer（可 close）
 - **A2 命令审计 UI**——GET /api/audit（commands.log 尾段解析：时间/结果/cwd/命令/详情/沙箱档位，倒序 + 搜索 + 仅失败过滤）+ 设置「数据与统计 → 命令审计」Tab（AuditPane，过期响应守卫）

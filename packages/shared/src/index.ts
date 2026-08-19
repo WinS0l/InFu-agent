@@ -7,6 +7,20 @@
 export * from "./net.js";
 export * from "./sse.js";
 
+/** Desktop computer-use bridge contract shared by Electron and Agent tools. */
+export type DesktopScreenInputAction = "click" | "type" | "move" | "scroll" | "key" | "drag";
+export type DesktopScreenCapture = (
+  dir: string,
+  minimize?: boolean,
+  sessionId?: string,
+  signal?: AbortSignal,
+) => Promise<{ file: string; origin: { x: number; y: number } } | null>;
+export type DesktopScreenInput = (
+  action: DesktopScreenInputAction,
+  params: Array<string | number>,
+  signal?: AbortSignal,
+) => Promise<string>;
+
 /** 模型供应商类型（InFu 支持任意大模型） */
 export type ProviderKind =
   | "openai"

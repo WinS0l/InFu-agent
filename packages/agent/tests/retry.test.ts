@@ -56,6 +56,16 @@ const t1 = await collect({ messages: [], retry: { maxAttempts: 3, baseDelayMs: 1
 check("429 后重试拿到内容", t1 === "ok", t1);
 check("fetch 调用了 2 次", fetchCalls === 2, String(fetchCalls));
 
+// 1.5 EOF 残帧与 OpenAI 原生缓存 usage：部分兼容网关会在最后一个 data 帧后直接关闭连接。
+console.log("\n▶ EOF 残帧与原生缓存 usage");
+installFetch(() => sse('data: {"choices":[{"delta":{"content":"tail"},"finish_reason":"stop"}],"usage":{"prompt_tokens":100,"completion_tokens":20,"prompt_tokens_details":{"cached_tokens":40}}}'));
+const tailDeltas: ChatDelta[] = [];
+for await (const delta of streamChat({ baseURL: "http://test/v1", apiKey: "k", model: "m", messages: [] })) tailDeltas.push(delta);
+check("EOF 无空行尾帧正文不丢失", tailDeltas.some((d) => d.text === "tail"), JSON.stringify(tailDeltas));
+check("EOF 无空行尾帧 finish_reason 不丢失", tailDeltas.some((d) => d.finishReason === "stop"), JSON.stringify(tailDeltas));
+const tailUsage = tailDeltas.find((d) => d.usage)?.usage;
+check("OpenAI cached_tokens 计入缓存命中", tailUsage?.cacheHit === 40 && tailUsage.cacheMiss === 60, JSON.stringify(tailUsage));
+
 // 2. 5xx 重试耗尽抛错
 console.log("\n▶ 5xx 耗尽抛错");
 installFetch(() => new Response("boom", { status: 500 }));

@@ -168,6 +168,13 @@ body {
 ::-webkit-scrollbar-track { background: transparent; }
 * { scrollbar-width: thin; scrollbar-color: var(--scroll-thumb) transparent; }
 
+/* 侧栏仅在指针进入时强调滚动轨道，长会话列表仍保留稳定 gutter，避免行内容横跳。 */
+.sidebar-scroll::-webkit-scrollbar-thumb { background: transparent; transition: background-color 160ms var(--ease); }
+.sidebar-scroll:hover::-webkit-scrollbar-thumb { background: var(--scroll-thumb); }
+.sidebar-scroll:hover::-webkit-scrollbar-thumb:hover { background: var(--scroll-thumb-hover); }
+.sidebar-scroll { scrollbar-color: transparent transparent; }
+.sidebar-scroll:hover { scrollbar-color: var(--scroll-thumb) transparent; }
+
 /* 焦点可见（可访问性；信息蓝环） */
 :focus-visible {
   outline: 2px solid var(--info);

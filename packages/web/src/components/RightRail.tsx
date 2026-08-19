@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { useClickOutside } from "./useClickOutside";
-import { Bot, FileSearch, Globe, Monitor, X, Loader2, PanelRightClose, Plus } from "lucide-react";
+import { Bot, FileSearch, Globe, Monitor, X, Loader2, PanelRightClose, Plus, PanelsTopLeft } from "lucide-react";
 import { useStore, type RightTab } from "../store";
 import ReviewPane from "./ReviewPane";
 import SubagentThreadView from "./SubagentThreadView";
@@ -70,44 +70,46 @@ function SubagentsList() {
 function RightRailEmpty() {
   const openRightTab = useStore((s) => s.openRightTab);
   const btn =
-    "flex h-11 w-full cursor-pointer items-center justify-center gap-1.5 rounded-xl text-[13px] font-medium transition-all duration-150 active:scale-[0.98]";
+    "group flex min-h-[72px] w-full cursor-pointer items-center gap-3 rounded-xl border border-line bg-elevated px-3.5 text-left transition-all duration-150 hover:-translate-y-px hover:border-info/40 hover:bg-hover active:translate-y-0";
   return (
-    <div className="flex h-full flex-col items-center justify-center gap-1 px-6">
-      <div className="text-[24px] font-semibold leading-8 text-text">打开 Tab</div>
-      <div className="mb-5 text-[14px] leading-6 text-sub">选择要在侧面板中打开的 Tab</div>
-      <div className="w-full max-w-[240px] space-y-2">
+    <div className="flex h-full flex-col items-center justify-center px-5">
+      <div className="mb-5 w-full max-w-[272px]">
+        <div className="mb-2 flex h-9 w-9 items-center justify-center rounded-xl bg-info-soft text-info"><PanelsTopLeft className="h-4 w-4" /></div>
+        <div className="text-[18px] font-semibold tracking-tight text-text">工作区</div>
+        <div className="mt-1 text-[13px] leading-5 text-sub">在这里查看改动、浏览页面或跟踪并行任务。</div>
+      </div>
+      <div className="w-full max-w-[272px] space-y-2">
         <button
-          className={`${btn} bg-primary text-primary-fg shadow-lv1 hover:bg-primary-hover`}
+          className={`${btn} border-info/35 bg-info-soft/50 text-text hover:border-info/60`}
           onClick={() => openRightTab({ id: "review", kind: "review", label: "审查" })}
           title="查看代码改动（Diff）/ 文件改动记录 / 测试结果"
         >
-          <FileSearch className="h-4 w-4" />
-          审查
+          <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-info text-white shadow-lv1"><FileSearch className="h-4 w-4" /></span>
+          <span><span className="block text-[13px] font-semibold">审查改动</span><span className="mt-0.5 block text-xs text-sub">Diff、文件与测试结果</span></span>
         </button>
-        <div className="h-px w-full bg-line" />
         <button
-          className={`${btn} border border-line bg-hover text-text hover:-translate-y-px hover:border-info/60 hover:text-info`}
+          className={btn}
           onClick={() => openRightTab({ id: "browser", kind: "browser", label: "浏览器" })}
           title="浏览器面板（桌面版提供）"
         >
-          <Globe className="h-4 w-4" />
-          浏览器
+          <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-hover text-info group-hover:bg-info-soft"><Globe className="h-4 w-4" /></span>
+          <span><span className="block text-[13px] font-semibold text-text">浏览器</span><span className="mt-0.5 block text-xs text-sub">让 Agent 与页面实时协作</span></span>
         </button>
         <button
-          className={`${btn} border border-line bg-hover text-text hover:-translate-y-px hover:border-info/60 hover:text-info`}
+          className={btn}
           onClick={() => openRightTab({ id: "subagents", kind: "subagents", label: "子 Agent" })}
           title="查看子 Agent 列表与处理过程"
         >
-          <Bot className="h-4 w-4" />
-          子 Agent
+          <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-hover text-info group-hover:bg-info-soft"><Bot className="h-4 w-4" /></span>
+          <span><span className="block text-[13px] font-semibold text-text">子 Agent</span><span className="mt-0.5 block text-xs text-sub">查看委派任务与执行过程</span></span>
         </button>
         <button
-          className={`${btn} border border-line bg-hover text-text hover:-translate-y-px hover:border-info/60 hover:text-info`}
+          className={btn}
           onClick={() => openRightTab({ id: "computeruse", kind: "computeruse", label: "computer-use" })}
           title="桌面操作（截图 → 视觉理解 → 点击/输入；仅桌面版）"
         >
-          <Monitor className="h-4 w-4" />
-          computer-use
+          <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-hover text-info group-hover:bg-info-soft"><Monitor className="h-4 w-4" /></span>
+          <span><span className="block text-[13px] font-semibold text-text">computer-use</span><span className="mt-0.5 block text-xs text-sub">截图、输入与桌面操作记录</span></span>
         </button>
       </div>
     </div>
@@ -154,7 +156,7 @@ export default function RightRail({ onCollapse }: { onCollapse: () => void }) {
           滚动堆叠；➕ 改为超大加号、描述「新建 tab」
           v3.2：高度 60px → 3.25rem —— 与聊天 header / 侧栏 Logo 行统一（原生融合） */}
       <div
-        className="relative flex h-[3.25rem] shrink-0 items-end gap-1 px-2 pb-1.5 pr-[140px]"
+        className="relative flex h-[3.25rem] shrink-0 items-end gap-1 border-b border-line/80 bg-sidebar px-2 pb-1.5 pr-[140px]"
         style={{ WebkitAppRegion: "drag" } as React.CSSProperties}
       >
         {/* 折叠按钮（最左 + 窗口最顶部：self-end 顶对齐 = 与原生三按钮同一高度；no-drag 可点） */}
@@ -166,6 +168,7 @@ export default function RightRail({ onCollapse }: { onCollapse: () => void }) {
         >
           <PanelRightClose className="h-5 w-5" />
         </button>
+        <span className="mb-2 hidden shrink-0 text-[11px] font-medium tracking-wide text-caption min-[700px]:inline">工作区</span>
         {/* tab 滚动区（z-0：任何滚动内容都被裁剪在本容器内；到达右侧让位边界即滚动堆叠。
             v3.3 补 7：滚轮水平滑动——Windows 普通滚轮默认只滚垂直，tab 条横向溢出时
             滚轮事件转水平滚动（scrollLeft += deltaY），滑动机制真实可感）
@@ -184,9 +187,9 @@ export default function RightRail({ onCollapse }: { onCollapse: () => void }) {
           {rightTabs.map((t) => (
             <div
               key={t.id}
-              className={`group relative flex h-8 min-w-0 max-w-[140px] cursor-pointer items-center gap-1.5 rounded-t-lg px-2.5 text-[13px] transition-colors ${
+              className={`group relative flex h-8 min-w-0 max-w-[156px] cursor-pointer items-center gap-1.5 rounded-lg px-2.5 text-[13px] transition-colors ${
                 t.id === activeRightTab
-                  ? "bg-base text-text"
+                  ? "bg-elevated text-text shadow-lv1"
                   : "text-sub hover:bg-hover/70 hover:text-text"
               }`}
               onClick={() => setActiveRightTab(t.id)}
@@ -220,7 +223,7 @@ export default function RightRail({ onCollapse }: { onCollapse: () => void }) {
         <span className="relative mb-0.5 shrink-0">
           <button
             ref={plusRef}
-            className="flex h-9 w-9 cursor-pointer items-center justify-center rounded-lg text-text transition-colors hover:bg-hover hover:text-info"
+            className="flex h-9 w-9 cursor-pointer items-center justify-center rounded-lg border border-line bg-elevated text-sub transition-colors hover:border-info/40 hover:bg-hover hover:text-info"
             onClick={() => {
               if (newTabOpen) {
                 setNewTabOpen(false);

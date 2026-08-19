@@ -453,18 +453,18 @@ export default function Sidebar({ onOpenSettings, className = "" }: SidebarProps
       </div>
 
       {/* 主操作区：新建会话在最上方（全宽），下方技能 + 搜索并排（v3 用户定稿） */}
-      <div className="shrink-0 space-y-1 px-3 pb-1.5">
+      <div className="shrink-0 space-y-2 px-3 pb-2">
         <button
-          className="flex h-[38px] w-full cursor-pointer items-center justify-center gap-1.5 rounded-xl border border-line bg-elevated text-sm font-medium text-text shadow-lv1 transition-colors hover:bg-hover disabled:cursor-not-allowed disabled:opacity-40"
+          className="flex h-[38px] w-full cursor-pointer items-center justify-center gap-1.5 rounded-xl bg-primary text-sm font-semibold text-primary-fg shadow-lv1 transition-colors hover:bg-primary-hover disabled:cursor-not-allowed disabled:opacity-40"
           onClick={() => newSession()}
           title="新建会话（Ctrl+N；若当前 root 属于某项目则会话隶属该项目，否则为自由会话）"
         >
           <Plus className="h-3.5 w-3.5" />
           新建会话
         </button>
-        <div className="grid grid-cols-2 gap-1.5">
+        <div className="grid grid-cols-2 gap-2">
           <button
-            className="flex h-[38px] cursor-pointer items-center justify-center gap-1.5 rounded-xl border border-line bg-elevated text-sm font-medium text-text shadow-lv1 transition-colors hover:bg-hover"
+            className="flex h-[34px] cursor-pointer items-center justify-center gap-1.5 rounded-xl border border-line bg-elevated text-[13px] font-medium text-text transition-colors hover:border-info/30 hover:bg-hover"
             onClick={() => onOpenSettings("skills")}
             title="技能管理（设置 → Agent 能力 → 技能）"
           >
@@ -472,7 +472,7 @@ export default function Sidebar({ onOpenSettings, className = "" }: SidebarProps
             技能
           </button>
           <button
-            className={`flex h-[38px] cursor-pointer items-center justify-center gap-1.5 rounded-xl border text-sm font-medium transition-colors ${
+            className={`flex h-[34px] cursor-pointer items-center justify-center gap-1.5 rounded-xl border text-[13px] font-medium transition-colors ${
               searchOpen
                 ? "border-info/50 bg-info-soft text-info"
                 : "border-line bg-elevated text-text shadow-lv1 hover:bg-hover"
@@ -514,8 +514,8 @@ export default function Sidebar({ onOpenSettings, className = "" }: SidebarProps
       )}
 
       {/* 区标题行（主流 36px section header）：项目与会话 + 归档 + 分组/排序下拉 */}
-      <div className="flex h-9 shrink-0 items-center gap-1.5 px-3">
-        <span className="px-1 text-[13px] font-medium text-text">项目与会话</span>
+      <div className="flex h-10 shrink-0 items-center gap-1.5 border-y border-line/60 px-3">
+        <span className="px-1 text-[11px] font-semibold tracking-[0.08em] text-caption">项目与会话</span>
         <span className="ml-auto flex items-center gap-1.5">
           <IconBtn title="归档回收站（Archived：恢复 / 删除归档会话）" onClick={() => setArchiveOpen(true)}>
             <Archive className="h-3.5 w-3.5" />
@@ -568,7 +568,7 @@ export default function Sidebar({ onOpenSettings, className = "" }: SidebarProps
       </div>
 
       {/* 主体滚动区 */}
-      <div className="min-h-0 flex-1 overflow-y-auto px-1.5 pb-2">
+      <div className="sidebar-scroll min-h-0 flex-1 overflow-y-auto px-1.5 pb-2">
         {/* ── v3 单列表模式（分组方式 = 单列表）：全部会话一列，行内标注所属项目 ── */}
         {groupMode === "flat" ? (
           <>
@@ -797,9 +797,9 @@ export default function Sidebar({ onOpenSettings, className = "" }: SidebarProps
       </div>
 
       {/* 底部（v3：不占整个底部——工作树开关 + 设置并排；v3.3 补 5：去掉 border-t 细线） */}
-      <div className="flex shrink-0 items-center gap-1.5 px-2 py-1.5">
+      <div className="flex shrink-0 items-center gap-1.5 border-t border-line/60 px-2 py-2">
         <button
-          className={`flex h-[34px] shrink-0 cursor-pointer items-center gap-1.5 rounded-xl border px-2.5 text-[13px] font-medium transition-colors ${
+          className={`flex h-[34px] shrink-0 cursor-pointer items-center gap-1.5 rounded-xl border px-2.5 text-[12px] font-medium transition-colors ${
             useWorktree ? "border-info/40 bg-info-soft text-info" : "border-line bg-transparent text-sub hover:bg-hover hover:text-text"
           }`}
           onClick={() => setUseWorktree(!useWorktree)}
@@ -809,7 +809,7 @@ export default function Sidebar({ onOpenSettings, className = "" }: SidebarProps
           {useWorktree ? "工作树开" : "工作树关"}
         </button>
         <button
-          className="flex h-[34px] min-w-0 flex-1 cursor-pointer items-center gap-2 rounded-xl px-2.5 text-sm text-text transition-colors hover:bg-hover"
+          className="flex h-[34px] min-w-0 flex-1 cursor-pointer items-center gap-2 rounded-xl px-2.5 text-[13px] text-text transition-colors hover:bg-hover"
           onClick={() => onOpenSettings("general")}
           title="设置（基础设置 / Agent 能力 / 数据与统计）"
         >

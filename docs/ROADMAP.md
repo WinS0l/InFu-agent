@@ -30,7 +30,7 @@
   - **P0-2 autoCommit/autoVerify/autoRefine 设置 UI**——shared 三配置入 generalConfigSchema（zod 显式字段）+ 设置弹窗常规 Tab 三开关（自动提交/写后验证/自动沉淀，默认保持既有默认值）
   - **P0-3 junction 越界加固**——fs walker/readFile/writeFile/delete 全部走 isPathInside（junction 解析后比对 + FAIL_CLOSED 哨兵，空串哨兵撞车修复）+ isProtectedPath 同式收口；fs-tools 回归 48/0
   - **P0-4 SSRF 全局 env 后门移除**——webfetch/web_search 不再读 INFU_ALLOW_PRIVATE_URLS 环境变量（审计发现绕过门禁的后门），改模块级 setPrivateUrlAllowedForTests（仅测试）;web-tools 41/0
-  - **S1 写后自动验证**——`general.autoVerify`（默认关，纯增量）：edit_file/write_file 改动既有 .test.ts 套件后自动以 debug 模式仅跑被改套件（超时 180s 兜底，不阻塞主流程），结果附在工具结果回填给模型（自纠错闭环）；loop 内置调用（非插件钩子）；auto-verify.test.ts 17/0
+  - **S1 写后自动验证**——`general.autoVerify`（默认开：undefined=开，显式 false 才关；纯增量）：edit_file/write_file 改动既有 .test.ts 套件后自动以 debug 模式仅跑被改套件（超时 180s 兜底，不阻塞主流程），结果附在工具结果回填给模型（自纠错闭环）；loop 内置调用（非插件钩子）；auto-verify.test.ts 17/0
   - **D1/S2 上下文计数校准（补 6 前批遗留 ① 完成）**——`context.ts` recordUsageCalibration（每次成功轮 API 真实 usage 校准本地估算）/contextCalibrationFactor（EWMA α=0.3，比值钳制 [0.25,4]，按会话键）/compressMessages 第 5 参 calibrationFactor；loop.ts 成功轮并入校准 + ensureContextBudget 早退与压缩乘因子。**顺带根治真实缺陷**：校准因子放大后单条估算 > target−512 时 compressMessages 原实现永不压缩（触发即失败）→ keepFrom 回退保底至少压缩一条；compress 套件 50/0（含校准 8 断言）
   - **S3 Agent Team 拆解纪律**——DEFAULT_SYSTEM_PROMPT 加「Agent Team（v6.0 S3）」14-16 条（复杂任务拆解并行委派、团队间无共享写冲突、小任务不拆）+ delegate_task 描述同步团队并行语义（tasks 数组最多 6 个并行）
   - **S4 成本预算守卫**——`general.taskTokenBudget`（tokens，0=不限制）+ CLI `--budget`（覆盖 config）：累计**真实 API usage**（prompt+completion）达预算优雅停止（不再发新模型调用，本轮已请求工具照常执行，error 事件 + 明确文案）；编排模式跨阶段扣减（remainBudget 随 usageAgg 累计）；server/scheduler 从 config 下发；budget.test.ts 15/0

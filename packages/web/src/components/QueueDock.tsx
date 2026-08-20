@@ -10,7 +10,9 @@ import { sendChat } from "../api";
  * 拖拽手柄可调整发送顺序。
  */
 export default function QueueDock() {
-  const { activeSessionId, queuesBySession, runningIds } = useStore();
+  const activeSessionId = useStore((s) => s.activeSessionId);
+  const queuesBySession = useStore((s) => s.queuesBySession);
+  const runningIds = useStore((s) => s.runningIds);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editText, setEditText] = useState("");
   const [dragIdx, setDragIdx] = useState<number | null>(null);

@@ -65,6 +65,9 @@ import { detectDangerousTerminalCommand, auditTerminalCommand } from "./terminal
 
 const execFileAsync = promisify(execFile);
 
+const MAX_ATTACHMENT_BYTES = 16 * 1024 * 1024;
+const MAX_ATTACHMENT_TOTAL_BYTES = 32 * 1024 * 1024;
+
 /** git 命令辅助（cwd = 主仓库） */
 async function git(root: string, args: string[]): Promise<string> {
   const { stdout } = await execFileAsync("git", args, { cwd: root, windowsHide: true, encoding: "utf8", maxBuffer: 8 * 1024 * 1024 });
@@ -1167,6 +1170,14 @@ const pendingQuestions = new Map<string, { sessionId: string; resolve: (answer: 
       const attachmentImages: string[] = Array.isArray(body.images)
         ? body.images.filter((x: unknown): x is string => typeof x === "string" && x.startsWith("data:image/"))
         : [];
+      const decodedBase64Bytes = (data: string) => Math.floor(data.length * 3 / 4);
+      const uploadedBytes = rawFiles.reduce((n, f) => n + (typeof f.data === "string" ? decodedBase64Bytes(f.data) : 0), 0);
+      const imageBytes = attachmentImages.reduce((n, data) => n + decodedBase64Bytes(data.slice(data.indexOf(",") + 1)), 0);
+      if (uploadedBytes > MAX_ATTACHMENT_TOTAL_BYTES || imageBytes > MAX_ATTACHMENT_TOTAL_BYTES || uploadedBytes + imageBytes > MAX_ATTACHMENT_TOTAL_BYTES || rawFiles.some((f) => typeof f.data === "string" && decodedBase64Bytes(f.data) > MAX_ATTACHMENT_BYTES)) {
+        await stream.writeSSE({ event: "error", data: JSON.stringify({ message: "附件总大小超过 32MB，或单个文件超过 16MB" }) });
+        stopHeartbeat();
+        return;
+      }
 
       // 停止支持：客户端断开连接时中止 Agent 循环
       const controller = new AbortController();
@@ -1186,6 +1197,7 @@ const pendingQuestions = new Map<string, { sessionId: string; resolve: (answer: 
 
       if (!prompt) {
         await stream.writeSSE({ event: "error", data: JSON.stringify({ message: "prompt 不能为空" }) });
+        stopHeartbeat();
         return;
       }
 
@@ -1205,10 +1217,12 @@ const pendingQuestions = new Map<string, { sessionId: string; resolve: (answer: 
       // v2.6.2 修复：root 必须为已存在目录——不存在/为空直接报错，避免 Agent 在错误目录静默空转
       if (!execRoot.trim()) {
         await stream.writeSSE({ event: "error", data: JSON.stringify({ message: "请先在侧栏选择/创建项目（root 为空）" }) });
+        stopHeartbeat();
         return;
       }
       if (!fs.existsSync(execRoot) || !fs.statSync(execRoot).isDirectory()) {
         await stream.writeSSE({ event: "error", data: JSON.stringify({ message: `项目根目录不存在：${execRoot}——请先在侧栏选择/创建项目` }) });
+        stopHeartbeat();
         return;
       }
       // Explicitly selected folders are registered before use; every subsequent API/root path
@@ -1216,17 +1230,20 @@ const pendingQuestions = new Map<string, { sessionId: string; resolve: (answer: 
       if (body.root && !authorizedRoot(root)) {
         if (isProtectedPath(path.resolve(root))) {
           await stream.writeSSE({ event: "error", data: JSON.stringify({ message: "项目根目录位于受保护区域，拒绝使用" }) });
+          stopHeartbeat();
           return;
         }
         const registered = createProject(root);
         if (!registered.ok && !findProjectByRoot(root)) {
           await stream.writeSSE({ event: "error", data: JSON.stringify({ message: `项目根目录未授权：${registered.message}` }) });
+          stopHeartbeat();
           return;
         }
       }
       const safeRoot = authorizedRoot(root);
       if (!safeRoot || isProtectedPath(path.resolve(execRoot)) || !isPathInside(safeRoot, execRoot)) {
         await stream.writeSSE({ event: "error", data: JSON.stringify({ message: "项目根目录或执行目录未授权" }) });
+        stopHeartbeat();
         return;
       }
       root = safeRoot;
@@ -1241,6 +1258,7 @@ const pendingQuestions = new Map<string, { sessionId: string; resolve: (answer: 
         const s = store.getSession(sessionId);
         if (!s) {
           await stream.writeSSE({ event: "error", data: JSON.stringify({ message: `会话不存在: ${sessionId}` }) });
+          stopHeartbeat();
           return;
         }
         // v3.1 多会话并行：仅禁止同一会话并发双流（不同会话可同时跑任务）；
@@ -1252,6 +1270,7 @@ const pendingQuestions = new Map<string, { sessionId: string; resolve: (answer: 
               message: `该会话的任务仍在运行中——请先停止它（或等任务结束后）再发送；如需并行任务请切换到其他会话`,
             }),
           });
+          stopHeartbeat();
           return;
         }
         // v2.13：双发 TOCTOU 修复——检查通过后**立即**置 running（检查与置位之间隔着
@@ -1319,6 +1338,7 @@ const pendingQuestions = new Map<string, { sessionId: string; resolve: (answer: 
         }
       } catch (e) {
         await stream.writeSSE({ event: "error", data: JSON.stringify({ message: `附件暂存失败：${(e as Error).message}` }) });
+        stopHeartbeat();
         return;
       }
       // v3.0 批 12：桌面版路径引用——校验存在后直接引用原路径（不复制）
@@ -1368,6 +1388,7 @@ const pendingQuestions = new Map<string, { sessionId: string; resolve: (answer: 
           event: "error",
           data: JSON.stringify({ message: `项目根目录不存在或不是目录: ${root}（请检查输入框里的路径是否正确，使用绝对路径）` }),
         });
+        stopHeartbeat();
         return;
       }
 
@@ -1398,6 +1419,7 @@ const pendingQuestions = new Map<string, { sessionId: string; resolve: (answer: 
           if (rawFiles.length) fs.rmSync(attachDir, { recursive: true, force: true });
         } catch { /* 清理失败忽略 */ }
         await stream.writeSSE({ event: "error", data: JSON.stringify({ message: "未配置模型，请先配置 ~/.infu/config.json" }) });
+        stopHeartbeat();
         return;
       }
       // v3.0 批 12 修复：v2 供应商凭据迁移后 `m.apiKey` 恒为 undefined（key 在 provider 层）

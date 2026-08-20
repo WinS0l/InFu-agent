@@ -291,7 +291,7 @@ export interface AppearanceConfig {
   /** 流式输出光标动画（缺省 true） */
   streamCursor?: boolean;
   /** 主题（v2.8：深/浅，缺省 dark；桌面端标题栏 overlay 配色联动） */
-  theme?: "light" | "dark";
+  theme?: "light" | "dark" | "system";
 }
 
 /** 记忆设置（v2.7：记忆系统开关；v3.5 加自动提炼） */
@@ -351,6 +351,14 @@ export type RiskLevel = "low" | "medium" | "high";
 /** 分层编排的阶段 */
 export type PhaseId = "planner" | "executor" | "reviewer";
 
+/** 任务交付的可机读摘要：只来自工具、Todo 与审批结果，UI 不解析模型回复猜测状态。 */
+export interface DeliverySummary {
+  changedFiles: number;
+  completedItems: string[];
+  pendingItems: string[];
+  verification: "not-run" | "passed" | "failed";
+}
+
 /**
  * Agent 过程事件（CLI 打印 / SSE 推送前端；v2.1 起全量落库 ~/.infu/infu.db）。
  * v2.5：过程事件（text/step/tool/审批/降级/压缩）可携带可选 `subagentId`——
@@ -372,7 +380,7 @@ export type AgentEvent =
   | { type: "report"; content: string }
   | { type: "review"; content: string }
   | { type: "plan"; id: string; content: string }
-  | { type: "done"; text: string; toolCount: number; steps: number; usage?: { cacheHit: number; cacheMiss: number; promptTokens: number; completionTokens: number } }
+  | { type: "done"; text: string; toolCount: number; steps: number; usage?: { cacheHit: number; cacheMiss: number; promptTokens: number; completionTokens: number }; delivery?: DeliverySummary }
   | { type: "error"; message: string }
   // ── v2.2 模型可靠性新增 ──
   /** 模型降级切换（主模型失败 → 备用模型；Timeline 展示与审计） */

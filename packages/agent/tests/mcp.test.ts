@@ -368,9 +368,9 @@ console.log("\n▶ mcp_register 自注册");
     check("id 生成（中文名兜底空）", mcpIdFromName("文件系统") === "");
 
     // 校验失败
-    const r1 = registerMcpServer({ name: "x", type: "stdio" });
+    const r1 = await registerMcpServer({ name: "x", type: "stdio" });
     check("stdio 缺 command 拒绝", !r1.ok && (r1 as any).message.includes("command"));
-    const r2 = registerMcpServer({ name: "x", type: "http" });
+    const r2 = await registerMcpServer({ name: "x", type: "http" });
     check("http 缺 url 拒绝", !r2.ok && (r2 as any).message.includes("url"));
 
     // 成功注册 + 白名单约束（只动 mcpServers，其他字段保留）
@@ -384,7 +384,7 @@ console.log("\n▶ mcp_register 自注册");
       customFuture: { keep: true },
       approvalPolicy: { mode: "confirm" },
     }, null, 2), "utf-8");
-    const r3 = registerMcpServer({
+    const r3 = await registerMcpServer({
       name: "filesystem", type: "stdio", command: "npx.cmd",
       args: ["-y", "srv"], riskOverrides: { "read*": "low" },
     });
@@ -397,7 +397,7 @@ console.log("\n▶ mcp_register 自注册");
     check("version 保留", saved.version === 2);
 
     // 重名拒绝
-    const r4 = registerMcpServer({ name: "filesystem", type: "stdio", command: "x" });
+    const r4 = await registerMcpServer({ name: "filesystem", type: "stdio", command: "x" });
     check("重名拒绝", !r4.ok && (r4 as any).message.includes("已存在"));
 
     // 工具层：审批触发（high + requireExplicit）与拒绝路径
@@ -419,7 +419,7 @@ console.log("\n▶ mcp_register 自注册");
 
     // 工具层：批准 → 写入成功
     const ctxT2 = { ...ctxT, requestApproval: async () => true };
-    const out2 = await t.execute({ name: "approved", type: "http", url: "https://x/mcp" }, ctxT2);
+    const out2 = await t.execute({ name: "approved", type: "stdio", command: "node" }, ctxT2);
     check("批准后注册成功", out2.includes("已注册") && JSON.parse(readFileSync(CONFIG2, "utf-8")).mcpServers.some((s: any) => s.id === "approved"));
   } finally {
     // v3.6：无需恢复——config 已重定向到临时数据目录，随 tmpData 一并清理

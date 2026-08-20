@@ -97,7 +97,9 @@ export function migrateDataDir(targetRaw: string): MigrateResult {
   // 写入重定向指针（旧位置 homedir 根固定文件；旧 ~/.infu 保留完整备份）
   try {
     mkdirSync(join(homedir()), { recursive: true });
-    writeFileSync(REDIRECT_FILE, JSON.stringify({ dir: target }, null, 2), "utf-8");
+    const tmp = `${REDIRECT_FILE}.tmp-${process.pid}`;
+    writeFileSync(tmp, JSON.stringify({ dir: target }, null, 2), "utf-8");
+    renameSync(tmp, REDIRECT_FILE);
   } catch (e) {
     return { ok: false, message: `指针写入失败：${(e as Error).message}`, from: cur };
   }
@@ -113,12 +115,12 @@ export function migrateDataDir(targetRaw: string): MigrateResult {
 /** 目标路径合法性校验（返回错误文案；null = 通过） */
 export function validateTarget(target: string, cur: string): string | null {
   if (!target || !isAbsolute(target)) return "路径必须为绝对路径（如 D:\\InFuData）";
-  if (target === cur) return "新路径与当前数据目录相同";
-  if (target === homedir() || target === resolve(homedir())) return "不能选择用户主目录本身";
+  const norm = (p: string) => p.toLowerCase().replace(/[\\/]+$/, "");
+  if (norm(target) === norm(cur)) return "新路径与当前数据目录相同";
+  if (norm(target) === norm(homedir())) return "不能选择用户主目录本身";
   const rootLen = process.platform === "win32" ? 3 : 1;
   if (target.length <= rootLen) return "不能选择磁盘根目录";
   // 目标不能是当前数据目录的子目录（迁移嵌套自身会无限递归复制）
-  const norm = (p: string) => p.toLowerCase().replace(/[\\/]+$/, "");
   if (norm(target).startsWith(norm(cur) + "\\") || norm(target).startsWith(norm(cur) + "/")) {
     return "不能迁移到当前数据目录内部";
   }

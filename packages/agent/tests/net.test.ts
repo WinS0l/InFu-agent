@@ -81,6 +81,7 @@ check("ff02::1 组播私有", priv("ff02::1"));
 check("公网 IPv6 2001:4860:4860::8888 非私有", pub("2001:4860:4860::8888"));
 check("公网 IPv6 hex mapped ::ffff:8.8.8.8 非私有", pub("::ffff:8.8.8.8"));
 check("域名返回 null（需 DNS）", isPrivateHostText("example.com") === null);
+check("纯 hex 标签域名不误判私有", isPrivateHostText("dead.beef") === null);
 // v3.9 审计修复（M2）：FQDN 尾点归一（`localhost.` / `127.0.0.1.` 与无尾点等价）
 check("127.0.0.1. 尾点私有", priv("127.0.0.1."));
 check("127.1. 尾点简写私有", priv("127.1."));

@@ -182,7 +182,10 @@ export function writeMemory(
     } else {
       const now = new Date();
       const stamp = `${now.toISOString().slice(0, 10)} ${now.toTimeString().slice(0, 5)}`;
-      fs.appendFileSync(p, `\n---\n\n## ${stamp}（Agent 记录）\n\n${content.trim()}\n`, "utf-8");
+      const existing = fs.readFileSync(p, "utf-8");
+      const tmp = `${p}.tmp-${process.pid}`;
+      fs.writeFileSync(tmp, `${existing}\n---\n\n## ${stamp}（Agent 记录）\n\n${content.trim()}\n`, "utf-8");
+      fs.renameSync(tmp, p);
     }
     return { ok: true, message: `已写入${scope === "global" ? "全局" : "项目"}记忆 ${topic.trim()}.md（${mode === "replace" ? "覆盖" : "追加"}）` };
   } catch (e) {

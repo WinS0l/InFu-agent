@@ -9,7 +9,7 @@
  */
 import { randomUUID } from "node:crypto";
 import { join } from "node:path";
-import { existsSync, mkdirSync, readFileSync, writeFileSync, copyFileSync, renameSync, rmSync, statSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync, copyFileSync, renameSync, rmSync, statSync, utimesSync } from "node:fs";
 import { cleanupOldBackups } from "./cleanup.js";
 import { resolveDataDir } from "./data-dir.js";
 
@@ -43,7 +43,11 @@ function withSchedulesLock<T>(fn: () => T): T {
       Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 25);
     }
   }
-  try { return fn(); } finally { try { rmSync(lock, { recursive: true, force: true }); } catch { /* ignore */ } }
+  const lease = setInterval(() => { try { utimesSync(lock, new Date(), new Date()); } catch { /* release raced */ } }, 5_000);
+  try { return fn(); } finally {
+    clearInterval(lease);
+    try { rmSync(lock, { recursive: true, force: true }); } catch { /* ignore */ }
+  }
 }
 
 function isValidEntry(x: unknown): x is ScheduleEntry {

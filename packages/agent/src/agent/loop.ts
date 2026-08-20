@@ -13,7 +13,7 @@
  * 终态事件（report/done）由编排层统一汇总发出。
  */
 
-import type { AgentEvent, PhaseId, ProviderKind, RiskLevel, ToolContext, ToolDef, HookFn, ToolHookInput } from "@infu/shared";
+import type { AgentEvent, DeliverySummary, PhaseId, ProviderKind, RiskLevel, ToolContext, ToolDef, HookFn, ToolHookInput } from "@infu/shared";
 import { randomUUID } from "node:crypto";
 import { streamChatWithFailover, ModelChain, type ModelCandidate } from "../providers/gateway.js";
 import { zodToJsonSchema, isContextWindowExceeded, type ChatMessageLike } from "../providers/chat.js";
@@ -28,6 +28,7 @@ import { currentApprovalPolicy, isToolDisabled, resolveToolRisk } from "../appro
 // finally 清全部 depth<0，此处互补清本级——修复子智能体/定时任务内部启动的后台任务孤儿）
 import { abortBackgroundAgentsByDepth } from "./subagent.js";
 import { abortJobsByDepth } from "../tools/jobs.js";
+import { getTodos } from "../tools/task-tools.js";
 // v6.0（S1）：写后自动验证（写工具成功后自动跑测试，结果回填模型）
 import { maybeAutoVerify } from "./auto-verify.js";
 
@@ -117,6 +118,37 @@ export interface RunResult {
   toolLogs: Array<{ tool: string; args: Record<string, unknown>; ok: boolean; summary: string }>;
   /** v3：LLM usage 聚合（DeepSeek 缓存命中统计 → StatsLine 命中率；v2.12 四桶） */
   usage?: { cacheHit: number; cacheMiss: number; promptTokens: number; completionTokens: number };
+}
+
+/** 从已执行工具、Todo 与审批结果生成交付摘要；绝不从模型回复文本推断任务状态。 */
+export function buildDeliverySummary(input: {
+  toolLogs: RunResult["toolLogs"];
+  todos: Array<{ text: string; status: "pending" | "in_progress" | "completed" }>;
+  approvals: RunResult["approvals"];
+}): DeliverySummary {
+  const changedPaths = new Set<string>();
+  let testsRun = 0;
+  let testsFailed = 0;
+  for (const log of input.toolLogs) {
+    if ((log.tool === "write_file" || log.tool === "edit_file") && log.ok && typeof log.args.path === "string") changedPaths.add(log.args.path);
+    if (log.tool === "run_test") {
+      testsRun++;
+      if (!log.ok) testsFailed++;
+    }
+  }
+  return {
+    changedFiles: changedPaths.size,
+    completedItems: input.todos.filter((item) => item.status === "completed").map((item) => item.text),
+    pendingItems: [
+      ...input.todos.filter((item) => item.status !== "completed").map((item) => item.text),
+      ...(input.approvals.denied > 0 ? [`${input.approvals.denied} 项审批未获批准`] : []),
+    ],
+    verification: testsRun === 0 ? "not-run" : testsFailed > 0 ? "failed" : "passed",
+  };
+}
+
+function deliveryFor(result: Pick<RunResult, "toolLogs" | "approvals">, ctx: Pick<ToolContext, "root" | "sessionId">): DeliverySummary {
+  return buildDeliverySummary({ toolLogs: result.toolLogs, approvals: result.approvals, todos: getTodos(ctx.root, ctx.sessionId) });
 }
 
 /** A tool generally signals an operational failure with these result prefixes rather than throwing. */
@@ -801,9 +833,10 @@ export async function runAgent(opts: AgentRunOptions): Promise<RunResult> {
 
     if (!calls.length) {
       const finalText = text;
-      // v3.0 批 12：done 携带 usage（统计按天真实用量；无 usage 数据回退字符估算）
-      if (!suppressFinal) emit({ type: "done", text: finalText, toolCount, steps: step + 1, usage });
-      return { text: finalText, steps: step + 1, toolCount, approvals, toolLogs, usage };
+      const result = { text: finalText, steps: step + 1, toolCount, approvals, toolLogs, usage };
+      // done carries a structured delivery summary so clients never infer outcome from prose.
+      if (!suppressFinal) emit({ type: "done", text: finalText, toolCount, steps: step + 1, usage, delivery: deliveryFor(result, ctx) });
+      return result;
     }
 
     // 3) 执行工具（含审批；v2.3 批 2 函数式钩子：preToolUse 拦截/改参，postToolUse 改结果）

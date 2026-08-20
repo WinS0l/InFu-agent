@@ -72,7 +72,7 @@ export default function ReviewPane() {
     const root = useWorktree && worktree && norm(worktree.path).startsWith(`${norm(rawRoot)}\\.infu\\worktrees\\`)
       ? worktree.path
       : rawRoot;
-  const { messages } = useStore();
+  const messages = useStore((s) => s.messages);
   const lastTest = [...messages]
     .reverse()
     .flatMap((m) => m.tools)

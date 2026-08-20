@@ -6,8 +6,8 @@ import {
   CheckCircle2, XCircle, OctagonX, Skull, Command, ListTree, Bot, Activity,
 } from "lucide-react";
 import { Streamdown } from "streamdown";
-import type { PhaseId } from "@infu/shared";
-import { useStore, type ChatMsg } from "../store";
+import type { DeliverySummary, PhaseId } from "@infu/shared";
+import { useStore, type ChatMsg, type ToolEventState } from "../store";
 import { sendChat, mergeWorktree, discardWorktree, rewindSession, fetchProjects, fetchConfig, updateConfig, fetchPlugins, setApprovalBypass, fetchReviewFiles, type ApprovalMode, type ChatFileInput, type PluginInfo, egressAllow, egressDisallow } from "../api";
 import Timeline from "./Timeline";
 import ReasoningBlock from "./ReasoningBlock";
@@ -165,18 +165,16 @@ function ActivityDock({ visible }: { visible: boolean }) {
     window.addEventListener("pointerup", onUp);
   };
   if (!visible || viewMode === "code") return null;
-  return <div ref={dockRef} className="absolute z-40 select-none" style={position ? { left: position.x, top: position.y } : { right: 16, top: 12 }} onPointerDown={resetIdle}>
+  return <div ref={dockRef} className="absolute right-4 top-2 z-40 select-none" onPointerDown={resetIdle}>
     <div
-      onPointerDown={beginDrag}
-      onDoubleClick={() => { if (!moved.current) { resetIdle(); setMenuOpen((v) => !v); } }}
-      onClick={() => { if (moved.current) return; resetIdle(); if (compact) setCompact(false); }}
-      className={`task-capsule group inline-flex cursor-grab touch-none items-center rounded-full border bg-elevated/95 text-text backdrop-blur transition-[height,padding,box-shadow,transform] duration-300 active:cursor-grabbing ${compact ? "h-8 w-8 justify-center" : "h-8 max-w-[144px] px-1.5"} ${active ? "border-info/45" : "border-line hover:border-info/25"}`}
-      title="拖拽移动 · 双击展开任务菜单"
+      onClick={() => { resetIdle(); setMenuOpen((v) => !v); }}
+      className={`task-capsule group inline-flex h-7 max-w-[180px] cursor-pointer items-center rounded-full border bg-elevated/95 px-1.5 text-text backdrop-blur transition-[box-shadow,transform] duration-150 ${active ? "border-info/45" : "border-line hover:border-info/25"}`}
+      title="打开会话状态"
     >
       <span className={`flex h-5 w-5 shrink-0 items-center justify-center rounded-full shadow-none ${active ? "bg-info text-white" : "bg-hover text-sub"}`}>{active ? <Loader2 className="h-3 w-3 animate-spin" /> : <Activity className="h-3 w-3" />}</span>
-      {!compact && <span key={capsuleText} className="task-capsule-text ml-1.5 max-w-[112px] truncate text-[11px] font-semibold">{capsuleText}</span>}
+      <span key={capsuleText} className="task-capsule-text ml-1.5 max-w-[144px] truncate text-[11px] font-semibold">{capsuleText}</span>
     </div>
-    {menuOpen && !compact && <div className="task-capsule-menu absolute right-0 top-[calc(100%+8px)] w-[286px] overflow-hidden rounded-2xl border border-line bg-elevated">
+    {menuOpen && <div className="task-capsule-menu absolute right-0 top-[calc(100%+8px)] w-[286px] overflow-hidden rounded-2xl border border-line bg-elevated">
       <div className="flex items-center gap-2 px-3.5 pb-2 pt-3"><span className={`flex h-6 w-6 items-center justify-center rounded-lg ${active ? "bg-info-soft text-info" : "bg-hover text-sub"}`}>{active ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Activity className="h-3.5 w-3.5" />}</span><span className="min-w-0 flex-1 truncate text-[12px] font-semibold text-text">{sessionTitle}</span></div>
       <div className="max-h-52 space-y-1 overflow-y-auto px-1.5 pb-1.5">
         {activity.jobs.map(([id, job]) => <div key={id} className="flex items-center gap-2 rounded-xl px-2.5 py-2 text-[12px] text-sub"><span className="text-warn"><Command className="h-3.5 w-3.5" /></span><span className="min-w-0 flex-1"><span className="block truncate text-text">{job.command}</span><span className="block text-[10px] text-caption">后台命令 · 已运行 {fmtDuration(job.startedAt)}</span></span></div>)}
@@ -370,6 +368,26 @@ function StructuredBlock({ content, tone }: { content: string; tone: "success" |
   );
 }
 
+/** 基于已执行工具的交付摘要；不读取或解析模型最终自然语言。 */
+function DeliverySummaryCard({ tools, delivery }: { tools: ToolEventState[]; delivery?: DeliverySummary }) {
+  const changed = new Set(tools.filter((tool) => tool.status === "ok" && (tool.tool === "write_file" || tool.tool === "edit_file")).map((tool) => String(tool.args.path ?? "")).filter(Boolean));
+  const tests = tools.filter((tool) => tool.tool === "run_test");
+  const changedFiles = delivery?.changedFiles ?? changed.size;
+  if (!changedFiles && !tests.length && !delivery) return null;
+  const failed = delivery ? delivery.verification === "failed" : tests.some((tool) => tool.status === "error");
+  const verification = delivery ? (delivery.verification === "not-run" ? "未运行测试" : delivery.verification === "failed" ? "测试失败" : "测试通过") : !tests.length ? "未运行测试" : failed ? "测试失败" : "测试通过";
+  return (
+    <div className="mb-4 rounded-xl border border-line/80 bg-elevated/55 p-3">
+      <div className="flex items-center gap-2 text-[13px] font-semibold text-text"><CheckCircle2 className="h-4 w-4 text-success" />交付摘要</div>
+      <div className="mt-2 grid grid-cols-3 gap-2 text-[12px]">
+        <div className="rounded-lg bg-hover/70 px-2 py-1.5 text-sub"><span className="block text-[10px] text-caption">改动文件</span><span className="font-medium text-text">{changedFiles} 个</span></div>
+        <div className="rounded-lg bg-hover/70 px-2 py-1.5 text-sub"><span className="block text-[10px] text-caption">验证</span><span className={failed ? "font-medium text-danger" : "font-medium text-text"}>{verification}</span></div>
+        <div className="rounded-lg bg-hover/70 px-2 py-1.5 text-sub"><span className="block text-[10px] text-caption">下一步</span><span className="font-medium text-text">{failed ? "查看失败测试" : "审查改动"}</span></div>
+      </div>
+    </div>
+  );
+}
+
 /** 运行耗时时钟（主流 状态行样式，1s 一跳） */
 function ElapsedClock({ active }: { active: boolean }) {
   const [start] = useState(() => Date.now());
@@ -399,7 +417,9 @@ function classifyError(msg: string): { label: string; cls: string } | null {
  *  v3.2：中文 1 字符 ≈ 1 token、其他 ≈ 4 字符 1 token（与后端 estimateTokens 同式——
  *  InFu 会话以中文为主，字符/4 会严重低估） */
 function useContextEstimate() {
-  const { messages, modelId, models } = useStore();
+  const messages = useStore((s) => s.messages);
+  const modelId = useStore((s) => s.modelId);
+  const models = useStore((s) => s.models);
   let cn = 0;
   let other = 0;
   for (const m of messages) {
@@ -424,7 +444,11 @@ function useContextEstimate() {
  */
 const EGRESS_DURATIONS = [5, 10, 30, 60, 120];
 function EgressPill() {
-  const { egressUntil, egressMinutes, setEgress, activeSessionId, approvalMode } = useStore();
+  const egressUntil = useStore((s) => s.egressUntil);
+  const egressMinutes = useStore((s) => s.egressMinutes);
+  const setEgress = useStore((s) => s.setEgress);
+  const activeSessionId = useStore((s) => s.activeSessionId);
+  const approvalMode = useStore((s) => s.approvalMode);
   const [menuOpen, setMenuOpen] = useState(false);
   const ref = useRef<HTMLSpanElement>(null);
   const [, forceTick] = useState(0);
@@ -568,13 +592,33 @@ function ContextMeter() {  const { estTokens, window, pct } = useContextEstimate
 
 /** 中间栏（v3：——Hero 光晕空态 / 右侧气泡 / 无气泡助手 / 折叠工具行 / 悬浮胶囊输入） */
 export default function ChatPanel() {
-  const {
-    messages, running, runningIds, abortRun, worktree, worktreeNote, root, setRoot, clearWorktree, plan,
-    useWorktree, setUseWorktree, activeSessionId, models, modelId, setModelId,
-    thinkingLevel, setThinkingLevel, pendingRollback, setPendingRollback, clearPendingRollback,
-    terminalOpen, setTerminalOpen, viewMode, queuesBySession,
-  } = useStore();
+  const messages = useStore((s) => s.messages);
+  const running = useStore((s) => s.running);
+  const runningIds = useStore((s) => s.runningIds);
+  const abortRun = useStore((s) => s.abortRun);
+  const worktree = useStore((s) => s.worktree);
+  const worktreeNote = useStore((s) => s.worktreeNote);
+  const root = useStore((s) => s.root);
+  const setRoot = useStore((s) => s.setRoot);
+  const clearWorktree = useStore((s) => s.clearWorktree);
+  const plan = useStore((s) => s.plan);
+  const useWorktree = useStore((s) => s.useWorktree);
+  const setUseWorktree = useStore((s) => s.setUseWorktree);
+  const activeSessionId = useStore((s) => s.activeSessionId);
+  const models = useStore((s) => s.models);
+  const modelId = useStore((s) => s.modelId);
+  const setModelId = useStore((s) => s.setModelId);
+  const thinkingLevel = useStore((s) => s.thinkingLevel);
+  const setThinkingLevel = useStore((s) => s.setThinkingLevel);
+  const pendingRollback = useStore((s) => s.pendingRollback);
+  const setPendingRollback = useStore((s) => s.setPendingRollback);
+  const clearPendingRollback = useStore((s) => s.clearPendingRollback);
+  const terminalOpen = useStore((s) => s.terminalOpen);
+  const setTerminalOpen = useStore((s) => s.setTerminalOpen);
+  const viewMode = useStore((s) => s.viewMode);
+  const queuesBySession = useStore((s) => s.queuesBySession);
   const [input, setInput] = useState("");
+  const [executionDetailsOpen, setExecutionDetailsOpen] = useState(false);
   const [wtBusy, setWtBusy] = useState(false);
   // v2.14 批 9：回滚完成提示（3 秒自动消失，主题样式）
   const [rollbackToast, setRollbackToast] = useState<string | null>(null);
@@ -606,6 +650,7 @@ export default function ChatPanel() {
   const approvalMode = useStore((s) => s.approvalMode);
   const setApprovalMode = useStore((s) => s.setApprovalMode);
   const [approvalOpen, setApprovalOpen] = useState(false);
+  const [executionSettingsOpen, setExecutionSettingsOpen] = useState(false);
   const [modelOpen, setModelOpen] = useState(false);
   // v3.1 附件：草稿列表 + 添加菜单 + 隐藏文件/文件夹选择器
   const [attachments, setAttachments] = useState<AttachmentDraft[]>([]);
@@ -628,10 +673,20 @@ export default function ChatPanel() {
   // v3.0 批 12：下拉栏点击空白处自动收起（审批/模型/思考/附件）
   const composerRef = useClickOutsideAll([
     () => setApprovalOpen(false),
+    () => setExecutionSettingsOpen(false),
     () => setModelOpen(false),
     () => setThinkOpen(false),
     () => setAttachOpen(false),
   ]);
+  // 运行时锁定会改变本轮执行语义的工具栏；发送仍保留为排队，停止单独可用。
+  useEffect(() => {
+    if (!running) return;
+    setAttachOpen(false);
+    setApprovalOpen(false);
+    setExecutionSettingsOpen(false);
+    setModelOpen(false);
+    setThinkOpen(false);
+  }, [running]);
   // v3.0 批 12：hero 项目选择菜单点击空白处自动收起
   const wsMenuRef = useClickOutside(() => setWsMenuOpen(false));
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -1101,7 +1156,7 @@ export default function ChatPanel() {
       requestAnimationFrame(() => inputRef.current?.focus());
     };
     return (
-    <div ref={composerRef} className={`relative mx-auto w-full max-w-[780px] rounded-[22px] border bg-input px-4 pt-3 shadow-lv2 transition-[border-color,box-shadow] duration-150 ${hero ? "border-line/70" : "border-line/60 focus-within:border-info/40 focus-within:shadow-[0_8px_30px_rgba(0,0,0,0.12)]"}`}>
+    <div ref={composerRef} className={`relative mx-auto w-full max-w-[780px] rounded-[20px] border bg-input px-4 pt-3 shadow-lv2 transition-[border-color,box-shadow] duration-150 ${hero ? "border-line/80 shadow-[0_4px_18px_rgba(0,0,0,0.05)]" : "border-line/60 focus-within:border-info/40 focus-within:shadow-[0_8px_30px_rgba(0,0,0,0.12)]"}`}>
       {/* v2.14 批 10：回滚/编辑待定操作组（输入框左上；大胶囊双按钮——确认 / 取消） */}
       {(pendingRollback || editingSeq != null) && (
         <div className="absolute -top-8 left-2 z-20 flex items-center gap-1.5">
@@ -1150,7 +1205,7 @@ export default function ChatPanel() {
           running
             ? `AI 处理中… 回车将排队发送（当前队列 ${activeSessionId ? (queuesBySession[activeSessionId] ?? []).length : 0} 条）`
             : root
-              ? "描述任务：InFu 会自主规划并执行…（输入 @ 可引用插件）"
+              ? hero ? "描述要推进的工作，InFu 会在当前项目中执行…" : "描述任务：InFu 会自主规划并执行…（输入 @ 可引用插件）"
               : "请先在左侧栏选择或创建项目，然后描述任务…"
         }
         value={input}
@@ -1192,9 +1247,10 @@ export default function ChatPanel() {
         {/* v3.1 附件（文件/文件夹/图片：内容上传暂存 + 图片视觉；预览条在输入卡上方） */}
         <span className="relative shrink-0">
           <button
-            className="flex h-7 cursor-pointer items-center justify-center rounded-lg border border-line px-2 text-[13px] font-medium text-text transition-colors hover:bg-hover"
+            className="flex h-7 cursor-pointer items-center justify-center rounded-lg border border-line px-2 text-[13px] font-medium text-text transition-colors hover:bg-hover disabled:cursor-not-allowed disabled:opacity-40"
             onClick={() => setAttachOpen(!attachOpen)}
             title="添加附件（文件 / 文件夹 / 图片）"
+            disabled={running}
           >
             <Paperclip className="h-3.5 w-3.5 text-sub" />
             {attachments.length > 0 && (
@@ -1239,9 +1295,10 @@ export default function ChatPanel() {
         </span>
         <span className="relative shrink-0">
           <button
-            className="flex h-7 cursor-pointer items-center gap-1 rounded-lg border border-line px-2 text-[13px] font-medium text-text transition-colors hover:bg-hover"
+            className="flex h-7 cursor-pointer items-center gap-1 rounded-lg border border-line px-2 text-[13px] font-medium text-text transition-colors hover:bg-hover disabled:cursor-not-allowed disabled:opacity-40"
             onClick={() => setApprovalOpen(!approvalOpen)}
             title="全局审批档位（写入设置，即时生效）"
+            disabled={running}
           >
             {(() => { const M = MODE_LABEL[approvalMode]; return <M.icon className={`h-3.5 w-3.5 ${M.color}`} />; })()}
             {MODE_LABEL[approvalMode].label}
@@ -1266,19 +1323,27 @@ export default function ChatPanel() {
             </div>
           )}
         </span>
-        {/* 会话级临时联网紧邻审批模式：两者都是命令权限边界，便于先看策略再临时放行。 */}
-        <EgressPill />
+        <button
+          className={`flex h-7 shrink-0 cursor-pointer items-center gap-1 rounded-lg border px-2 text-[12px] font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-40 ${executionSettingsOpen ? "border-info/40 bg-info-soft text-info" : "border-line text-sub hover:bg-hover hover:text-text"}`}
+          onClick={() => setExecutionSettingsOpen((open) => !open)}
+          title="执行设置：模型、思考强度与临时联网"
+          disabled={running}
+        >
+          <BrainCircuit className="h-3.5 w-3.5" />执行设置<ChevronDown className={`h-3 w-3 transition-transform ${executionSettingsOpen ? "rotate-180" : ""}`} />
+        </button>
+        {executionSettingsOpen && <EgressPill />}
         <span className="ml-auto flex min-w-0 items-center gap-2">
-          {/* 上下文用量环（v3：模型选择左侧；窄视口隐藏防溢出） */}
-          <span className="hidden min-[560px]:block">
+          {/* 欢迎态先聚焦目标输入；上下文占用只在已有会话的工作 composer 中显示。 */}
+          <span className={`${executionSettingsOpen && !hero ? "hidden min-[560px]:block" : "hidden"}`}>
             <ContextMeter />
           </span>
           {/* 模型选择（v3：自定义下拉，与思考等级同款样式） */}
-          <span className="relative min-w-0 shrink-0">
+          <span className={`${executionSettingsOpen ? "relative min-w-0 shrink-0" : "hidden"}`}>
             <button
-              className="flex h-7 cursor-pointer items-center gap-1 rounded-lg border border-line px-2 text-[13px] font-medium text-text transition-colors hover:bg-hover"
+              className="flex h-7 cursor-pointer items-center gap-1 rounded-lg border border-line px-2 text-[13px] font-medium text-text transition-colors hover:bg-hover disabled:cursor-not-allowed disabled:opacity-40"
               onClick={() => setModelOpen(!modelOpen)}
               title="当前任务使用的模型"
+              disabled={running}
             >
               <span className="max-w-[110px] truncate">{curModel?.name ?? "选择模型"}</span>
               <ChevronDown className="h-3 w-3 text-sub" />
@@ -1311,11 +1376,12 @@ export default function ChatPanel() {
             )}
           </span>
           {/* 思考模式（低/中/高/MAX；极窄视口隐藏防溢出） */}
-          <span className="relative shrink-0 max-[480px]:hidden">
+          <span className={`${executionSettingsOpen ? "relative shrink-0 max-[480px]:hidden" : "hidden"}`}>
             <button
-              className="flex h-7 cursor-pointer items-center gap-1 rounded-lg border border-line px-2 text-[13px] font-medium text-text transition-colors hover:bg-hover"
+              className="flex h-7 cursor-pointer items-center gap-1 rounded-lg border border-line px-2 text-[13px] font-medium text-text transition-colors hover:bg-hover disabled:cursor-not-allowed disabled:opacity-40"
               onClick={() => setThinkOpen(!thinkOpen)}
               title="思考模式（按模型实际级别数映射）"
+              disabled={running}
             >
               <BrainCircuit className="h-3.5 w-3.5 text-sub" />
               思考：{THINK_LABEL[thinkingLevel - 1]}
@@ -1405,40 +1471,33 @@ export default function ChatPanel() {
            /* ── 空态 Hero（克制字标：低对比渐变 + 柔和近场光，不使用装饰性常驻动画）
              v3.3 补 8：无消息时无 header（拖拽区）——顶部加透明 drag 条，窗口最上方任何状态都可拖动（ZCode 式） ── */
           <div className="relative flex h-full flex-col">
-            <div className="shrink-0" style={{ WebkitAppRegion: "drag", height: "3.25rem" } as React.CSSProperties} />
+            <div className="shrink-0" style={{ WebkitAppRegion: "drag", height: "36px" } as React.CSSProperties} />
             <div className="relative flex min-h-0 flex-1 flex-col items-center justify-center px-6">
             <div className="hero-glow" />
-              <div className="relative flex flex-col items-center gap-4 text-center">
-               <div>
-                 <h1
-                    className="infinite-future-mark text-[62px] font-semibold leading-[76px] tracking-[0.16em]"
-                    style={{
-                      background: "linear-gradient(to top, color-mix(in srgb, var(--text-primary) 58%, var(--info)) 0%, var(--text-primary) 78%)",
-                     WebkitBackgroundClip: "text",
-                     backgroundClip: "text",
-                     color: "transparent",
-                   }}
-                 >
-                   无限未来
-                 </h1>
-               </div>
-              {/* 项目 chip（v3：可点击 → 工作区选择菜单；批 12：点击空白处自动收起） */}
-              <span ref={wsMenuRef} className="relative">
+              <div className="relative flex flex-col items-center text-center">
+                <div className="mb-2 text-[13px] font-medium tracking-[0.16em] text-caption">INFINITE FUTURE · WORKSPACE</div>
+                <h1 className="text-[36px] font-semibold leading-[46px] tracking-[-0.04em] text-text">今天想推进什么？</h1>
+                <p className="mt-2 max-w-[460px] text-[14px] leading-6 text-sub">描述目标、附加上下文，InFu 会在当前项目中规划并执行。</p>
+              </div>
+             {/* 欢迎态只需确认执行位置：收为紧凑工作区选择器，不与主输入框争夺横向空间。 */}
+             <div ref={wsMenuRef} className="relative mt-6 self-center">
+              <div className="inline-block rounded-xl border border-line/70 bg-elevated/55 p-1.5 shadow-[0_1px_2px_rgba(0,0,0,0.02)]">
+                <div className="px-2.5 pb-1 pt-0.5 text-left text-[11px] font-semibold tracking-[0.08em] text-caption">选择工作区</div>
                 <button
-                  className="flex cursor-pointer items-center gap-1.5 rounded-2xl px-3 py-1 text-[13px] font-medium text-text transition-colors hover:bg-hover"
+                  className="flex h-8 max-w-[320px] cursor-pointer items-center gap-2 rounded-lg px-2.5 text-[13px] font-medium text-text transition-colors hover:bg-hover"
                   onClick={() => setWsMenuOpen(!wsMenuOpen)}
-                  title={root ? `当前项目：${root}（点击切换）` : "尚未绑定项目（点击选择）"}
+                  title={root ? `当前工作区：${root}（点击切换）` : "尚未选择工作区（点击选择）"}
                 >
                   {root ? <FolderOpen className="h-4 w-4 text-sub" /> : <Folder className="h-4 w-4 text-sub" />}
-                  {root ? rootName : "选择项目"}
-                  <ChevronDown className="h-3 w-3 text-sub" />
+                  <span className="min-w-0 flex-1 truncate text-left">{root ? rootName : "选择一个工作区"}</span>
+                  <ChevronDown className="h-3 w-3 shrink-0 text-sub" />
                 </button>
                 {wsMenuOpen && (
                   <div
-                    className="absolute left-1/2 top-8 z-50 min-w-[220px] -translate-x-1/2 rounded-xl border border-line bg-elevated p-1 shadow-lv3"
+                    className="absolute left-1/2 top-full z-50 mt-2 min-w-[220px] -translate-x-1/2 rounded-xl border border-line bg-elevated p-1 shadow-lv3"
                     onClick={(e) => e.stopPropagation()}
                   >
-                    <div className="px-2.5 pb-0.5 pt-1.5 text-[11px] font-medium text-caption">选择项目</div>
+                    <div className="px-2.5 pb-0.5 pt-1.5 text-[11px] font-medium text-caption">选择工作区</div>
                     {projects.length === 0 && (
                       <div className="px-2.5 py-1.5 text-xs text-sub/60">暂无项目——请在左侧栏「项目」区块创建</div>
                     )}
@@ -1458,20 +1517,31 @@ export default function ChatPanel() {
                     ))}
                   </div>
                 )}
-               </span>
+              </div>
              </div>
-             {/* v3 hero：输入框与 hero 内容一起居中（主流 布局；发送首条后恢复底部固定） */}
-             <div className="mt-8 w-full max-w-[780px]">{composer(true)}</div>
-             <div className="mt-3 flex flex-wrap justify-center gap-1.5">
-               {["分析这个项目的结构", "检查当前改动并给出风险", "帮我定位并修复一个问题"].map((suggestion) => (
-                 <button key={suggestion} onClick={() => void doSubmit(suggestion)} className="cursor-pointer rounded-full border border-line bg-elevated/70 px-3 py-1.5 text-[12px] text-sub transition-colors hover:border-info/40 hover:bg-info-soft hover:text-text">{suggestion}</button>
+             {/* 输入动作与项目资源分层；首条发送后恢复底部固定 composer。 */}
+             <div className="mt-2.5 w-full max-w-[780px]">{composer(true)}</div>
+             <div className="mt-4 flex w-full max-w-[780px] flex-wrap gap-2 px-1">
+               {["分析这个项目的结构", "检查当前改动并给出风险", "调研并规划下一步工作"].map((suggestion) => (
+                 <button
+                   key={suggestion}
+                   onClick={() => {
+                     setInput(suggestion);
+                     requestAnimationFrame(() => inputRef.current?.focus());
+                   }}
+                   className="group flex cursor-pointer items-center gap-2 rounded-full border border-line/70 bg-elevated/55 px-3 py-1.5 text-left text-[13px] text-sub transition-colors hover:border-info/35 hover:bg-info-soft hover:text-text"
+                   title="填入输入框后可继续补充上下文或直接发送"
+                 >
+                   <span className="h-1.5 w-1.5 rounded-full bg-caption transition-colors group-hover:bg-info" />
+                   {suggestion}
+                 </button>
                ))}
              </div>
             </div>
           </div>
         ) : (
           /* ── 消息流（用户右侧气泡 r22 / 助手无气泡全宽） ── */
-          <div className="mx-auto flex max-w-[780px] flex-col gap-5 px-8 py-5">
+          <div className="mx-auto flex max-w-[736px] flex-col gap-6 px-8 py-7">
             {messages.map((m, idx) => {
               const pending = rmIdx >= 0 && idx >= rmIdx;
               const turnEnd = idx + 1 >= messages.length || messages[idx + 1].role === "user";
@@ -1500,7 +1570,7 @@ export default function ChatPanel() {
 
         {/* 运行状态行（主流 TurnStatus：左对齐 shimmer + 等宽时钟） */}
         {running && (
-          <div className="mx-auto flex max-w-[780px] items-center gap-2 px-8 pb-3 pt-1 text-[14px] font-medium">
+          <div className="mx-auto flex max-w-[736px] items-center gap-2 px-8 pb-5 pt-1 text-[14px] font-medium">
             <span className="shimmer-text">InFu 运行中</span>
             <span className="text-[13px] text-caption [font-variant-numeric:tabular-nums]">
               已用 <ElapsedClock active={running} /> · 点击输入区方块停止
@@ -1547,11 +1617,11 @@ export default function ChatPanel() {
 
       {/* ── 输入区（仅消息非空时渲染——hero 模式下输入框与 hero 内容一起居中） ── */}
       {messages.length > 0 && (
-      <div className="relative shrink-0 px-8 pb-4 pt-2">
+      <div className="relative shrink-0 border-t border-line/50 bg-ink/92 px-8 pb-3 pt-3 backdrop-blur-sm">
         {/* 贴输入卡上方的渐隐遮罩（滚动内容渐入背景） */}
         <div
-          className="pointer-events-none absolute -top-12 left-0 right-0 h-12"
-          style={{ background: "linear-gradient(to bottom, transparent, var(--bg-base) 80%)" }}
+          className="pointer-events-none absolute -top-8 left-0 right-0 h-8"
+          style={{ background: "linear-gradient(to bottom, transparent, var(--bg-base) 85%)" }}
         />
 
         {/* v3.1 排队发送 dock（运行中输入的消息；编辑/移除/立即发送/拖拽排序） */}
@@ -1571,13 +1641,23 @@ export default function ChatPanel() {
         {/* 输入胶囊（v3：composer 复用——审批档位/思考模式下拉 + 用量环 + 模型 + 发送） */}
         {composer(false)}
 
-        {/* 会话统计（主流 StatsLine：居中 12/20 tertiary · 分隔；字数固定 px 防根缩放失真；
-            v2.12 四桶：缓存命中（读 cacheHit · 未命中 cacheMiss）· 输出 completionTokens） */}
-        <div className="mx-auto mt-1 max-w-[780px] text-center text-[12px] leading-5 text-caption [font-variant-numeric:tabular-nums]">
-          {turns} 轮 · {toolCount} 次工具 · 约 {fmtTokens(estTokens)} tokens
-          {hitRate != null &&
-            ` · 缓存命中 ${Math.round(hitRate * 100)}%（读 ${fmtTokens(usageHit)}${usageMiss > 0 ? ` · 未命中 ${fmtTokens(usageMiss)}` : ""}）`}
-          {usageOut > 0 && ` · 输出 ${fmtTokens(usageOut)} tokens`}
+        {/* 执行指标保留给诊断，但默认不与下一条任务输入争夺注意力。 */}
+        <div className="mx-auto mt-1 max-w-[736px] text-center text-[11px] leading-5 text-caption [font-variant-numeric:tabular-nums]">
+          <button
+            className="cursor-pointer rounded px-1.5 transition-colors hover:bg-hover hover:text-sub"
+            onClick={() => setExecutionDetailsOpen((open) => !open)}
+            title={executionDetailsOpen ? "收起执行详情" : "展开工具、Token 与缓存详情"}
+          >
+            {executionDetailsOpen ? "收起执行详情" : `${turns} 轮执行 · 查看执行详情`}
+          </button>
+          {executionDetailsOpen && (
+            <div className="mt-0.5">
+              {toolCount} 次工具 · 约 {fmtTokens(estTokens)} tokens
+              {hitRate != null &&
+                ` · 缓存命中 ${Math.round(hitRate * 100)}%（读 ${fmtTokens(usageHit)}${usageMiss > 0 ? ` · 未命中 ${fmtTokens(usageMiss)}` : ""}）`}
+              {usageOut > 0 && ` · 输出 ${fmtTokens(usageOut)} tokens`}
+            </div>
+          )}
         </div>
       </div>
       )}
@@ -1796,6 +1876,7 @@ const MessageItem = memo(function MessageItem({
           />
         </div>
       )}
+      {!m.streaming && <DeliverySummaryCard tools={m.tools} delivery={m.delivery} />}
       {/* 审查意见（v3.1 交付报告已移除；审查保留） */}
       {m.review && <StructuredBlock content={m.review} tone="info" />}
       {m.streaming && !m.text && m.tools.length === 0 && !m.reasoning && (

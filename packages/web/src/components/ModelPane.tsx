@@ -72,7 +72,7 @@ function fmtWin(n?: number): string {
 /** 模型管理内容面板（v2：供应商凭据 + 上游模型 + 思考级别；v2.4 内嵌进设置弹窗「模型设置」Tab） */
 export default function ModelPane() {
   // 当前任务选择的模型（顶栏/输入框选择器；角色未指定时跟随它，而非 config 静态默认）
-  const { modelId: currentModelId } = useStore();
+  const currentModelId = useStore((s) => s.modelId);
   const [tab, setTab] = useState<"providers" | "models">("providers");
   const [models, setModels] = useState<ModelInfo[]>([]);
   const [providers, setProviders] = useState<ProviderInfo[]>([]);

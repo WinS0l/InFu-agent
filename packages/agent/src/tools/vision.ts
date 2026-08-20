@@ -13,6 +13,7 @@ import { existsSync, readFileSync, mkdirSync, writeFileSync, statSync, readdirSy
 import { spawn } from "node:child_process";
 import type { DesktopScreenCapture, DesktopScreenInput, ToolDef, ToolContext } from "@infu/shared";
 import { isPathInside, guard } from "./util.js";
+import { isProtectedPath } from "../sandbox/index.js";
 import { resolveDataDir } from "../data-dir.js";
 
 /** 图片类型白名单 → data URL 前缀 */
@@ -159,6 +160,7 @@ export const visionTools: Record<string, ToolDef> = {
         if (!shot) return "错误：.infu/screenshots/ 下没有截图（先 screen_capture，或用 path 指定图片）";
         abs = shot;
       }
+      if (isProtectedPath(abs)) return "错误：图片位于受保护区域，拒绝 OCR";
       const r = await ocrImageFile(abs, args.lang as string | undefined);
       if (!r.ok) return r.message;
       const text = r.text ?? "";
@@ -177,6 +179,7 @@ export const visionTools: Record<string, ToolDef> = {
       const rel = args.path as string;
       const abs = resolve(ctx.root, rel);
       if (!isPathInside(ctx.root, abs)) return "错误：路径越界（不允许访问项目根之外）";
+      if (isProtectedPath(abs)) return "错误：图片位于受保护区域，拒绝读取";
       if (!existsSync(abs)) return `错误：文件不存在 ${rel}`;
       const ext = abs.slice(abs.lastIndexOf(".")).toLowerCase();
       const mime = MIME[ext];

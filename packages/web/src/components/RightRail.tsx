@@ -1,12 +1,14 @@
 import { useEffect, useRef, useState } from "react";
 import { useClickOutside } from "./useClickOutside";
-import { Bot, FileSearch, Globe, Monitor, X, Loader2, PanelRightClose, Plus, PanelsTopLeft, ListTree } from "lucide-react";
+import { Bot, FileSearch, Globe, Monitor, X, Loader2, Plus, PanelsTopLeft, ListTree } from "lucide-react";
 import { useStore, type RightTab } from "../store";
 import ReviewPane from "./ReviewPane";
 import SubagentThreadView from "./SubagentThreadView";
 import BrowserPanel from "./BrowserPanel";
 import ComputerUsePane from "./ComputerUsePane";
 import SessionTracePane from "./SessionTracePane";
+
+const EMPTY_TRACE: import("@infu/shared").StoredEvent[] = [];
 
 /**
  * v2.9 右侧栏（浏览器式）：顶部 tab 条（活动高亮 + 状态徽标 + 关闭 ×）+ 内容区。
@@ -70,24 +72,57 @@ function SubagentsList() {
  *  v3.2：主按钮（审查）独立区 + 分隔线 + 三个次按钮（更清晰的层级引导） */
 function RightRailEmpty() {
   const openRightTab = useStore((s) => s.openRightTab);
+  const messages = useStore((s) => s.messages);
+  const approvals = useStore((s) => s.approvals);
+  const activeSessionId = useStore((s) => s.activeSessionId);
+  const trace = useStore((s) => activeSessionId ? s.traceBySession[activeSessionId] ?? EMPTY_TRACE : EMPTY_TRACE);
+  const hasChanges = messages.some((message) => message.tools.some((tool) => tool.tool === "write_file" || tool.tool === "edit_file" || tool.tool === "file_ops"));
+  const hasTestRun = messages.some((message) => message.tools.some((tool) => tool.tool === "run_test"));
+  const hasFailedTest = messages.some((message) => message.tools.some((tool) => tool.tool === "run_test" && tool.status === "error"));
+  const pendingApprovals = approvals.filter((approval) => approval.sessionId === activeSessionId).length;
+  const backgroundRunning = trace.some(({ event }) => event.type === "job-start") && !trace.some(({ event }) => event.type === "job-done");
   const btn =
-    "group flex min-h-[72px] w-full cursor-pointer items-center gap-3 rounded-xl border border-line bg-elevated px-3.5 text-left transition-all duration-150 hover:-translate-y-px hover:border-info/40 hover:bg-hover active:translate-y-0";
+    "group flex w-full cursor-pointer items-center gap-3 rounded-lg px-2.5 py-2.5 text-left transition-colors hover:bg-hover";
   return (
-    <div className="flex h-full flex-col items-center justify-center px-5">
-      <div className="mb-5 w-full max-w-[272px]">
-        <div className="mb-2 flex h-9 w-9 items-center justify-center rounded-xl bg-info-soft text-info"><PanelsTopLeft className="h-4 w-4" /></div>
+    <div className="flex h-full flex-col px-5 pt-6">
+      <div className="mb-4 w-full">
+        <div className="mb-2 flex h-8 w-8 items-center justify-center rounded-lg bg-info-soft text-info"><PanelsTopLeft className="h-4 w-4" /></div>
         <div className="text-[18px] font-semibold tracking-tight text-text">工作区</div>
-        <div className="mt-1 text-[13px] leading-5 text-sub">在这里查看改动、浏览页面或跟踪并行任务。</div>
+        <div className="mt-1 text-[13px] leading-5 text-sub">并排查看改动、浏览页面和跟踪执行过程。</div>
       </div>
-      <div className="w-full max-w-[272px] space-y-2">
+      <div className="w-full">
+        {messages.length > 0 && (
+          <div className="mb-3 rounded-xl border border-line/70 bg-elevated/45 p-2.5">
+            <div className="mb-1.5 text-[11px] font-semibold tracking-[0.08em] text-caption">下一步</div>
+            <div className="space-y-0.5">
+              {hasChanges && (
+                <button className="flex w-full cursor-pointer items-center gap-2 rounded-lg px-1.5 py-1 text-left text-[12px] text-text transition-colors hover:bg-hover" onClick={() => openRightTab({ id: "review", kind: "review", label: "审查" })}>
+                  <FileSearch className="h-3.5 w-3.5 text-info" />
+                  <span className="min-w-0 flex-1">查看当前改动</span>
+                  <span className="text-caption">Diff →</span>
+                </button>
+              )}
+              {hasFailedTest && <button className="flex w-full cursor-pointer items-center gap-2 rounded-lg px-1.5 py-1 text-left text-[12px] text-danger transition-colors hover:bg-danger-soft" onClick={() => openRightTab({ id: "review", kind: "review", label: "审查" })}><FileSearch className="h-3.5 w-3.5" /><span className="min-w-0 flex-1">查看失败测试</span><span>→</span></button>}
+              {pendingApprovals > 0 && <button className="flex w-full cursor-pointer items-center gap-2 rounded-lg px-1.5 py-1 text-left text-[12px] text-warn transition-colors hover:bg-warn-soft" onClick={() => openRightTab({ id: "trace", kind: "trace", label: "会话追踪" })}><ListTree className="h-3.5 w-3.5" /><span className="min-w-0 flex-1">处理 {pendingApprovals} 项审批</span><span>→</span></button>}
+              {backgroundRunning && <button className="flex w-full cursor-pointer items-center gap-2 rounded-lg px-1.5 py-1 text-left text-[12px] text-text transition-colors hover:bg-hover" onClick={() => openRightTab({ id: "trace", kind: "trace", label: "会话追踪" })}><ListTree className="h-3.5 w-3.5 text-info" /><span className="min-w-0 flex-1">查看后台任务</span><span className="text-caption">运行中 →</span></button>}
+              <button className="flex w-full cursor-pointer items-center gap-2 rounded-lg px-1.5 py-1 text-left text-[12px] text-text transition-colors hover:bg-hover" onClick={() => openRightTab({ id: "browser", kind: "browser", label: "浏览器" })}>
+                <Globe className="h-3.5 w-3.5 text-info" />
+                <span className="min-w-0 flex-1">在浏览器中验证</span>
+                <span className="text-caption">打开 →</span>
+              </button>
+              {!hasTestRun && <div className="px-1.5 pt-1 text-[11px] leading-4 text-caption">尚未记录测试运行；可在对话中要求 InFu 补充验证。</div>}
+            </div>
+          </div>
+        )}
         <button
-          className={`${btn} border-info/35 bg-info-soft/50 text-text hover:border-info/60`}
+          className={`${btn} mb-2 border border-info/25 bg-info-soft/45 text-text hover:bg-info-soft`}
           onClick={() => openRightTab({ id: "review", kind: "review", label: "审查" })}
           title="查看代码改动（Diff）/ 文件改动记录 / 测试结果"
         >
-          <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-info text-white shadow-lv1"><FileSearch className="h-4 w-4" /></span>
+          <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-info text-white shadow-lv1"><FileSearch className="h-4 w-4" /></span>
           <span><span className="block text-[13px] font-semibold">审查改动</span><span className="mt-0.5 block text-xs text-sub">Diff、文件与测试结果</span></span>
         </button>
+        <div className="my-2 border-t border-line/70" />
         <button
           className={btn}
           onClick={() => openRightTab({ id: "browser", kind: "browser", label: "浏览器" })}
@@ -106,11 +141,11 @@ function RightRailEmpty() {
         </button>
         <button
           className={btn}
-          onClick={() => openRightTab({ id: "computeruse", kind: "computeruse", label: "computer-use" })}
+          onClick={() => openRightTab({ id: "computeruse", kind: "computeruse", label: "桌面操作" })}
           title="桌面操作（截图 → 视觉理解 → 点击/输入；仅桌面版）"
         >
           <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-hover text-info group-hover:bg-info-soft"><Monitor className="h-4 w-4" /></span>
-          <span><span className="block text-[13px] font-semibold text-text">computer-use</span><span className="mt-0.5 block text-xs text-sub">截图、输入与桌面操作记录</span></span>
+          <span><span className="block text-[13px] font-semibold text-text">桌面操作</span><span className="mt-0.5 block text-xs text-sub">截图、输入与 computer-use 记录</span></span>
         </button>
         <button
           className={btn}
@@ -126,8 +161,11 @@ function RightRailEmpty() {
 }
 
 /** 右侧栏主体（tab 条 + 内容区；由 App.tsx aside 挂载） */
-export default function RightRail({ onCollapse }: { onCollapse: () => void }) {
-  const { rightTabs, activeRightTab, setActiveRightTab, closeRightTab } = useStore();
+export default function RightRail() {
+  const rightTabs = useStore((s) => s.rightTabs);
+  const activeRightTab = useStore((s) => s.activeRightTab);
+  const setActiveRightTab = useStore((s) => s.setActiveRightTab);
+  const closeRightTab = useStore((s) => s.closeRightTab);
   const [newTabOpen, setNewTabOpen] = useState(false);
   // v3.0 批 9.5：➕ 在 overflow 滚动容器内 → 菜单 absolute 会被裁剪（overflow-y 强制 auto），
   // 改用 fixed 视口定位（按钮坐标记录；打开后点按钮/菜单项关闭）
@@ -151,33 +189,17 @@ export default function RightRail({ onCollapse }: { onCollapse: () => void }) {
     { id: "review", kind: "review" as const, label: "审查", icon: <FileSearch className="h-4 w-4" /> },
     { id: "browser", kind: "browser" as const, label: "浏览器", icon: <Globe className="h-4 w-4" /> },
     { id: "subagents", kind: "subagents" as const, label: "子 Agent", icon: <Bot className="h-4 w-4" /> },
-    { id: "computeruse", kind: "computeruse" as const, label: "computer-use", icon: <Monitor className="h-4 w-4" /> },
+    { id: "computeruse", kind: "computeruse" as const, label: "桌面操作", icon: <Monitor className="h-4 w-4" /> },
     { id: "trace", kind: "trace" as const, label: "会话追踪", icon: <ListTree className="h-4 w-4" /> },
   ];
 
   return (
     <div className="flex h-full min-h-0 min-w-0 flex-col">
-      {/* 顶部 tab 条（浏览器式：活动高亮 + 状态徽标 + 关闭 ×；v2.9 无下边框与内容区浑然一体。
-          v3.0 批 9.5 拍板：折叠按钮在窗口最顶部（与原生三按钮同一高度，self-start 顶对齐）；
-          v3.3 补 8：整行补回 -webkit-app-region: drag（批 9 定稿三栏顶部都是拖拽区，
-          但右栏 tab 条一直缺失——窗口最上方点右栏拖不动根因；可交互元素 no-drag）
-          v3.3 补 3（用户拍板）：恢复右上角 pr-[140px] 让位——标签栏最大长度止于 Electron
-          原生三按钮（titleBarOverlay 悬浮右上角）左缘，不重叠；多 tab 时在让位边界内
-          滚动堆叠；➕ 改为超大加号、描述「新建 tab」
-          v3.2：高度 60px → 3.25rem —— 与聊天 header / 侧栏 Logo 行统一（原生融合） */}
-      <div
-        className="relative flex h-[3.25rem] shrink-0 items-end gap-1 border-b border-line/80 bg-sidebar px-2 pb-1.5 pr-[140px]"
+      {/* 打开工作 Tab 后才显示浏览器式标签条；空态保持一个安静的顶部工作区入口。 */}
+      {rightTabs.length > 0 && <div
+        className="relative flex h-9 shrink-0 items-end gap-1 border-b border-line/80 bg-ink px-2 pb-0.5"
         style={{ WebkitAppRegion: "drag" } as React.CSSProperties}
       >
-        {/* 折叠按钮（最左 + 窗口最顶部：self-end 顶对齐 = 与原生三按钮同一高度；no-drag 可点） */}
-        <button
-          className="mb-0.5 flex h-9 w-9 shrink-0 cursor-pointer items-center justify-center self-end rounded-lg text-sub transition-colors hover:bg-hover hover:text-text"
-          onClick={onCollapse}
-          title="折叠右侧栏"
-          style={{ WebkitAppRegion: "no-drag" } as React.CSSProperties}
-        >
-          <PanelRightClose className="h-5 w-5" />
-        </button>
         {/* tab 滚动区（z-0：任何滚动内容都被裁剪在本容器内；到达右侧让位边界即滚动堆叠。
             v3.3 补 7：滚轮水平滑动——Windows 普通滚轮默认只滚垂直，tab 条横向溢出时
             滚轮事件转水平滚动（scrollLeft += deltaY），滑动机制真实可感）
@@ -225,30 +247,27 @@ export default function RightRail({ onCollapse }: { onCollapse: () => void }) {
               </button>
             </div>
           ))}
+          {/* Edge 式新建标签：作为最后一个 tab 随标签流动，空间不足时自然横向滚动。 */}
+          <span className="relative mb-0.5 shrink-0">
+            <button
+              ref={plusRef}
+              className="flex h-7 w-8 cursor-pointer items-center justify-center rounded-t-md border border-b-0 border-transparent text-sub transition-colors hover:border-line hover:bg-elevated hover:text-text"
+              onClick={() => {
+                if (newTabOpen) setNewTabOpen(false);
+                else {
+                  const r = plusRef.current?.getBoundingClientRect();
+                  if (r) setMenuPos({ x: r.right, y: r.bottom + 4 });
+                  setNewTabOpen(true);
+                }
+              }}
+              title="新建标签页"
+              style={{ WebkitAppRegion: "no-drag" } as React.CSSProperties}
+            >
+              <Plus className="h-4 w-4" strokeWidth={2.25} />
+            </button>
+          </span>
         </div>
-        {/* 新建 tab（➕ 超大加号）：紧贴让位边界（原生三按钮左侧，绝不重叠）；bottom 对齐；
-            点击 = 上拉菜单 fixed 视口定位；no-drag（button 上直接设——span 是 inline 元素
-            app-region 不生效） */}
-        <span className="relative mb-0.5 shrink-0">
-          <button
-            ref={plusRef}
-            className="flex h-9 w-9 cursor-pointer items-center justify-center rounded-lg border border-line bg-elevated text-sub transition-colors hover:border-info/40 hover:bg-hover hover:text-info"
-            onClick={() => {
-              if (newTabOpen) {
-                setNewTabOpen(false);
-              } else {
-                const r = plusRef.current?.getBoundingClientRect();
-                if (r) setMenuPos({ x: r.right, y: r.bottom + 4 });
-                setNewTabOpen(true);
-              }
-            }}
-            title="新建 tab"
-            style={{ WebkitAppRegion: "no-drag" } as React.CSSProperties}
-          >
-            <Plus className="h-5 w-5" />
-          </button>
-        </span>
-      </div>
+      </div>}
 
       {/* 新建 tab 菜单（fixed 视口定位——➕ 在 overflow 滚动容器内，absolute 会被裁剪） */}
       {newTabOpen && menuPos && (

@@ -100,7 +100,7 @@ export function resolveModelBaseURL(cfg: InfuConfig | null | undefined, model: M
  */
 
 /** 读取用户配置（~/.infu/config.json；zod schema 校验 + v1 在线迁移 + 损坏备份） */
-import { readFileSync, existsSync, copyFileSync, mkdirSync, writeFileSync, chmodSync, renameSync, rmSync, statSync } from "node:fs";
+import { readFileSync, existsSync, copyFileSync, mkdirSync, writeFileSync, chmodSync, renameSync, rmSync, statSync, utimesSync } from "node:fs";
 import { join } from "node:path";
 import { parseInfuConfig } from "@infu/shared";
 import { resolveDataDir } from "../data-dir.js";
@@ -126,7 +126,13 @@ function withConfigLock<T>(fn: () => T): T {
       sleepSync(25);
     }
   }
-  try { return fn(); } finally { try { rmSync(lock, { recursive: true, force: true }); } catch { /* ignore */ } }
+  // A lock holder may copy or validate data for longer than the stale threshold.
+  // Refresh its lease so another process never mistakes a live critical section for a crash.
+  const lease = setInterval(() => { try { utimesSync(lock, new Date(), new Date()); } catch { /* release raced */ } }, 5_000);
+  try { return fn(); } finally {
+    clearInterval(lease);
+    try { rmSync(lock, { recursive: true, force: true }); } catch { /* ignore */ }
+  }
 }
 function encoded(value: unknown): string {
   return JSON.stringify(value) ?? "undefined";

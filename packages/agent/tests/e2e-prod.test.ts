@@ -131,13 +131,32 @@ try {
       await initThemePage.close();
 
       await page.addInitScript(() => {
-        try { localStorage.setItem("infu-chat", JSON.stringify({ state: { theme: "light" }, version: 0 })); } catch { /* 忽略 */ }
+        // 右栏偏好为开启时，新建会话返回欢迎态也必须不渲染工作区；否则欢迎页会
+        // 出现一块无法通过顶部会话动作收起的右栏。
+        try { localStorage.setItem("infu-chat", JSON.stringify({ state: { theme: "light", detailsOpen: true }, version: 0 })); } catch { /* 忽略 */ }
       });
       await page.goto(base + "/", { waitUntil: "networkidle", timeout: 30000 });
       // React 真实渲染（#root 有内容）
       await page.waitForSelector("#root > *", { timeout: 15000 }).catch(() => {});
       const rootHtml = await page.evaluate(() => (document.getElementById("root")?.innerHTML ?? "").slice(0, 200));
       check("React 应用真实渲染", rootHtml.length > 50, rootHtml.slice(0, 120));
+      await page.waitForTimeout(700);
+      const rootHtmlStable = await page.evaluate(() => (document.getElementById("root")?.innerHTML ?? "").length);
+      check("空 trace 欢迎态持续渲染（无 React 更新深度错误）", rootHtmlStable > 50, String(rootHtmlStable));
+      const workspaceVisibleOnWelcome = await page.getByText("工作区", { exact: true }).isVisible().catch(() => false);
+      check("欢迎态不渲染右侧工作区（即使右栏偏好已开启）", !workspaceVisibleOnWelcome, String(workspaceVisibleOnWelcome));
+      const suggestions = await page.locator('button[title="填入输入框后可继续补充上下文或直接发送"]').count();
+      check("欢迎态提供三个可填入输入框的建议任务", suggestions === 3, String(suggestions));
+      const workspaceSelector = page.getByText("选择工作区", { exact: true });
+      check("欢迎态显示紧凑的工作区选择说明", await workspaceSelector.count() >= 1, String(await workspaceSelector.count()));
+      const selectorWidth = await workspaceSelector.locator("..").evaluate((element) => Math.round(element.getBoundingClientRect().width));
+      check("欢迎态工作区选择器按内容收紧", selectorWidth < 360, String(selectorWidth));
+      const executionSettings = page.getByTitle("执行设置：模型、思考强度与临时联网");
+      check("Composer 将低频配置收纳到执行设置", await executionSettings.count() === 1, String(await executionSettings.count()));
+      await page.locator('button[title="填入输入框后可继续补充上下文或直接发送"]').first().click();
+      const suggestedInput = await page.locator("textarea").inputValue();
+      check("建议任务只填入输入框，不会立即执行", suggestedInput === "分析这个项目的结构", suggestedInput);
+      await page.locator("textarea").fill("");
       // 令牌链路端到端：页面自身所有 API 调用零 401（CSP 回归的直接判据）
       await page.waitForTimeout(1500); // 等启动期 fetchSessions/fetchProjects 完成
       check("页面 API 调用零 401（令牌链路端到端）", unauthorized.length === 0, unauthorized.join(", "));
@@ -148,6 +167,7 @@ try {
       check("服务端配置主题生效（config→store→dataset.theme）", theme === "light", String(theme));
       // v5.1 补 4：欢迎界面（无活动会话）🌐 临时联网可用——菜单可展开、选时长后本地待定态激活
       // （无会话时不开 POST，发送消息时随 /api/chat 的 egressMinutes 对本会话生效）
+      await executionSettings.click();
       const pillClickable = await page.locator("button", { hasText: "临时联网" }).count();
       check("欢迎界面 🌐 临时联网药丸可见", pillClickable > 0, String(pillClickable));
       // button:has-text 精确命中按钮（text= 会同时匹配内层 span，严格模式抛错）
@@ -179,6 +199,7 @@ try {
       await page.waitForTimeout(200);
       await page.locator("button", { hasText: "全自动" }).first().click().catch(() => {});
       await page.waitForTimeout(400);
+      if (await page.locator("button", { hasText: "临时联网" }).count() === 0) await executionSettings.click();
       const modeLabel = await page.locator('button[title="全局审批档位（写入设置，即时生效）"]').innerText().catch(() => "?");
       const pillBack = await page.locator("button", { hasText: "临时联网" }).count() > 0;
       check("切回非 full 档后临时联网按钮恢复", pillBack, `pill=${await page.locator("button", { hasText: "临时联网" }).count()} mode=${modeLabel.trim()}`);

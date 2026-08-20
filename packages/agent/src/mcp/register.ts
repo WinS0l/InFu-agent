@@ -11,6 +11,7 @@
  */
 
 import { existsSync } from "node:fs";
+import { validateHttpMcpUrl } from "./client.js";
 import { isPrivateHostText, type InfuConfig, type McpServerConfig, type RiskLevel } from "@infu/shared";
 import { configPath, saveConfig, loadConfig } from "../providers/registry.js";
 
@@ -36,7 +37,7 @@ export function mcpIdFromName(name: string): string {
 }
 
 /** 校验并追加 mcpServers 到全局配置（幂等：重名拒绝；只触碰 mcpServers 节） */
-export function registerMcpServer(input: RegisterInput): RegisterResult {
+export async function registerMcpServer(input: RegisterInput): Promise<RegisterResult> {
   const id = mcpIdFromName(input.name);
   if (!id) return { ok: false, message: "名称无法生成有效 id（需含字母/数字）" };
   if (input.type === "http") {
@@ -46,6 +47,7 @@ export function registerMcpServer(input: RegisterInput): RegisterResult {
       if ((url.protocol !== "http:" && url.protocol !== "https:") || url.username || url.password || isPrivateHostText(url.hostname)?.private) {
         return { ok: false, message: "http URL 必须是非私有网络的 http/https 端点，且不可内嵌凭据" };
       }
+      await validateHttpMcpUrl(input.url);
     } catch {
       return { ok: false, message: "http URL 无效" };
     }

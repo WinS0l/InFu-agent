@@ -41,7 +41,11 @@ function withProjectsLock<T>(fn: () => T): T {
       Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 25);
     }
   }
-  try { return fn(); } finally { try { fs.rmSync(lock, { recursive: true, force: true }); } catch { /* ignore */ } }
+  const lease = setInterval(() => { try { fs.utimesSync(lock, new Date(), new Date()); } catch { /* release raced */ } }, 5_000);
+  try { return fn(); } finally {
+    clearInterval(lease);
+    try { fs.rmSync(lock, { recursive: true, force: true }); } catch { /* ignore */ }
+  }
 }
 
 /** root 归一化（去尾部分隔符；Windows 大小写不敏感比较用 lower） */

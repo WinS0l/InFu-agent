@@ -2,7 +2,7 @@
 
 软件工程智能体平台 — 让 AI 从"代码补全工具"升级为能理解项目、规划任务并执行工程工作的开发伙伴。
 
-> 状态：v6.0（Agent 核心 + Web UI + Windows 桌面端 + 嵌入式浏览器均可用；50 套测试套件 1480 断言全绿——含生产模式页面级 E2E、符号索引/LSP 导航/OCR/skill 模板库）
+> 状态：v6.1（Agent 核心 + Web UI + Windows 桌面端 + 嵌入式浏览器均可用；51 套测试套件 1558 断言全绿——含生产模式页面级 E2E、符号索引/LSP 导航/OCR/skill 模板库）
 > 相关文档：[技术选型方案](docs/TECHNICAL-SELECTION.md)、[路线图](docs/ROADMAP.md)
 
 ## 核心能力

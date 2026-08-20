@@ -21,7 +21,7 @@
  *    拖拽区 = 各栏顶部行（app-region: drag），窗口按钮 = 右上角自绘悬浮 WindowControls）
  *  - 关闭窗口 = 退出应用；托盘仅「显示主窗口/退出」入口
  */
-import { app, BrowserWindow, Tray, Menu, ipcMain, screen, nativeImage, nativeTheme, shell, dialog, powerSaveBlocker, Notification, type Rectangle } from "electron";
+import { app, BrowserWindow, Tray, Menu, ipcMain, screen, nativeImage, nativeTheme, shell, dialog, powerSaveBlocker, Notification, clipboard, type Rectangle } from "electron";
 import type { IpcMainEvent, IpcMainInvokeEvent, WebContents, WebPreferences } from "electron";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -112,8 +112,10 @@ function saveWindowState(win: BrowserWindow) {
   } catch { /* 忽略 */ }
 }
 
-// ── 主题联动：Windows 原生窗口按钮与工作区 tab 条共用同一表面。保留系统控件的
-//    可访问性/窗口行为，但让它成为右侧工作区标题栏的一部分，而不是悬浮异物。──
+// 原生最小化/最大化/关闭控制带独立于 40px 工作台基线，保持更紧凑的 32px 高度。
+const TITLEBAR_HEIGHT = 32;
+
+// ── 主题联动：原生按钮区、窗口底色与 renderer 顶部使用同一个纯色表面。──
 function themeOverlayColors(theme: string) {
   return theme === "light"
     ? { color: "#F9FAFB", symbolColor: "#0F1115" }
@@ -125,7 +127,9 @@ function applyThemeOverlay(win: BrowserWindow, theme?: string) {
     const resolved = theme === "system"
       ? (nativeTheme.shouldUseDarkColors ? "dark" : "light")
       : (theme ?? "dark");
-    win.setTitleBarOverlay(themeOverlayColors(resolved));
+    const colors = themeOverlayColors(resolved);
+    win.setTitleBarOverlay(colors);
+    win.setBackgroundColor(colors.color);
   } catch { /* 平台不支持忽略 */ }
 }
 
@@ -143,10 +147,10 @@ function createMainWindow() {
     x: state.x,
     y: state.y,
     show: false,
-    backgroundColor: "#151517",
-    // 无边框：原生窗口按钮覆盖右侧工作区的 3.25rem tab 条，背景和高度与该表面统一。
+    backgroundColor: themeOverlayColors(theme).color,
+    // 原生按钮仅占 32px 紧凑控制带，不压入 40px 工作台顶部基线。
     titleBarStyle: "hidden",
-    titleBarOverlay: { ...themeOverlayColors(theme), height: 52 },
+    titleBarOverlay: { ...themeOverlayColors(theme), height: TITLEBAR_HEIGHT },
     webPreferences: {
       preload: join(__dirname, "preload.cjs"),
       contextIsolation: true,
@@ -682,6 +686,10 @@ const screenCapture: DesktopScreenCapture = async (dir, minimize, sessionId, sig
  *          key（按键组合：如 ctrl+c、alt+tab、enter、f5）/
  *          drag（v3.3 拖拽：x1,y1 → x2,y2，steps 分步） */
 const screenInput: DesktopScreenInput = async (action, params, signal) => {
+  // PowerShell finally cannot run when AbortSignal terminates its process. Keep a
+  // text fallback in the host so an interrupted screen_type does not leave input
+  // content in the user's clipboard.
+  const priorClipboardText = action === "type" ? clipboard.readText() : null;
   try {
     // 统一 P/Invoke 头（一次编译，多方法；user32 SendInput/keybd_event/SetCursorPos）
     const addType =
@@ -761,7 +769,8 @@ public static class InFuKeys {
       const amount = Math.max(1, Math.round(Number(params[1] ?? 1)));
       const delta = 120 * amount;
       const horizontal = dir === "left" || dir === "right";
-      const signed = dir === "down" || dir === "right" ? delta : -delta;
+      // SendInput 的正滚轮值表示向上/向左；工具方向语义相反。
+      const signed = dir === "down" || dir === "right" ? -delta : delta;
       script += `[InFuInput]::Scroll(${signed}, ${horizontal ? "true" : "false"})`;
     } else if (action === "key") {
       // 按键组合：ctrl+c / alt+tab / enter / f5 / shift+up …（+ 分隔；先修饰键后主键）
@@ -802,6 +811,9 @@ public static class InFuKeys {
     });
     return "OK";
   } catch (e) {
+    if (priorClipboardText !== null && signal?.aborted) {
+      try { clipboard.writeText(priorClipboardText); } catch { /* best effort */ }
+    }
     if (signal?.aborted) return "操作已取消";
     return `输入失败：${(e as Error).message.slice(0, 120)}`;
   }
@@ -814,16 +826,17 @@ public static class InFuKeys {
  *  activate：按进程名或标题关键词模糊匹配 → SetForegroundWindow + ShowWindow(SW_RESTORE 9)。
  * 返回 "OK" 或错误描述；每次调用启动一次 PS（~300ms）。
  */
-(globalThis as Record<string, unknown>).__infuScreenWindows = (action: string, name?: string): string => {
+(globalThis as Record<string, unknown>).__infuScreenWindows = async (action: string, name?: string, signal?: AbortSignal): Promise<string> => {
   try {
     if (action === "list") {
       const script =
         `Get-Process | Where-Object { $_.MainWindowHandle -ne 0 } | ` +
         `Select-Object -First 40 ProcessName, Id, MainWindowTitle | ` +
         `ForEach-Object { "$($_.ProcessName)|$($_.Id)|$($_.MainWindowTitle)" }`;
-      const out = execFileSync("powershell", ["-NoProfile", "-Command", script], {
-        timeout: 15000, windowsHide: true, encoding: "utf8",
-      }).toString().trim();
+      const { stdout } = await execFileAsync("powershell", ["-NoProfile", "-NonInteractive", "-Command", script], {
+        timeout: 15000, windowsHide: true, encoding: "utf8", signal,
+      });
+      const out = stdout.trim();
       if (!out) return "当前没有可见窗口（或主进程枚举受限）";
       const lines = out.split(/\r?\n/).filter(Boolean).map((l) => {
         const [proc, pid, ...titleParts] = l.split("|");
@@ -849,9 +862,10 @@ public static class InFuWin {
         // 模糊匹配用 Contains（-match 是正则——用户输入含元字符会报错/误配；' 已转义防注入）
         `$ps = Get-Process | Where-Object { $_.MainWindowHandle -ne 0 -and ($_.ProcessName.Contains('${safe}') -or $_.MainWindowTitle.Contains('${safe}')) } | Select-Object -First 1;` +
         `if (-not $ps) { "NOT_FOUND" } else { if ([InFuWin]::Activate($ps.MainWindowHandle)) { "OK:$($ps.ProcessName):$($ps.MainWindowTitle)" } else { "FAILED" } }`;
-      const out = execFileSync("powershell", ["-NoProfile", "-Command", script], {
-        timeout: 15000, windowsHide: true, encoding: "utf8",
-      }).toString().trim();
+      const { stdout } = await execFileAsync("powershell", ["-NoProfile", "-NonInteractive", "-Command", script], {
+        timeout: 15000, windowsHide: true, encoding: "utf8", signal,
+      });
+      const out = stdout.trim();
       if (out === "NOT_FOUND") return `未找到匹配窗口「${name}」——先 screen_windows(action=list) 查看可见窗口（用进程名或标题关键词）`;
       if (out === "FAILED") return `激活失败：窗口句柄无效或前台限制（Windows 前台锁——通常点击一次即可恢复）`;
       const [, proc, title] = out.split(":");
@@ -859,6 +873,7 @@ public static class InFuWin {
     }
     return `错误：未知操作 ${action}（支持 list / activate）`;
   } catch (e) {
+    if (signal?.aborted) return "操作已取消";
     return `窗口操作失败：${(e as Error).message.slice(0, 120)}`;
   }
 };
@@ -874,7 +889,7 @@ public static class InFuWin {
  */
 function isTrustedSender(e: IpcMainEvent | IpcMainInvokeEvent): boolean {
   const wc = mainWindow?.webContents;
-  return !!wc && e.sender === wc;
+  return !!wc && e.sender === wc && e.senderFrame === wc.mainFrame;
 }
 
 function registerIpc() {
@@ -1110,7 +1125,9 @@ app.whenReady().then(() => {
   registerIpc();
   createTray();
 
-  // 启动 agent 后端（同进程宿主；生产模式同端口托管 web dist）
+  // 启动 agent 后端（同进程宿主；默认同端口托管已构建 web dist）。
+  // INFU_DESKTOP_DEV=1 仅供已另行启动 `npm run dev:desktop -w @infu/web` 的开发者使用；
+  // desktop start 不再伪造该环境，否则没有 Vite 时会加载 5199 并显示白板。
   // dist/main.js → ../.. = packages → web/dist
   const staticDir = IS_DEV ? undefined : join(__dirname, "..", "..", "web", "dist");
   startServer({

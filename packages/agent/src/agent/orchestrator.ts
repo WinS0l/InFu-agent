@@ -13,8 +13,9 @@
  */
 
 import type { AgentEvent, PhaseId, RiskLevel, ScopeRule, ToolDef } from "@infu/shared";
-import { runAgent, withImages, DEFAULT_SYSTEM_PROMPT, type RunResult } from "./loop.js";
+import { buildDeliverySummary, runAgent, withImages, DEFAULT_SYSTEM_PROMPT, type RunResult } from "./loop.js";
 import { TOOLS, getReadOnlyTools, getReviewerTools } from "../tools/index.js";
+import { getTodos } from "../tools/task-tools.js";
 import { withMcpTools } from "../mcp/index.js";
 import { resolveMaxSteps } from "./steps.js";
 import { interpretPlanFeedback } from "./plan-feedback.js";
@@ -297,7 +298,7 @@ const usageAgg = { cacheHit: 0, cacheMiss: 0, promptTokens: 0, completionTokens:
     }
     try { await discardCleanWorktrees(projectRoot); } catch { /* 忽略 */ }
     const finalText = exec.text + commitNote;
-    emit({ type: "done", text: finalText, toolCount: exec.toolCount, steps: exec.steps, usage: usageAgg });
+    emit({ type: "done", text: finalText, toolCount: exec.toolCount, steps: exec.steps, usage: usageAgg, delivery: buildDeliverySummary({ toolLogs: exec.toolLogs, approvals: exec.approvals, todos: getTodos(root, sessionId) }) });
     return { text: finalText, steps: exec.steps, toolCount: exec.toolCount, approvals: exec.approvals, toolLogs: exec.toolLogs, planText: "", reviewText: "", usage: usageAgg };
   }
 
@@ -562,7 +563,7 @@ const usageAgg = { cacheHit: 0, cacheMiss: 0, promptTokens: 0, completionTokens:
   }
 
   const finalText = exec.text + commitNote;
-  emit({ type: "done", text: finalText, toolCount: exec.toolCount, steps: exec.steps, usage: usageAgg });
+  emit({ type: "done", text: finalText, toolCount: exec.toolCount, steps: exec.steps, usage: usageAgg, delivery: buildDeliverySummary({ toolLogs: exec.toolLogs, approvals: exec.approvals, todos: getTodos(root, sessionId) }) });
   return { text: finalText, steps: exec.steps, toolCount: exec.toolCount, approvals: exec.approvals, toolLogs: exec.toolLogs, planText, reviewText, usage: usageAgg };
 }
 

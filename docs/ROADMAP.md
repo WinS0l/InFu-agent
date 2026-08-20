@@ -11,6 +11,56 @@
 
 ## 高优先级（未完成前，每个阶段都要知道）
 
+### ✅ v6.39 审计发现修复批（2026-08-20）
+- **审计结论复核**——桌面主窗口 loopback 外链、Web 同名并行 tool-result 错配、整库 Zustand 订阅、同步窗口枚举、SQLite 非事务删除/归档压缩、redirect/记忆非原子写均确认属实；`resetStaleRunning` 属进程重启后任务已死亡的预期收口，不改；stale-lock 的纯 fs ABA 不能由“删除前复查”伪装根治。
+- **安全/桌面**——主窗口 `window.open`/`will-navigate`/`will-redirect` 的外链交付统一拒绝 loopback host，防带本地 token 的 InFu 页进入系统浏览器；IPC 信任面收至主 frame；`screen_windows` 改 async PowerShell + AbortSignal，不再冻结 Electron 主进程；`screen_type` abort 时恢复 host 保存的文本剪贴板。
+- **前端**——tool-result 在实时、loadSession、loadSessionCache 三条路径均用 callId 精确匹配，缺 callId 的旧历史才回退工具名；历史重放恢复 diff；无目标 session 不再写当前工作区 Diff；App/ChatPanel/Sidebar/RightRail 等所有裸 `useStore()` 改字段 selector。
+- **数据**——`deleteSession`、`compressSessionEvents` 包 SQLite 事务；data-dir redirect 与 memory append 改临时文件 rename；迁移目录比较 Windows 大小写归一；config/projects/schedules 活锁持有期每 5 秒刷新 mtime lease，避免长操作误判 stale。
+- **验证**——agent/web/desktop `tsc --noEmit`、Web Vite build、`git diff --check`、全量 **51/51 套件、1570 断言、0 失败**。
+- **剩余限制**——stale-lock 仍是 directory-lock + timeout 协议；若未来需要强跨进程互斥，应引入 OS 文件锁或所有者随机 token + compare-and-delete 的锁文件协议。
+
+### ✅ v6.38 审计复核修复批（2026-08-20，用户修复 + 逐行复核）
+- **审计**——五路并行全库代码级通读（shared/agent 核心循环/agent 安全面/web/desktop+sandbox-rs），关键疑点亲自到行核实：综合评分 8.5→**8.9**。
+- **修复 10 项**——① `/api/chat` 心跳 interval 泄漏（8 处早退 return 补 `stopHeartbeat()`，hono `StreamingApi.close` 不触发 onAbort、finally 只包主执行块）；② `screen_scroll` 滚轮方向反转（`MOUSEEVENTF_WHEEL` 正=向上滚，`down → +delta` 实际向上，改 `? -delta : delta`）；③ `process.rs` INVALID_HANDLE_VALUE 比较错误（`u32::MAX as isize` 64 位恒 ≠ -1，改 `(-1isize) as HANDLE`）；④ `context.ts` CALIB 校准表加 `CALIB_MAX=4096` LRU + TTL 1h 惰性过期；⑤ `AppearanceConfig.theme` interface 补 `"system"`；⑥ `read_image`/`ocr_image` 补 `isProtectedPath`；⑦ `net.ts` isPrivateHostText 改 hexV4/octalV4 精确判定（`dead.beef` 不再误判，新增测试断言）；⑧ 附件服务端限制 16MB/32MB base64 估算；⑨ `mcp_register` 补 `validateHttpMcpUrl` DNS 复查（与连接一致；顺带修 tools/index.ts 未 await 的异步调用）；⑩ README 同步 v6.1/51/1558。
+- **验证**——shared/agent tsc、cargo check 通过；net/mcp/loop-opt/win-sandbox-net 4 套件 **209 断言 0 失败**。
+- **剩余**——`isLoopbackHostText`(net.ts:178) 旧 hex 正则（fail-closed 半项）；web aria/终端 theme=system/Suspense fallback、agent TDZ/looksVision/O(n²) 纯可读性项，按用户决策保留。
+
+### 🔄 v6.29 原生窗口控制区融合（2026-08-20，待实机确认）
+- **定稿实现**——Windows 原生最小化/最大化/关闭仍由 Electron 处理；窗口级顶部统一为 40px（Electron overlay、侧栏 Logo、聊天上下文、右栏空白顶带、终端/工作区开关均同高），并由同一不透明 sidebar 表面承接（dark `#1B1B1C` / light `#F9FAFB`），`BrowserWindow.backgroundColor` 跟主题同步，消除非客户区露底色。聊天顶部无圆角/边线；正文才在左侧保留 20px 圆角，以 `bg-ink`、8px 间距和近场浮空阴影与顶部区隔。右栏标签整体下移到窗口级顶部之后，正文和聊天正文同为 `bg-ink`；终端与收起/拉出按钮固定在原生按钮左侧。X 轴继续保留 140px 系统控制区，不与动作重叠。
+- **验证**——web tsc + vite build、desktop tsc 通过。桌面端加载 `packages/web/dist`，需重启 InFu 实例后由用户实机确认高度与色面；确认后转 ✅。
+
+### ✅ v6.31 欢迎态工作区状态隔离（2026-08-20）
+- **修复**——新建会话会清空消息而保留用户的右栏开启偏好；此前 `App.tsx` 只根据该偏好渲染工作区，导致欢迎页错误显示右栏且因顶部工作会话动作隐藏而难以收起。欢迎态现强制不分配右栏宽度、不渲染右栏和拖拽热区；进入有消息的工作会话后仍按原偏好恢复。
+- **回归**——生产页面 E2E 以 `detailsOpen: true` 的持久状态启动，断言欢迎态不显示「工作区」。
+
+### ✅ v6.32 欢迎与工作态信息层级收敛（2026-08-20）
+- **欢迎态**——项目资源条仅承担当前项目选择，移除长期占位的工具行说明；上下文百分比不在首屏分散注意力；三条建议任务升级为有边界/hover 的 pill，点击只填入输入框并聚焦，用户可先补充上下文再发送。
+- **工作态**——工具次数、Token、缓存命中改为默认折叠的「执行详情」，避免紧贴下一轮 Composer 的技术噪声；右栏空态在有会话记录时增加动态「下一步」区，优先给出查看当前改动、在浏览器验证及未运行测试提示；`computer-use` 统一显示为「桌面操作」，保留技术名在副说明中。
+- **验证**——Web 生产构建通过；生产 E2E 增加建议任务数量及「填入、不立即执行」断言。
+
+### ✅ v6.33 欢迎态工作区选择器收紧（2026-08-20）
+- **欢迎态**——原本与 Composer 等宽的工作目录资源条收至最大 420px 的紧凑选择器；增加「选择工作区」说明，项目名保持截断、完整路径仍在 tooltip，原项目列表/切换逻辑不变。
+
+### ✅ v6.34 交付摘要、行动联动与输入收纳（2026-08-20）
+- **交付摘要**——`done` 事件新增 `delivery`（修改文件数、完成/待办 Todo、测试状态），只由工具、Todo 与审批结果生成；不解析模型自然语言。终态消息展示紧凑卡，历史会话重放也恢复该字段；旧事件仍按已结构化工具状态降级。
+- **行动与收纳**——右栏下一步识别文件改动、失败测试、待审批与后台命令，分别直达审查/追踪；Composer 首层保留附件、审批和发送，模型、思考、临时联网及上下文用量收进「执行设置」；侧栏项目行添加直达 `+`，自由会话入口收为图标。
+- **欢迎态**——工作区选择器移除全宽约束，按内容包裹（名称最长 320px 后截断），并保留说明、切换和完整路径 tooltip。
+- **验证**——shared/agent/web 类型构建、`git diff --check`、生产 E2E **26/26**、loop-opt **25/25** 通过。
+
+### ✅ v6.35 桌面启动白板根治（2026-08-20）
+- **根因**——`npm run start -w @infu/desktop` 设置 `INFU_DESKTOP_DEV=1`，主进程因而加载 `localhost:5199`；启动命令却没有启动 Vite，Electron 实测 `ERR_CONNECTION_REFUSED` 且 `#root` 为空，表现为整窗白板。
+- **修复**——桌面 `start` 改默认加载构建后的本地静态页面（Agent 同端口托管 `web/dist`）；`INFU_DESKTOP_DEV=1` 只保留给已显式启动 `npm run dev:desktop -w @infu/web` 的 HMR 工作流。新增手工启动回归说明。
+- **追加根因**——修复启动 URL 后，桌面实测又暴露 React #185（最大更新深度）：右栏新添的 trace selector 在无账本时每次返回新 `[]`，触发 Zustand 无限更新。改复用模块级稳定 `EMPTY_TRACE`，与既有会话追踪白屏修复同模式；生产 E2E 断言空 trace 欢迎态等待后仍有 React 内容。
+
+### ✅ v6.36 欢迎菜单/运行锁定/代码圆角（2026-08-20）
+- **欢迎态**——工作区下拉改为选择器正下方、水平居中并留 8px 间距，避免左侧展开遮挡主输入/建议按钮。
+- **执行锁定**——任务运行时立即关闭并禁用附件、审批档位及「执行设置」（其中模型、思考、联网、上下文用量随之不可改）；停止按钮和发送/排队语义保持可用。
+- **代码视图**——覆盖层与聊天正文对齐：左侧 22px 大圆角、8px 左边距、细边框与克制近场阴影；保持不透明覆盖和 z-index 隔离。
+- **验证**——Web/desktop build、`git diff --check`、生产 E2E **27/27** 通过。
+
+### ✅ v6.37 原生窗口控制带再收紧（2026-08-20）
+- **桌面**——Electron `titleBarOverlay.height` 从 36px 收至 32px，缩小原生最小化/最大化/关闭三按钮；聊天和右栏的 40px 工作台顶部基线、动作安全区保持不变。
+
 ### ✅ v6.28 单机稳定版收尾（2026-08-19）
 - **注册表并发安全**——`config.json`、`projects.json`、`schedules.json` 增加短时跨进程目录锁与 stale-lock 回收；项目/定时任务操作在锁内重读、修改、原子替换，避免 CLI、服务端、调度器并发读改写导致丢项。配置保存保留非枚举读取基线，在锁内合并其他进程已写入而本次调用未修改的顶层节；同一配置节冲突仍保留最后写入者语义。
 - **验证/CI**——生产 E2E 不再接受缺 `web/dist` 或 Chromium 的跳过路径；test-runner 无断言结果行即失败；GitHub Actions 增加 Web 生产构建及 Playwright Chromium 安装。当前仓库未配置 Git remote，故无法在本会话触发远端 CI。
@@ -144,6 +194,18 @@
 ### ✅ v6.26 Composer 权限入口邻接（2026-08-19）
 - **交互**——输入框工具行的「临时联网」从模型组前移到全局审批模式按钮紧后方，使审批策略与单会话联网放行作为相邻的权限入口；既有 full 档隐藏、无会话待定和倒计时语义不变。
 - **验证**——web tsc + vite build 通过。
+
+### ✅ v6.29 Codex 工作台阅读态收敛（2026-08-20）
+- **依据与范围**——用户提供 Codex 工作台截图并确认方案；仅收敛聊天/工作区视觉层级，不改变 Agent、会话、审批、浏览器 Tab、审查、子 Agent 或追踪能力。
+- **工作台与聊天**——中栏和右栏统一为 40px 顶部基线，去除聊天正文厚阴影/浮卡感，以连续细分隔承接三栏；会话状态入口由可拖拽/自动收起胶囊改为聊天右上固定状态点，点击仍打开完整状态菜单与会话追踪；消息列收至 736px 并增加阅读节奏；底部 Composer 改为有细分隔的紧凑工具栏，缩短渐隐遮罩、降低统计行权重，避免压住末段报告内容。
+- **右侧工作区**——无工作 Tab 时移除孤立新建按钮，空态改为顶部停靠的「工作区」入口（审查为主操作，其余能力为轻量列表）；打开 Tab 后才显示浏览器式标签条与末尾新建按钮。
+- **验证**——web `tsc` + Vite 生产构建、`git diff --check` 通过；生产预览视觉检查确认顶部/分栏连续、状态入口固定、右栏顶端停靠且无孤立加号。预览未连接 Agent API 的加载失败提示属于环境噪声。
+
+### ✅ v6.30 聊天正文悬浮与代码层叠修复（2026-08-20）
+- **聊天正文**——按用户反馈，仅聊天正文（顶部工作台栏除外）恢复左侧 22px 圆角与克制近场阴影；右缘保持直角并与右侧工作区连续。
+- **顶部衔接**——移除工作台栏自身底边线与正文 `mt-2` 间距，改由正文卡片的上边线作为唯一分隔；圆角卡片贴紧顶部栏，不再出现双横线或空白缝隙。
+- **代码视图**——修复切换代码模式后聊天层可能透出的回归：代码覆盖层提升为 `z-40`、创建独立层叠上下文（`isolate`）并以显式不透明 `backgroundColor: var(--bg-base)` 覆盖，不再依赖可能被桌面合成穿透的普通背景类。
+- **验证**——web `tsc` + Vite build、`git diff --check` 通过；生产预览以临时项目 root 实际点击「代码」复现路径，DOM 实测覆盖层 `z-index:40`、`opacity:1`、`isolation:isolate`、背景 `rgb(21,21,23)`，视觉确认没有聊天内容透出；切回聊天模式确认仅左侧圆角和轻悬浮。
 
 ### ✅ v5.0 产品增强批（2026-08-18，审计建议清单全量落地——A1-A5/B1/B2/B4/C1-C4/A4/D3）
 - **A1 页面级 E2E 套件（补测试盲区）**——新 `tests/e2e-prod.test.ts`：真实服务器（staticDir=web/dist）+ playwright chromium 加载生产页面——API 层断言 CSP nonce 与注入脚本匹配 / 无令牌 401 / 带令牌 200 / 主题脚本与资源可加载；浏览器层断言页面零 401（CSP 回归的直接判据——v4.0 补 1 那类回归从此被自动拦截）/ 零 CSP 违规 / React 真实渲染 / theme-init.js 在 CSP 下执行（阻断 bundle 两阶段）/ 服务端配置主题管线。12 断言，入 npm test（43→44 套件）；startServer 补返回 httpServer（可 close）

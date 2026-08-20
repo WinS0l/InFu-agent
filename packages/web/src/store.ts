@@ -1,7 +1,7 @@
 import { create } from "zustand";
 import { persist } from "zustand/middleware";
 import { apiFetch } from "./api";
-import type { AgentEvent, ApprovalMode, AttachmentMeta, ModelConfig, PhaseId, SessionMeta, StoredEvent } from "@infu/shared";
+import type { AgentEvent, ApprovalMode, AttachmentMeta, DeliverySummary, ModelConfig, PhaseId, SessionMeta, StoredEvent } from "@infu/shared";
 
 /** 单条消息（含其触发的工具调用与交付报告） */
 export interface ChatMsg {
@@ -33,6 +33,8 @@ export interface ChatMsg {
   }>;
   /** v2.1：该轮第一条事件的 seq（Rewind 回滚锚点；历史重放时标记） */
   seqStart?: number;
+  /** 终态交付摘要：服务端从结构化工具/Todo/审批状态生成。 */
+  delivery?: DeliverySummary;
   /** v3.1：用户消息附加的文件/文件夹/图片（attachments 事件挂载；渲染附件行） */
   attachments?: AttachmentMeta[];
   /** v3.1：turn 结束时间戳（finishAssistant 记录；turn 尾操作行「· 运行 Xs」） */
@@ -344,6 +346,7 @@ interface StoreState {
   usageBySession: Record<string, { cacheHit: number; cacheMiss: number; promptTokens: number; completionTokens: number }>;
   setUsageFor: (sid: string, u: { cacheHit: number; cacheMiss: number; promptTokens: number; completionTokens: number }) => void;
   finishAssistant: () => void;
+  setDelivery: (delivery: DeliverySummary) => void;
   /** v2.13：按显式会话收尾（sendChat finally/catch 用本连接 connSid——修复跨会话清 running/写错会话） */
   finishAssistantFor: (sid: string) => void;
   addError: (msg: string) => void;
@@ -831,9 +834,14 @@ export const useStore = create<StoreState>()(
           break;
         }
         case "tool-result": {
-          if (cur) {
-            const t = cur.tools.find((x) => x.status === "running" && x.tool === event.tool);
-            if (t) { t.status = event.ok ? "ok" : "error"; t.summary = event.summary; t.output = event.summary; }
+          const t = event.callId
+            ? msgs.flatMap((m) => m.tools).find((x) => x.status === "running" && x.callId === event.callId)
+            : cur?.tools.find((x) => x.status === "running" && x.tool === event.tool);
+          if (t) {
+            t.status = event.ok ? "ok" : "error";
+            t.summary = event.summary;
+            t.output = event.summary;
+            t.diff = event.diff;
           }
           // 恢复右侧面板（与 finishTool 同规则）
           if (event.tool === "git_diff" || /^diff --git/m.test(event.summary)) diffContent = event.summary;
@@ -871,7 +879,7 @@ export const useStore = create<StoreState>()(
           if (cur) cur.review = event.content;
           break;
         case "done":
-          if (cur) { cur.streaming = false; cur.seqStart = cur.seqStart ?? seq; }
+          if (cur) { cur.streaming = false; cur.seqStart = cur.seqStart ?? seq; cur.delivery = event.delivery; }
           // v2.13：usage 重放恢复（per-session StatsLine）
           {
             const u = (event as unknown as { usage?: { cacheHit: number; cacheMiss: number; promptTokens: number; completionTokens: number } }).usage;
@@ -1008,9 +1016,14 @@ export const useStore = create<StoreState>()(
           break;
         }
         case "tool-result": {
-          if (cur) {
-            const t = cur.tools.find((x) => x.status === "running" && x.tool === event.tool);
-            if (t) { t.status = event.ok ? "ok" : "error"; t.summary = event.summary; t.output = event.summary; }
+          const t = event.callId
+            ? msgs.flatMap((m) => m.tools).find((x) => x.status === "running" && x.callId === event.callId)
+            : cur?.tools.find((x) => x.status === "running" && x.tool === event.tool);
+          if (t) {
+            t.status = event.ok ? "ok" : "error";
+            t.summary = event.summary;
+            t.output = event.summary;
+            t.diff = event.diff;
           }
           break;
         }
@@ -1018,7 +1031,7 @@ export const useStore = create<StoreState>()(
           todos = event.items;
           break;
         case "done":
-          if (cur) { cur.streaming = false; cur.seqStart = cur.seqStart ?? seq; }
+          if (cur) { cur.streaming = false; cur.seqStart = cur.seqStart ?? seq; cur.delivery = event.delivery; }
           {
             const u = (event as unknown as { usage?: { cacheHit: number; cacheMiss: number; promptTokens: number; completionTokens: number } }).usage;
             if (u) usage = u;
@@ -1234,13 +1247,15 @@ export const useStore = create<StoreState>()(
     // 新建消息）/ 并行工具场景下 tool-result 到达时匹配不到 → 工具行卡「运行中」直到任务
     // 结束重放（队列连发时重放被跳过可能永久错）；改为从后往前找包含该 tool 且仍 running 的消息
     const msg = [...msgs].reverse().find(
-      (m) => m.role === "assistant" && m.tools.some((t) => t.tool === ev.tool && t.status === "running")
+      (m) => m.role === "assistant" && m.tools.some((t) =>
+        t.status === "running" && (ev.callId ? t.callId === ev.callId : t.tool === ev.tool)
+      )
     );
     if (!msg) return;
     // v3.3 补 9：screen_capture 完成 → 截图事件标记（ComputerUsePane 事件驱动刷新，无轮询）
     if (ev.tool === "screen_capture") get().bumpScreenShots();
     // 收集 diff 输出 → 右侧面板（仅视图会话）
-    if (sid === s.activeSessionId || !sid) {
+    if (sid === s.activeSessionId) {
       if (ev.tool === "git_diff" || /^diff --git/m.test(ev.summary)) {
         set({ diffContent: ev.summary });
       }
@@ -1255,7 +1270,7 @@ export const useStore = create<StoreState>()(
             ? {
                 ...x,
                 tools: x.tools.map((t) =>
-                  t.tool === ev.tool && t.status === "running"
+                  t.status === "running" && (ev.callId ? t.callId === ev.callId : t.tool === ev.tool)
                     ? { ...t, status: ev.ok ? "ok" : "error", summary: ev.summary, output: ev.summary, diff: ev.diff }
                     : t
                 ),
@@ -1511,6 +1526,13 @@ export const useStore = create<StoreState>()(
         ...patchRunning(s, sid, false),
       };
     }),
+
+  setDelivery: (delivery) =>
+    set((s) =>
+      patchMsgs(s, (m) => m.map((item, index) =>
+        index === m.length - 1 && item.role === "assistant" ? { ...item, delivery } : item
+      ))
+    ),
 
   // v2.13：按显式会话收尾（sendChat finally/catch 用本连接 connSid——
   // 修复多会话并行时 finally 读全局 eventTarget 跨会话清 running/写错会话）

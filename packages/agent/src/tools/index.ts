@@ -546,7 +546,7 @@ export const TOOLS: Record<string, ToolDef> = {
       if (!(await guard(ctx, "mcp_register", "high", desc, true))) {
         return "用户拒绝：未注册（MCP 服务器注册需人工确认）";
       }
-      const r = registerMcpServer(args as unknown as RegisterInput);
+      const r = await registerMcpServer(args as unknown as RegisterInput);
       return r.ok ? r.message : `错误：${r.message}`;
     },
   },

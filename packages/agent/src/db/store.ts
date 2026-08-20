@@ -135,19 +135,22 @@ export class SessionStore {
    * （摘要成为最早的 assistant 文本）。返回压缩前后事件数；事件不足不压缩。
    */
   compressSessionEvents(id: string, keep = 200): { before: number; after: number } | null {
-    const events = this.getEvents(id);
-    if (events.length <= keep + 50) return null;
-    // 摘要源：最后一次 done 文本 > 最后一次 text > 最后一条 user-message
-    let summary = "";
-    for (let i = events.length - 1; i >= 0 && !summary; i--) {
-      const ev = events[i].event as AgentEvent;
-      if (ev.type === "done" && ev.text?.trim()) summary = ev.text.trim();
-      else if (ev.type === "text" && (ev as { text?: string }).text?.trim()) summary = (ev as { text?: string }).text!.trim();
-      else if (ev.type === "user-message" && (ev as { text?: string }).text?.trim()) summary = (ev as { text?: string }).text!.trim();
-    }
-    const kept = events.slice(-keep);
     this.db.exec("BEGIN");
     try {
+      const events = this.getEvents(id);
+      if (events.length <= keep + 50) {
+        this.db.exec("COMMIT");
+        return null;
+      }
+      // 摘要源：最后一次 done 文本 > 最后一次 text > 最后一条 user-message
+      let summary = "";
+      for (let i = events.length - 1; i >= 0 && !summary; i--) {
+        const ev = events[i].event as AgentEvent;
+        if (ev.type === "done" && ev.text?.trim()) summary = ev.text.trim();
+        else if (ev.type === "text" && (ev as { text?: string }).text?.trim()) summary = (ev as { text?: string }).text!.trim();
+        else if (ev.type === "user-message" && (ev as { text?: string }).text?.trim()) summary = (ev as { text?: string }).text!.trim();
+      }
+      const kept = events.slice(-keep);
       this.db.prepare(`DELETE FROM events WHERE session_id = ?`).run(id);
       const now = Date.now();
       const summaryEvent: AgentEvent = {
@@ -164,11 +167,11 @@ ${summary.slice(0, 2000)}`,
           .run(id, i + 1, kept[i].ts, JSON.stringify(kept[i].event));
       }
       this.db.exec("COMMIT");
+      return { before: events.length, after: keep + 1 };
     } catch (e) {
       try { this.db.exec("ROLLBACK"); } catch { /* 忽略 */ }
       throw e;
     }
-    return { before: events.length, after: keep + 1 };
   }
 
   /** 新建会话（status=running，事件流从 0 开始） */
@@ -270,8 +273,15 @@ ${summary.slice(0, 2000)}`,
   }
 
   deleteSession(id: string) {
-    this.db.prepare(`DELETE FROM events WHERE session_id = ?`).run(id);
-    this.db.prepare(`DELETE FROM sessions WHERE id = ?`).run(id);
+    this.db.exec("BEGIN");
+    try {
+      this.db.prepare(`DELETE FROM events WHERE session_id = ?`).run(id);
+      this.db.prepare(`DELETE FROM sessions WHERE id = ?`).run(id);
+      this.db.exec("COMMIT");
+    } catch (e) {
+      try { this.db.exec("ROLLBACK"); } catch { /* ignore */ }
+      throw e;
+    }
   }
 
   /** 更新会话状态（done/error/stopped/running） */

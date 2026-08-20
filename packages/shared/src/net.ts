@@ -175,7 +175,13 @@ export function isPrivateHostText(host: string): { private: boolean; parts?: num
   const parts = normalizeV4(h);
   if (parts) return { private: isPrivateV4Parts(parts), parts };
   // 非纯数字但含十六进制/八进制段（0x7f.0.0.1 / 0177.0.0.1）→ 保守拦截（fail-closed）
-  if (/^[0-9a-fx.]+$/i.test(h) && h.includes(".")) return { private: true };
+  // 仅含 hex 字符并不意味着数字 IP：例如合法域名 dead.beef。
+  // 仍拦截明确的 hex/octal IPv4 形式。允许每段混用基数是系统解析器常见行为，
+  // 因此 `0x7f.0.0.1` 与 `0177.0.0.1` 也必须 fail-closed；但 dead.beef 仍是域名。
+  const labels = h.split(".");
+  const hexV4 = labels.length >= 2 && labels.length <= 4 && labels.some((part) => /^0x[0-9a-f]+$/i.test(part)) && labels.every((part) => /^(?:0x[0-9a-f]+|[0-9]+)$/i.test(part));
+  const octalV4 = labels.length >= 2 && labels.length <= 4 && labels.some((part) => /^0[0-7]+$/.test(part)) && labels.every((part) => /^[0-9]+$/.test(part));
+  if (hexV4 || octalV4) return { private: true };
   return null; // 域名
 }
 

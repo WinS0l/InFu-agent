@@ -25,25 +25,38 @@ export const COMPRESS_TARGET_RATIO = 0.6;
 const EWMA_ALPHA = 0.3;
 /** 单次比值钳制（防单轮异常样本把因子带飞） */
 const CALIB_CLAMP: [number, number] = [0.25, 4];
-const CALIB = new Map<string, { factor: number; n: number }>();
+const CALIB = new Map<string, { factor: number; n: number; touched: number }>();
+const CALIB_MAX = 4096;
+const CALIB_TTL_MS = 60 * 60 * 1000;
 
 /** 记录一轮真实用量 vs 本地估算的比值（loop 成功轮调用） */
 export function recordUsageCalibration(sessionId: string, actualTokens: number, estimatedTokens: number): void {
   if (!Number.isFinite(actualTokens) || actualTokens <= 0) return;
   const est = Math.max(1, estimatedTokens);
   const ratio = Math.min(CALIB_CLAMP[1], Math.max(CALIB_CLAMP[0], actualTokens / est));
+  const now = Date.now();
   const prev = CALIB.get(sessionId);
   if (!prev) {
-    CALIB.set(sessionId, { factor: ratio, n: 1 });
+    if (CALIB.size >= CALIB_MAX) {
+      const oldest = [...CALIB.entries()].sort((a, b) => a[1].touched - b[1].touched)[0];
+      if (oldest) CALIB.delete(oldest[0]);
+    }
+    CALIB.set(sessionId, { factor: ratio, n: 1, touched: now });
     return;
   }
   const factor = EWMA_ALPHA * ratio + (1 - EWMA_ALPHA) * prev.factor;
-  CALIB.set(sessionId, { factor, n: prev.n + 1 });
+  CALIB.set(sessionId, { factor, n: prev.n + 1, touched: now });
 }
 
 /** 当前校准因子（无记录 = 1） */
 export function contextCalibrationFactor(sessionId: string): number {
-  return CALIB.get(sessionId)?.factor ?? 1;
+  const entry = CALIB.get(sessionId);
+  if (!entry || Date.now() - entry.touched > CALIB_TTL_MS) {
+    CALIB.delete(sessionId);
+    return 1;
+  }
+  entry.touched = Date.now();
+  return entry.factor;
 }
 
 /** 测试专用：清空校准状态 */

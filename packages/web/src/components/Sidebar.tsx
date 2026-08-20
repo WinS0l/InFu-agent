@@ -116,7 +116,11 @@ function SessionRow({ s, projectName, onOpen, onRename, onPin, onArchive, busy }
   const [title, setTitle] = useState(s.title);
   const [menuOpen, setMenuOpen] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
-  const { activeSessionId, runningIds, approvals, askBySession, plansBySession } = useStore();
+  const activeSessionId = useStore((s) => s.activeSessionId);
+  const runningIds = useStore((s) => s.runningIds);
+  const approvals = useStore((s) => s.approvals);
+  const askBySession = useStore((s) => s.askBySession);
+  const plansBySession = useStore((s) => s.plansBySession);
   const active = s.id === activeSessionId;
   // v3.1：多会话并行——运行态按会话集合判断（后台任务完成/进行中侧栏可随时切换）
   const isRunning = runningIds.includes(s.id);
@@ -249,11 +253,20 @@ interface SidebarProps {
  * 底部设置行；可折叠为 56px rail：Logo=展开、新建图标、设置图标）。
  */
 export default function Sidebar({ onOpenSettings, className = "" }: SidebarProps) {
-  const {
-    root, setRoot, runningIds, sessions, activeSessionId, setActiveSessionId, newSession, loadSession,
-    clearPendingRollback, searchFocusTick, sidebarCollapsed, setSidebarCollapsed,
-    useWorktree, setUseWorktree,
-  } = useStore();
+  const root = useStore((s) => s.root);
+  const setRoot = useStore((s) => s.setRoot);
+  const runningIds = useStore((s) => s.runningIds);
+  const sessions = useStore((s) => s.sessions);
+  const activeSessionId = useStore((s) => s.activeSessionId);
+  const setActiveSessionId = useStore((s) => s.setActiveSessionId);
+  const newSession = useStore((s) => s.newSession);
+  const loadSession = useStore((s) => s.loadSession);
+  const clearPendingRollback = useStore((s) => s.clearPendingRollback);
+  const searchFocusTick = useStore((s) => s.searchFocusTick);
+  const sidebarCollapsed = useStore((s) => s.sidebarCollapsed);
+  const setSidebarCollapsed = useStore((s) => s.setSidebarCollapsed);
+  const useWorktree = useStore((s) => s.useWorktree);
+  const setUseWorktree = useStore((s) => s.setUseWorktree);
   const [projects, setProjects] = useState<ProjectInfo[]>([]);
   const [search, setSearch] = useState("");
   const [searchOpen, setSearchOpen] = useState(false);
@@ -431,11 +444,11 @@ export default function Sidebar({ onOpenSettings, className = "" }: SidebarProps
   return (
     <aside className={`flex min-h-0 min-w-0 flex-col bg-sidebar/70 backdrop-blur-2xl select-none ${className}`}>
       {/* Logo 行（与聊天 header 同高）：点击 = 新建会话；右侧折叠按钮；
-          v3.0 批 9 = 窗口拖拽区（no-drag 给按钮）
-          v3.2：header 3.25rem（与右侧栏 tab 条统一，原生融合）
-          v3.3 补：去掉底部 border-b 分隔细线（用户拍板：左侧栏最顶上不要细线） */}
+           v3.0 批 9 = 窗口拖拽区（no-drag 给按钮）
+           窗口级顶部统一为 40px（与 Electron 原生控制区同高）
+           v3.3 补：去掉底部 border-b 分隔细线（用户拍板：左侧栏最顶上不要细线） */}
       <div
-        className="flex h-[3.25rem] shrink-0 items-center justify-between px-4"
+        className="flex h-9 shrink-0 items-center justify-between bg-sidebar px-4"
         style={{ WebkitAppRegion: "drag" } as React.CSSProperties}
       >
         <button
@@ -667,7 +680,14 @@ export default function Sidebar({ onOpenSettings, className = "" }: SidebarProps
                 {p.sessionCount > 0 && (
                   <span className="shrink-0 rounded-full bg-hover px-1.5 text-[11px] leading-[18px] text-sub">{p.sessionCount}</span>
                 )}
-                {/* 项目操作：⋯ 下拉菜单（新建会话/折叠/移除）；确认移除两段式 */}
+                <button
+                  className="flex h-6 w-6 shrink-0 cursor-pointer items-center justify-center rounded-md text-sub transition-colors hover:bg-hover hover:text-info"
+                  onClick={(e) => { e.stopPropagation(); newSessionInProject(p.root); }}
+                  title={`在 ${p.name} 中新建会话`}
+                >
+                  <Plus className="h-3.5 w-3.5" />
+                </button>
+                {/* 项目操作：⋯ 下拉菜单（折叠/移除）；确认移除两段式 */}
                 <span className="relative flex shrink-0 items-center">
                   {confirmRemove === p.id ? (
                     // v3.0 批 12：移除确认改下拉面板（RowMenu 同款样式——与主题/其他下拉一致）
@@ -727,7 +747,6 @@ export default function Sidebar({ onOpenSettings, className = "" }: SidebarProps
                         <RowMenu
                           onClose={() => setMenuFor(null)}
                           items={[
-                            { label: "新建会话", icon: <MessageSquarePlus className="h-3.5 w-3.5" />, onClick: () => newSessionInProject(p.root) },
                             { label: isCollapsed ? "展开项目" : "折叠项目", icon: <ChevronsDownUp className="h-3.5 w-3.5" />, onClick: () => setCollapsed((c) => ({ ...c, [p.id]: !isCollapsed })) },
                             { label: "移除项目", icon: <Trash2 className="h-3.5 w-3.5" />, danger: true, onClick: () => setConfirmRemove(p.id) },
                           ]}
@@ -766,20 +785,18 @@ export default function Sidebar({ onOpenSettings, className = "" }: SidebarProps
           );
         })}
 
-        {/* ── 会话区（无项目隶属，类似一个"自由项目"；区块头点击 = 折叠/展开；
-             新建 = 新建自由会话，脱离当前项目） ── */}
+        {/* ── 会话区（无项目隶属，类似一个"自由项目"；区块头点击 = 折叠/展开） ── */}
         <SectionHeader
           icon={<MessageSquare className="h-3.5 w-3.5" />}
           label="会话"
           onClick={() => { setCollapseAll(false); setFreeCollapsed(!freeCollapsed); }}
         >
           <button
-            className="flex h-7 cursor-pointer items-center gap-1 rounded-lg border border-line bg-elevated px-2.5 text-xs font-medium text-text shadow-lv1 transition-colors hover:bg-hover"
+            className="flex h-7 w-7 cursor-pointer items-center justify-center rounded-lg text-sub transition-colors hover:bg-hover hover:text-info"
             onClick={(e) => { e.stopPropagation(); newFreeSession(); }}
             title="新建会话（自由会话，不隶属任何项目）"
           >
             <Plus className="h-3.5 w-3.5" />
-            新建会话
           </button>
         </SectionHeader>
         {!collapseAll && !freeCollapsed && (

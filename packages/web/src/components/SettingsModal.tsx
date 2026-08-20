@@ -151,7 +151,10 @@ function ModelDropdown({ value, models, onChange }: {
 }
 
 export default function SettingsModal({ onClose, initialTab = "general" }: Props) {
-  const { models, setAppearance, setRoot, root } = useStore();
+  const models = useStore((s) => s.models);
+  const setAppearance = useStore((s) => s.setAppearance);
+  const setRoot = useStore((s) => s.setRoot);
+  const root = useStore((s) => s.root);
   const [tab, setTab] = useState<SettingsTab>(initialTab);
   const [cfg, setCfg] = useState<SettingsConfig | null>(null);
   const [saving, setSaving] = useState(false);

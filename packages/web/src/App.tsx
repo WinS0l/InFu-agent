@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState, lazy, Suspense } from "react";
-import { FolderOpen, PanelsTopLeft } from "lucide-react";
+import { FolderOpen, PanelsTopLeft, PanelRightClose } from "lucide-react";
 import { useStore } from "./store";
 import { fetchModels, fetchSessions, fetchSessionEvents, maybeMigrateV1, fetchConfig, fetchProjects } from "./api";
 import Sidebar from "./components/Sidebar";
@@ -21,12 +21,21 @@ const SuspenseFallback = () => <div className="flex h-full items-center justify-
  * 顶部区域（对话/代码推拉 + 会话名）仅覆盖中间+右详情；终端在聊天列内（ChatPanel 渲染）
  */
 export default function App() {
-  const {
-    theme, fontSize, streamCursor, setAppearance,
-    sidebarCollapsed, sidebarWidth, detailsOpen, detailsWidth,
-    setSidebarCollapsed, setSidebarWidth, setDetailsOpen, setDetailsWidth,
-    focusSearch, settingsTab, setSettingsTab,
-  } = useStore();
+  const theme = useStore((s) => s.theme);
+  const fontSize = useStore((s) => s.fontSize);
+  const streamCursor = useStore((s) => s.streamCursor);
+  const setAppearance = useStore((s) => s.setAppearance);
+  const sidebarCollapsed = useStore((s) => s.sidebarCollapsed);
+  const sidebarWidth = useStore((s) => s.sidebarWidth);
+  const detailsOpen = useStore((s) => s.detailsOpen);
+  const detailsWidth = useStore((s) => s.detailsWidth);
+  const setSidebarCollapsed = useStore((s) => s.setSidebarCollapsed);
+  const setSidebarWidth = useStore((s) => s.setSidebarWidth);
+  const setDetailsOpen = useStore((s) => s.setDetailsOpen);
+  const setDetailsWidth = useStore((s) => s.setDetailsWidth);
+  const focusSearch = useStore((s) => s.focusSearch);
+  const settingsTab = useStore((s) => s.settingsTab);
+  const setSettingsTab = useStore((s) => s.setSettingsTab);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [dragging, setDragging] = useState(false);
   const loaded = useRef(false);
@@ -192,17 +201,20 @@ export default function App() {
   const sideW = sidebarCollapsed ? 56 : sidebarWidth;
   // v3：顶部区域（仅非空会话显示）——「对话/代码」推拉 + 左侧会话归属
   const hasMessages = useStore((s) => s.messages.length > 0);
-  const { viewMode, setViewMode } = useStore();
+  const viewMode = useStore((s) => s.viewMode);
+  const setViewMode = useStore((s) => s.setViewMode);
   // v3.3 补 13：终端开关移入聊天 header 右上角（store 状态与 ChatPanel 共享）
   const terminalOpen = useStore((s) => s.terminalOpen);
   const setTerminalOpen = useStore((s) => s.setTerminalOpen);
   // v3.0 UI 审查：代码视图可用性——root 为空（自由会话未配默认工作目录）时禁用「代码」按钮
   const root = useStore((s) => s.root);
-  // v3：右侧栏折叠后保留 56px rail（与左侧栏 rail 对称；代码模式完全隐藏）
-  const detW = viewMode === "code" ? 0 : detailsOpen ? detailsWidth : 56;
+  // 欢迎态没有工作区语义：即使用户在上个会话打开过右栏，也不能让空白欢迎页
+  // 继承一块无法收起的工作区。detailsOpen 仍作为工作会话的用户偏好保留。
+  const detW = !hasMessages || viewMode === "code" || !detailsOpen ? 0 : detailsWidth;
   // v3：顶部栏左侧——项目会话显示项目名，自由会话显示会话名
   const [projects, setProjects] = useState<Array<{ id: string; name: string; root: string }>>([]);
-  const { sessions, activeSessionId } = useStore();
+  const sessions = useStore((s) => s.sessions);
+  const activeSessionId = useStore((s) => s.activeSessionId);
   useEffect(() => {
     fetchProjects().then(setProjects).catch(() => {});
   }, []);
@@ -266,17 +278,13 @@ export default function App() {
           onOpenSettings={(tab) => { setSettingsTab(tab); setSettingsOpen(true); }}
         />
 
-        {/* 中间列（v2.14 批 5：整体 = 大圆角卡片——header 与聊天界面一体，圆角处透出侧栏/光晕）
-            v2.14 批 6：顶部不留缝（pt-0）、右侧无缝贴右侧栏（pr-0，分隔线 = 卡片边框）
-            v2.14 批 7：右侧直角（rounded-l-only）——与右侧栏融为一体，圆角只保留在左侧
-            v3.3 补 4：右侧栏折叠时去掉卡片右边框（border-r-0）——折叠形态与聊天界面之间无分隔线 */}
-        <div className="min-h-0 min-w-0 pb-2 pl-2" style={{ gridColumn: 2, gridRow: "1 / span 2" }}>
-          <div className="flex h-full flex-col overflow-hidden rounded-l-[20px] border border-r-0 border-line bg-ink shadow-lv2">
-            {/* 顶部区域（v2.14 批 5：进卡片，与聊天界面一体；左侧会话归属 + 推拉居中）
-                v3.0 批 9：整行 = 窗口拖拽区（no-drag 给可交互元素） */}
+        {/* 中间列与工作区共用一条紧凑顶部基线；正文不再像浮在窗口中的独立白纸。 */}
+        <div className="min-h-0 min-w-0" style={{ gridColumn: 2, gridRow: "1 / span 2" }}>
+          <div className="flex h-full flex-col overflow-hidden">
+            {/* 顶部工作台栏：会话上下文、模式切换与右侧动作在同一视觉基线。 */}
             {hasMessages && (
               <header
-                className="relative flex h-[3.25rem] shrink-0 items-center border-b border-line bg-ink px-4"
+                className="relative flex h-10 shrink-0 items-center bg-sidebar px-4"
                 style={{ WebkitAppRegion: "drag" } as React.CSSProperties}
               >
                 <span className="flex min-w-0 items-center gap-1.5 text-[13px] font-medium text-text" style={{ WebkitAppRegion: "no-drag" } as React.CSSProperties}>
@@ -324,68 +332,49 @@ export default function App() {
                     代码
                   </button>
                 </div>
-                {/* v3.3 补 13/15：终端开关 → 聊天界面顶部区域右上角（用户拍板；no-drag 可点）。
-                    v3.3 补 15：动态让位——Electron 原生三按钮悬浮窗口右上角（约 140px 宽、
-                    40px 高），header 右缘到窗口右缘的距离 = 右栏宽度（展开 360 / 折叠 56 /
-                    代码 0）；右栏折叠/代码模式时按钮会落进原生按钮区被盖（用户反馈），
-                    按缺口动态让位（让位 = 140 - 右栏宽度，最小 0） */}
-                <div
-                  className="ml-auto flex items-center"
-                  style={{
-                    paddingRight: Math.max(0, 138 - (viewMode === "code" ? 0 : detailsOpen ? detailsWidth : 56)),
-                    WebkitAppRegion: "no-drag",
-                  } as React.CSSProperties}
-                >
-                  {viewMode === "chat" && (
-                    <TerminalToggleButton open={terminalOpen} onClick={() => setTerminalOpen(!terminalOpen)} />
-                  )}
-                </div>
               </header>
             )}
-            <div className="min-h-0 flex-1">
+            {/* 顶栏无额外底线；正文卡片自身上边线是唯一分隔，贴紧顶部并只在左侧圆角悬浮。 */}
+            <div className="ml-2 min-h-0 flex-1 overflow-hidden rounded-l-[22px] border border-r-0 border-line bg-ink shadow-[-5px_10px_26px_rgba(0,0,0,0.10),0_2px_6px_rgba(0,0,0,0.04)]">
               <ChatPanel />
             </div>
           </div>
         </div>
         {viewMode === "code" && (
           <div
-            className="absolute bottom-0 z-10 overflow-hidden"
-            style={{
-              left: sideW + 8,
-              top: hasMessages ? "calc(3.25rem + 1px)" : 0,
-              right: 0,
-              // 覆盖层用不透明底（不透出下层聊天）；卡片边框保留（一体式代码视图）
-              background: "var(--bg-base)",
-            }}
+            className="absolute bottom-0 z-40 isolate overflow-hidden rounded-l-[22px] border border-r-0 border-line bg-base shadow-[-5px_10px_26px_rgba(0,0,0,0.10),0_2px_6px_rgba(0,0,0,0.04)]"
+            style={{ left: sideW + 8, top: hasMessages ? "40px" : 0, right: 0, backgroundColor: "var(--bg-base)", opacity: 1 }}
           >
             <Suspense fallback={<SuspenseFallback />}>
               <CodeView />
             </Suspense>
           </div>
         )}
-        {/* 右详情栏（v2.9 浏览器式：顶部 tab 条 + 内容区 + 空态初始面板；折叠后保留 56px rail；
-            代码模式隐藏）
-            v2.14 批 6：与聊天卡片无缝贴齐（去掉 border-l——分隔线 = 卡片右边框） */}
-        {viewMode === "chat" && (detailsOpen ? (
-          <aside className="row-span-2 flex min-h-0 min-w-0 flex-col border-l border-line bg-sidebar" style={{ gridColumn: 3 }}>
-            <RightRail onCollapse={() => setDetailsOpen(false)} />
+        {/* 右详情栏：窗口级顶部与聊天顶栏连续无竖线；分隔线从正文共同的 y=40 基线才开始。 */}
+        {hasMessages && viewMode === "chat" && (detailsOpen ? (
+          <aside className="row-span-2 flex min-h-0 min-w-0 flex-col bg-ink" style={{ gridColumn: 3 }}>
+            <div className="h-10 shrink-0 bg-sidebar" />
+            <div className="min-h-0 flex-1 border-l border-t border-line"><RightRail /></div>
           </aside>
         ) : (
-          // 折叠 rail（56px）：展开按钮放在原生窗口按钮（titleBarOverlay 悬浮
-          // 右上角，约 38px 高）正下方——顶部让位，按钮紧贴其下（v3.0 批 9.5 拍板）
-          // v3.3 补：去掉分隔细线——折叠形态只有拉出按钮，别的什么都没有（用户拍板）
-          <aside className="row-span-2 flex flex-col items-center gap-1 border-l border-line bg-sidebar py-3" style={{ gridColumn: 3 }}>
-            {/* 顶部让位区（避开原生窗口按钮悬浮区约 38px 高；无边框无线条 = 视觉空白） */}
-            <div className="h-[calc(3.25rem-11px)] shrink-0" />
-            <button
-              className="flex h-11 w-11 cursor-pointer items-center justify-center rounded-full text-sub transition-colors hover:bg-hover hover:text-text"
-              onClick={() => setDetailsOpen(true)}
-              title="展开右侧栏"
-            >
-              <PanelsTopLeft className="h-5 w-5" />
-            </button>
-          </aside>
+          <></>
         ))}
+        {/* 窗口级动作固定在原生控制区左侧：终端在前，右栏展开/收起紧随其后。 */}
+        {hasMessages && viewMode === "chat" && (
+          <div
+            className="absolute right-[140px] top-0 z-20 flex h-10 items-center gap-1 bg-sidebar pr-2"
+            style={{ WebkitAppRegion: "no-drag" } as React.CSSProperties}
+          >
+            <TerminalToggleButton open={terminalOpen} onClick={() => setTerminalOpen(!terminalOpen)} />
+            <button
+              className="flex h-8 w-8 cursor-pointer items-center justify-center rounded-lg text-sub transition-colors hover:bg-hover hover:text-text"
+              onClick={() => setDetailsOpen(!detailsOpen)}
+              title={detailsOpen ? "收起右侧栏" : "展开右侧栏"}
+            >
+              {detailsOpen ? <PanelRightClose className="h-4.5 w-4.5" /> : <PanelsTopLeft className="h-4.5 w-4.5" />}
+            </button>
+          </div>
+        )}
         {/* v2.5 子智能体详情（v2.9：右侧栏 tab 承载——subagent-start 自动开 tab 实时跟随） */}
 
         {/* 侧栏拖拽热区（8px，隐形；折叠态禁用） */}
@@ -402,7 +391,7 @@ export default function App() {
         {/* 右详情栏拖拽热区（8px 隐形；折叠态点击重开，拖拽调宽）。
             v3.0 UI 审查：代码模式完全隐藏（右栏 = 0 宽，热区会悬在代码视图右缘盖住内容）
             v3.3 补 8：可见拖柄块移除（用户拍板）——只留隐形热区，拖拽能力不变 */}
-        {viewMode !== "code" && (
+        {hasMessages && viewMode !== "code" && (
         <div
           className="group absolute bottom-0 top-0 z-30 w-2 cursor-col-resize"
           style={{ right: Math.max(0, detW - 4) }}

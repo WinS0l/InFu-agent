@@ -2,7 +2,7 @@
  * v2.6 收尾工具调用优化自测（畸形 JSON 修复 / 结果裁剪 / 写工具分组）
  * 运行：npx tsx packages/agent/tests/loop-opt.test.ts
  */
-import { repairToolArgs, trimToolResult, TRIM_TOOL_RESULT, isMutatingTool, isToolResultFailure, shouldBlockSameCallFailure } from "../src/agent/loop.js";
+import { repairToolArgs, trimToolResult, TRIM_TOOL_RESULT, isMutatingTool, isToolResultFailure, shouldBlockSameCallFailure, buildDeliverySummary } from "../src/agent/loop.js";
 
 let passed = 0;
 let failed = 0;
@@ -48,6 +48,25 @@ check("成功结果不计失败", !isToolResultFailure(true, "已写入 x.ts"));
 check("用户拒绝不计入失败（保留下次审批）", !isToolResultFailure(true, "用户拒绝：未写入"));
 check("两次失败前允许调整", !shouldBlockSameCallFailure(1));
 check("两次同参失败后阻止第三次执行", shouldBlockSameCallFailure(2));
+
+// 5. Structured delivery summary: only structured tool/todo data, never final natural-language guessing.
+console.log("\n▶ 结构化交付摘要");
+const delivery = buildDeliverySummary({
+  toolLogs: [
+    { tool: "write_file", args: { path: "src/App.tsx" }, ok: true, summary: "已写入" },
+    { tool: "edit_file", args: { path: "src/App.css" }, ok: true, summary: "已编辑" },
+    { tool: "run_test", args: {}, ok: false, summary: "测试失败" },
+  ],
+  todos: [
+    { text: "完成搜索功能", status: "completed" },
+    { text: "补充边界测试", status: "pending" },
+  ],
+  approvals: { required: 1, approved: 0, denied: 1 },
+});
+check("摘要统计修改文件且去重", delivery.changedFiles === 2, JSON.stringify(delivery));
+check("摘要只以完成 Todo 作为完成项", delivery.completedItems.includes("完成搜索功能") && !delivery.completedItems.includes("补充边界测试"));
+check("摘要带失败验证与待办", delivery.verification === "failed" && delivery.pendingItems.includes("补充边界测试"));
+check("摘要把拒绝审批列为待处理", delivery.pendingItems.some((item) => item.includes("审批")));
 
 console.log(`\n=== 结果：${passed} 通过 / ${failed} 失败 ===`);
 process.exit(failed ? 1 : 0);

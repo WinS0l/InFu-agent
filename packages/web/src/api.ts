@@ -543,6 +543,7 @@ function handleEvent(ev: AgentEvent, connSid: string | null) {
       break;
     case "done":
       st.finishAssistant();
+      if (ev.delivery) st.setDelivery(ev.delivery);
       // v2.13：usage 按会话存（视图切换后 StatsLine 显示该会话自己的数字）；
       // 非当前视图会话完成 → 额外刷新列表（侧栏 done 提醒）
       if (ev.usage) st.setUsageFor(connSid ?? st.activeSessionId ?? "", ev.usage);

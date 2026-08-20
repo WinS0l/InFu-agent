@@ -140,7 +140,7 @@ fn open_nul_stdin() -> Result<HANDLE, String> {
             ptr::null_mut(),
         )
     };
-    if h == std::u32::MAX as isize as HANDLE {
+    if h == (-1isize) as HANDLE {
         return Err(format!("打开 NUL 失败（WinError {}）", last_error()));
     }
     Ok(h)

@@ -55,7 +55,7 @@ const delivery = buildDeliverySummary({
   toolLogs: [
     { tool: "write_file", args: { path: "src/App.tsx" }, ok: true, summary: "已写入" },
     { tool: "edit_file", args: { path: "src/App.css" }, ok: true, summary: "已编辑" },
-    { tool: "run_test", args: {}, ok: false, summary: "测试失败" },
+    { tool: "run_test", args: { command: "npm test" }, ok: false, summary: "测试失败" },
   ],
   todos: [
     { text: "完成搜索功能", status: "completed" },
@@ -64,6 +64,8 @@ const delivery = buildDeliverySummary({
   approvals: { required: 1, approved: 0, denied: 1 },
 });
 check("摘要统计修改文件且去重", delivery.changedFiles === 2, JSON.stringify(delivery));
+check("摘要携带可点击的真实改动文件", delivery.changedPaths?.join(",") === "src/App.css,src/App.tsx", JSON.stringify(delivery));
+check("摘要携带真实验证命令与结果", delivery.verifications?.length === 1 && delivery.verifications[0]?.command === "npm test" && delivery.verifications[0]?.status === "failed", JSON.stringify(delivery));
 check("摘要只以完成 Todo 作为完成项", delivery.completedItems.includes("完成搜索功能") && !delivery.completedItems.includes("补充边界测试"));
 check("摘要带失败验证与待办", delivery.verification === "failed" && delivery.pendingItems.includes("补充边界测试"));
 check("摘要把拒绝审批列为待处理", delivery.pendingItems.some((item) => item.includes("审批")));

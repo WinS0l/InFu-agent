@@ -1,4 +1,6 @@
 import { FileText, Image as ImageIcon, X } from "lucide-react";
+import type { AttachmentMeta } from "@infu/shared";
+import { useStore } from "../store";
 
 /** v3.1 附件草稿（发送前状态；File 对象仅内存，不持久化） */
 export interface AttachmentDraft {
@@ -12,6 +14,7 @@ export interface AttachmentDraft {
   dataUrl?: string;
   /** v3.0 批 12：桌面版真实路径引用（系统对话框选择；不复制内容） */
   path?: string;
+  kind?: "file" | "dir" | "image";
 }
 
 function fmtSize(n?: number): string {
@@ -71,22 +74,25 @@ export default function AttachmentRail({
 }
 
 /** 附件行渲染（消息内：重放/实时附件展示） */
-export function AttachmentLine({ items }: { items: Array<{ name: string; kind: string; size?: number }> }) {
+export function AttachmentLine({ items }: { items: AttachmentMeta[] }) {
+  const openPreview = (item: AttachmentMeta) => {
+    useStore.getState().openRightTab({
+      id: `attachment:${item.path ?? item.name}`,
+      kind: "attachment",
+      label: item.name,
+      attachment: item,
+    });
+    useStore.getState().setDetailsOpen(true);
+  };
   return (
     <div className="mb-1 flex flex-wrap items-center gap-1.5">
-      {items.map((a, i) => (
-        <span
-          key={i}
-          className="flex items-center gap-1 rounded-md bg-hover/70 px-1.5 py-0.5 text-xs text-sub"
-          title={a.kind === "image" ? "图片（已发送给模型查看）" : ""}
-        >
-          {a.kind === "image" ? (
-            <ImageIcon className="h-3 w-3 shrink-0 text-info" />
-          ) : (
-            <FileText className="h-3 w-3 shrink-0 text-sub" />
-          )}
+      {items.map((a, i) => a.kind === "image" && a.preview ? (
+        <button key={i} className="group relative h-12 w-12 cursor-pointer overflow-hidden rounded-lg border border-line bg-hover" onClick={() => openPreview(a)} title={`在工作区预览 ${a.name}`}><img src={a.preview} alt={a.name} className="h-full w-full object-cover" /><span className="sr-only">预览 {a.name}</span></button>
+      ) : (
+        <button key={i} onClick={() => openPreview(a)} className="flex cursor-pointer items-center gap-1 rounded-md bg-hover/70 px-1.5 py-0.5 text-xs text-sub transition-colors hover:bg-hover hover:text-text" title={`在工作区预览 ${a.name}`}>
+          {a.kind === "image" ? <ImageIcon className="h-3 w-3 shrink-0 text-info" /> : <FileText className="h-3 w-3 shrink-0 text-sub" />}
           <span className="max-w-[220px] truncate">{a.name}</span>
-        </span>
+        </button>
       ))}
     </div>
   );

@@ -75,9 +75,9 @@ MCP 工具没有原生风险概念，且**可读写任意文件、执行任意�
 | 尾部 = reviewer | 从头（只读阶段中断重跑成本低，v1 不做 reviewer 起点） |
 | 直接模式（无 phase-start） | 不受影响 |
 
-## 六·五、自注册闭环：Agent 给自己写 MCP（opencode config-hook 模式）
+## 六·五、自注册闭环：Agent 给自己写 MCP
 
-**Agent 可以自主完成「编写 MCP server → 注册给 InFu 自己用」的完整闭环**（参考 opencode 生态的插件 config-hook 自注册 `config.mcp["x"]={...}`，映射为受控工具 + 审批）：
+**Agent 可以自主完成「编写 MCP server → 注册给 InFu 自己用」的完整闭环**，通过受控注册工具和审批完成。
 
 ```
 Agent：read_file 参考示例 → write_file 编写 server → （可选 run_test 自测）

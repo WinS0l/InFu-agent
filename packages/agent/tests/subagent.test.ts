@@ -149,8 +149,8 @@ tools: read_file, read_file
 console.log("\n▶ listAgents / readAgentFile：发现与层级");
 {
   check("内置 agent（general-purpose 全工具）", BUILTIN_AGENTS.some((a) => a.name === "general-purpose" && !a.tools));
-  check("内置 agent（explore 只读 20 件）", BUILTIN_AGENTS.some((a) => a.name === "explore" && a.tools?.length === 20));
-  check("内置只读工具集 = 20 件只读（v6.0 补 code_symbols/lsp×3/ocr_image）", READONLY_TOOLS.length === 20 && READONLY_TOOLS.every((t) => !["write_file", "edit_file", "run_command", "run_test"].includes(t)));
+  check("内置 agent（explore 含联网只读工具）", BUILTIN_AGENTS.some((a) => a.name === "explore" && a.tools?.includes("web_search") && a.tools?.includes("webfetch")));
+  check("内置只读工具集只读且含 web_search/webfetch", READONLY_TOOLS.length === 22 && READONLY_TOOLS.includes("web_search") && READONLY_TOOLS.includes("webfetch") && READONLY_TOOLS.every((t) => !["write_file", "edit_file", "run_command", "run_test"].includes(t)));
   check("readAgentFile 内置 explore 免文件", readAgentFile("explore", root)?.name === "explore");
   writeFileSync(join(projAgents, "reviewer.md"), `---
 description: 项目级审查员
@@ -265,7 +265,7 @@ console.log("\n▶ 安全边界");
   // 7.7 agent 文件不存在
   await expectError(runSubagent({ prompt: "x", agent: "ghost" }, makeCtx()), /未找到 agent 定义/, "agent 文件不存在报错");
 
-  // 7.8 缺省工具 = 全部内置工具（对齐 ZCode general-purpose；架构级排除项除外）
+  // 7.8 缺省工具 = 全部内置工具（架构级排除项除外）。
   check("缺省 = 全部内置工具", isReadOnlyDelegation({ prompt: "x" }, root) === false);
   check("只读白名单判定（全部只读 → 免审批）", isReadOnlyDelegation({ prompt: "x", tools: READONLY_TOOLS }, root) === true);
   check("含写工具 → 非只读", isReadOnlyDelegation({ prompt: "x", tools: ["read_file", "write_file"] }, root) === false);
@@ -311,7 +311,7 @@ console.log("\n▶ 内部免审批（继承委派授权）");
   check("requireExplicit（联网）仍转发父级", explicitForwarded >= 1, `explicit=${explicitForwarded}`);
 }
 
-// ── 7.10 delegate_task 审批：只读委派免审批（对齐 ZCode Explore）；写能力委派一次授权 ──
+// ── 7.10 delegate_task 审批：只读委派免审批；写能力委派一次授权。──
 console.log("\n▶ delegate_task 审批（只读免审批 / 写能力一次授权）");
 {
   const t = TOOLS["delegate_task"];
@@ -426,7 +426,7 @@ console.log("\n▶ rebuildMessages：跳过内部事件（防孤儿配对/上下
 }
 
 // ── 11. 同轮多个 delegate_task 并行执行（loop 3.2 段并行化）──
-console.log("\n▶ 同轮多个子智能体并行（对齐 ZCode：同一消息多个工具调用并发运行）");
+console.log("\n▶ 同轮多个子智能体并行");
 {
   let callNo = 0;
   let active = 0;

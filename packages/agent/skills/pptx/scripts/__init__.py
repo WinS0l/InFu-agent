@@ -1,1 +1,0 @@
-"""PPTX skill scripts."""

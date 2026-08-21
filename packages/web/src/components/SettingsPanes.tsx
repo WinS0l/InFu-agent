@@ -18,7 +18,7 @@ import {
   fetchMcpServers, addMcpServer, updateMcpServer, deleteMcpServer, probeMcpTools,
   fetchPlugins, addPlugin, updatePlugin, deletePlugin, probePlugin, generatePlugin,
   fetchSkills, addSkill, deleteSkill,
-  fetchAgents, saveAgent, deleteAgent, type AgentInfo,
+  fetchAgents, fetchAgentTools, saveAgent, deleteAgent, type AgentInfo, type AgentToolInfo,
   fetchBrowserStatus, fetchMemory, updateConfig, clearBrowserData, fetchConfig, fetchStats, fetchIndexStatus, rebuildIndex,
   type McpServerInfo, type McpToolProbe, type PluginInfo, type PluginProbeResult, type SkillInfo,
   type BrowserStatus, type MemoryInfo, type UsageStats, type IndexStatus,
@@ -618,11 +618,15 @@ const AGENT_LEVEL_STYLE: Record<string, string> = {
 };
 const AGENT_LEVEL_LABEL: Record<string, string> = { builtin: "内置", user: "用户级", project: "项目级" };
 
-/** 可注入子智能体的内置工具（delegate_task/mcp_register/plugin_add 架构级排除） */
-const AGENT_TOOL_OPTIONS = [
-  "read_file", "write_file", "edit_file", "search_code", "list_directory", "project_scan",
-  "git_status", "git_diff", "run_test", "run_command", "use_skill",
-];
+/** 工具分类：不在客户端硬编码可用清单，目录来自后端当前注册的工具。 */
+function agentToolGroup(name: string): string {
+  if (/^(read_|write_|edit_|file_|list_directory|project_|glob|search_code|code_symbols|lsp_|semantic_)/.test(name)) return "代码与文件";
+  if (/^(git_|run_|job_|terminal_|os_info|current_time)/.test(name)) return "执行与工程";
+  if (/^(web|browser_)/.test(name)) return "联网与浏览器";
+  if (/^(screen_|ocr_image)/.test(name)) return "视觉与桌面";
+  if (/^(memory_|session_|use_skill|todo_|ask_user|list_agents|report|agent_message|interrupt_agent|wait_task)/.test(name)) return "协作与上下文";
+  return "其他";
+}
 
 interface AgentForm {
   name: string;
@@ -662,6 +666,9 @@ export function AgentsPane() {
   const [form, setForm] = useState<AgentForm>(EMPTY_AGENT_FORM);
   const [saving, setSaving] = useState(false);
   const [confirmDel, setConfirmDel] = useState<string | null>(null);
+  const [toolCatalog, setToolCatalog] = useState<AgentToolInfo[]>([]);
+  const [toolQuery, setToolQuery] = useState("");
+  const [toolGroup, setToolGroup] = useState("全部");
   const models = useStore((s) => s.models);
 
   const load = async () => {
@@ -671,9 +678,9 @@ export function AgentsPane() {
     catch (e) { setError((e as Error).message); }
     finally { setLoading(false); }
   };
-  useEffect(() => { load(); }, []);
+  useEffect(() => { load(); fetchAgentTools().then(setToolCatalog).catch((e) => setError((e as Error).message)); }, []);
 
-  const startCreate = () => { setForm(EMPTY_AGENT_FORM); setEditing(true); setError(""); };
+  const startCreate = () => { setForm(EMPTY_AGENT_FORM); setEditing(true); setError(""); setToolQuery(""); setToolGroup("全部"); };
   const startEdit = (a: AgentInfo) => {
     setForm({
       name: a.name,
@@ -724,6 +731,11 @@ export function AgentsPane() {
 
   const toggleTool = (t: string) =>
     setForm((f) => ({ ...f, tools: f.tools.includes(t) ? f.tools.filter((x) => x !== t) : [...f.tools, t] }));
+  const groups = ["全部", ...[...new Set(toolCatalog.map((tool) => agentToolGroup(tool.name)))]];
+  const visibleTools = toolCatalog.filter((tool) => {
+    const q = toolQuery.trim().toLowerCase();
+    return (toolGroup === "全部" || agentToolGroup(tool.name) === toolGroup) && (!q || `${tool.name} ${tool.description}`.toLowerCase().includes(q));
+  });
 
   return (
     <div>
@@ -758,19 +770,12 @@ export function AgentsPane() {
               onChange={(e) => setForm((f) => ({ ...f, description: e.target.value }))} />
           </label>
           <div className="mt-2 text-[11px] text-sub">
-            工具白名单（不选 = 全部内置工具；仅勾选只读工具 = 委派免审批）
-            <div className="mt-1 grid max-h-28 grid-cols-3 gap-1 overflow-y-auto">
-              {AGENT_TOOL_OPTIONS.map((t) => (
-                <button key={t}
-                  className={`cursor-pointer rounded border px-1.5 py-0.5 font-mono text-[10px] transition-colors ${
-                    form.tools.includes(t)
-                      ? "border-accent/50 bg-accent/15 text-accent"
-                      : "border-line bg-muted text-sub/70 hover:text-text"
-                  }`}
-                  onClick={() => toggleTool(t)}>
-                  {t}
-                </button>
-              ))}
+            <div className="flex items-center gap-2"><span className="flex-1">工具白名单 <span className="text-caption">已选 {form.tools.length}；清空 = 全部可注入工具</span></span><button type="button" className="cursor-pointer text-info hover:underline" onClick={() => setForm((f) => ({ ...f, tools: visibleTools.map((tool) => tool.name) }))}>全选当前</button><button type="button" className="cursor-pointer text-caption hover:text-text" onClick={() => setForm((f) => ({ ...f, tools: [] }))}>清空</button></div>
+            <input className={`${inputCls} mt-1`} value={toolQuery} placeholder="搜索工具名或用途…" onChange={(e) => setToolQuery(e.target.value)} />
+            <div className="mt-1 flex flex-wrap gap-1">{groups.map((group) => <button type="button" key={group} onClick={() => setToolGroup(group)} className={`cursor-pointer rounded-full border px-2 py-0.5 text-[10px] ${toolGroup === group ? "border-info/50 bg-info-soft text-info" : "border-line text-sub hover:text-text"}`}>{group}</button>)}</div>
+            <div className="mt-1 max-h-48 space-y-1 overflow-y-auto rounded-lg border border-line bg-muted/30 p-1">
+              {visibleTools.map((tool) => <button type="button" key={tool.name} className={`flex w-full cursor-pointer items-start gap-2 rounded-md px-2 py-1.5 text-left transition-colors ${form.tools.includes(tool.name) ? "bg-accent/10 text-text" : "hover:bg-hover text-sub"}`} onClick={() => toggleTool(tool.name)}><span className={`mt-0.5 h-3 w-3 shrink-0 rounded border ${form.tools.includes(tool.name) ? "border-accent bg-accent" : "border-line"}`}>{form.tools.includes(tool.name) && <Check className="h-3 w-3 text-white" />}</span><span className="min-w-0 flex-1"><span className="block font-mono text-[11px] text-text">{tool.name}</span><span className="block line-clamp-2 text-[10px] leading-4 text-caption">{tool.description}</span></span><span className={`rounded px-1 text-[9px] ${RISK_STYLE[tool.risk]}`}>{tool.risk}</span></button>)}
+              {visibleTools.length === 0 && <div className="px-2 py-3 text-center text-caption">没有匹配的工具</div>}
             </div>
           </div>
           <div className="mt-2 grid grid-cols-2 gap-2">
@@ -1351,7 +1356,7 @@ export function StatsPane() {
       });
   }, [days]);
 
-  // v3.0 UI 审查批 2：统计卡片改 ZCode 同款（图标 + label + value + sub）
+  // v3.0：统计卡片使用图标、标签、数值和说明。
   const card = (label: string, value: string, icon: React.ReactNode, sub?: string) => (
     <div className="min-w-0 rounded-lg border border-line bg-muted/30 px-3 py-2.5">
       <div className="flex min-w-0 items-center gap-1.5 text-[11px] text-sub">
@@ -1376,7 +1381,7 @@ export function StatsPane() {
     const hi = i === 5 ? "∞" : fmtTokens((TOKEN_Y_MAX * (i * 20)) / 100);
     return `${lo} - ${hi}（${(i - 1) * 20}-${Math.min(100, i * 20)}%）`;
   };
-  // 图例模型列表（去重，保持出现顺序，最多 6 个——ZCode 同款）
+  // 图例模型列表（去重，保持出现顺序，最多 6 个）。
   const allModels = [...new Set(stats?.dailyTrend.flatMap((d) => d.byModel.map((m) => m.model)) ?? [])].slice(0, 6);
   const hasEstimated = stats?.dailyTrend.some((d) => d.estimated) ?? false;
 
@@ -1405,7 +1410,7 @@ export function StatsPane() {
 
       {stats && stats.dailyTrend.length > 0 && (
         <>
-        {/* v3.0 审计后重写：活跃热力图改 ZCode 同款（GitHub 贡献图式）——
+        {/* v3.0：活跃热力图采用贡献图式布局——
            横向周列（时间从左到右）、纵向周一~周日；5 级绿色色阶；
            色阶图例在标题行右侧横排「少 → 多」；hover 放大 + 提示；自动滚动到最新 */}
         <div className="mt-4">
@@ -1414,7 +1419,7 @@ export function StatsPane() {
               <div className="text-sm font-semibold text-text">活跃热力图</div>
               <div className="mt-0.5 text-[11px] text-sub">方格颜色越深代表当日 Token 消耗越高</div>
             </div>
-            {/* 色阶图例（ZCode 同款：标题右侧横排 少→多；v3.3 补 10：hover 显示各档 token 区间） */}
+            {/* 色阶图例：标题右侧横排 少→多；hover 显示各档 token 区间。 */}
             <div className="flex shrink-0 items-center gap-1 pt-0.5 text-[10px] text-sub">
               <span className="mr-0.5">少</span>
               {[0.15, 0.35, 0.55, 0.75, 0.95].map((a, i) => (
@@ -1650,7 +1655,7 @@ interface DataDirInfo {
   redirected: boolean;
 }
 
-/** 数据目录查看与迁移（对齐 ZCode「根目录可整体更换」）：
+/** 数据目录查看与迁移：
  *  迁移 = 复制到目标（旧目录保留备份）→ 旧主目录留 ~/.infu-redirect.json 指针 → 进程内即刻生效；
  *  内部结构（config.json/infu.db/projects/schedules/memory/skills/agents/plugins/logs）固定不可改。 */
 export function DataDirPane() {

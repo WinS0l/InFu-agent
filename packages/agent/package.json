@@ -1,12 +1,13 @@
 {
   "name": "@infu/agent",
-  "version": "0.1.0",
+  "version": "1.0.0",
+  "license": "Apache-2.0",
   "private": true,
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "scripts": {
-    "build": "tsc -p tsconfig.json && node -e \"const fs=require('fs');fs.cpSync('src/plugin/browser/skills','dist/plugin/browser/skills',{recursive:true});fs.cpSync('skills','dist/skills',{recursive:true});\"",
+    "build": "node -e \"const fs=require('fs');fs.rmSync('dist',{recursive:true,force:true});fs.rmSync('../../node_modules/.cache/tsbuildinfo/agent.tsbuildinfo',{force:true})\" && tsc -p tsconfig.json && node -e \"const fs=require('fs');fs.cpSync('src/plugin/browser/skills','dist/plugin/browser/skills',{recursive:true});fs.cpSync('skills','dist/skills',{recursive:true});\"",
     "dev": "tsx watch src/cli.ts",
     "cli": "tsx src/cli.ts",
     "start": "tsx src/server.ts",

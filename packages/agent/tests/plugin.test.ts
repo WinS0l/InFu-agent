@@ -289,8 +289,8 @@ console.log("\n▶ /api/plugins + /api/skills API");
     j = await r.json();
     const listIds = (j.plugins ?? []).map((x: any) => x.id);
     check("列表含用户插件 good", listIds.includes("good"));
-    check("列表含 3 个内置官方插件", ["browser-use", "document-skills", "skill-creator"].every((id) => listIds.includes(id)), JSON.stringify(listIds));
-    check("内置插件带 builtin 标记", (j.plugins ?? []).filter((x: any) => x.builtin).length === 3);
+    check("列表含 2 个内置官方插件", ["browser-use", "skill-creator"].every((id) => listIds.includes(id)) && !listIds.includes("document-skills"), JSON.stringify(listIds));
+    check("内置插件带 builtin 标记", (j.plugins ?? []).filter((x: any) => x.builtin).length === 2);
     // probe：正常插件（2 工具 + 钩子；不合并内置插件）
     r = await call("/api/plugins/good/probe", { method: "POST" });
     j = await r.json();

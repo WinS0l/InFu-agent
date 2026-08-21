@@ -40,7 +40,6 @@ import { autoNameSession } from "./session-naming.js";
 import { pluginCli, skillCli } from "./plugin/cli.js";
 import { agentCli } from "./agent/agent-cli.js";
 import { abortBackgroundAgentsByDepth } from "./agent/subagent.js";
-import { abortJobsByDepth } from "./tools/jobs.js";
 import { closeShellSession } from "./tools/persistent-shell.js";
 import { clearObservedFiles } from "./tools/index.js";
 import { clearApprovalMemory, clearSessionBypass } from "./approval/cache.js";
@@ -711,11 +710,10 @@ async function main() {
       console.error(C.red(`\n✗ Agent 运行失败: ${e.message}`));
       process.exit(1);
     })
-    .finally(() => {
-      mcp?.close();
-      // v2.11：父任务结束 → 中止会话内全部后台子智能体与后台任务（v2.13：depth -1 = 全深度）
-      try { abortBackgroundAgentsByDepth(sessionId, -1); } catch { /* 忽略 */ }
-      try { abortJobsByDepth(sessionId, -1); } catch { /* 忽略 */ }
+      .finally(() => {
+        mcp?.close();
+        // Background jobs intentionally outlive an Agent turn (for example, a dev server).
+        try { abortBackgroundAgentsByDepth(sessionId, -1); } catch { /* 忽略 */ }
       // v3.0 审计修复（S3）：任务结束关闭持久 shell 会话
       try { closeShellSession(sessionId); } catch { /* 忽略 */ }
       // v3.2：任务结束清理会话级运行时状态（read-before-edit 观察 / 已批准记忆 / 全权放行）

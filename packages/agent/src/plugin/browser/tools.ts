@@ -228,7 +228,7 @@ export const browserTools: ToolDef[] = [
   },
   {
     name: "browser_screenshot",
-    description: "截图当前页面并保存为 PNG 文件，返回文件路径（供用户查看；InFu 文本模型读不了图）。用于视觉验证。",
+    description: "截图当前页面并保存为 PNG 文件，返回文件路径（供用户查看；InFu 文本模型读不了图）。用于视觉验证。完成网页/UI相关任务时，优先在右侧浏览器实际打开页面并截图验证；不要只声称已验证。",
     risk: "low",
     schema: z.object({ name: z.string().optional().describe("文件名（不含扩展名，默认带时间戳）") }),
     async execute(args, ctx) {
@@ -245,7 +245,7 @@ export const browserTools: ToolDef[] = [
         const file = join(dir, `${sid}-${name}.png`);
         const buf = await tab.screenshot();
         writeFileSync(file, buf);
-        return `截图已保存：${file}`;
+        return `截图已保存：${file}\n页面：${await tab.url()}`;
       } catch (e) {
         return `截图失败：${(e as Error).message}`;
       }

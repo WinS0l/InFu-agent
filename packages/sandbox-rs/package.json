@@ -1,6 +1,7 @@
 {
   "name": "@infu/sandbox-rs",
-  "version": "0.1.0",
+  "version": "1.0.0",
+  "license": "Apache-2.0",
   "private": true,
   "description": "InFu Windows 硬沙箱原生模块（restricted tokens + job objects，借鉴 OpenAI Codex）",
   "main": "index.node",

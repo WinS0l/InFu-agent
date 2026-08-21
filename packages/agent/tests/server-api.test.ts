@@ -139,6 +139,21 @@ console.log("\n▶ 本地令牌鉴权");
   check("index.html 注入 window.__INFU_TOKEN__", /window\.__INFU_TOKEN__="[0-9a-f]{32}"/.test(html));
 }
 
+
+// ── 3.5 后台任务中断 API（追踪胶囊调用；必须限定到会话）──
+console.log("\n▶ 后台任务中断 API");
+{
+  const sid = getStore().createSession({ title: "job kill API", root: tmpData });
+  const catalog = await app.fetch(new Request("http://localhost/api/agents/tools"));
+  const catalogData = await catalog.json() as { tools?: Array<{ name: string }> };
+  check("子 Agent 工具目录返回全部可注入工具", catalog.status === 200 && catalogData.tools?.some((tool) => tool.name === "web_search") === true && catalogData.tools?.some((tool) => tool.name === "run_command") === true && !catalogData.tools?.some((tool) => tool.name === "delegate_task"), JSON.stringify(catalogData.tools?.map((tool) => tool.name)));
+  const missingSid = await app.fetch(new Request("http://localhost/api/jobs/nope/kill", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ sessionId: "nope" }) }));
+  check("后台任务中断拒绝不存在会话", missingSid.status === 404, String(missingSid.status));
+  const noJob = await app.fetch(new Request("http://localhost/api/jobs/nope/kill", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ sessionId: sid }) }));
+  const noJobData = await noJob.json() as { ok?: boolean; message?: string };
+  check("后台任务中断拒绝未知 job", noJob.status === 200 && noJobData.ok === false && noJobData.message?.includes("未找到") === true, JSON.stringify(noJobData));
+}
+
 // ── 4. Arbitrary filesystem roots must be server-authorized ──
 console.log("\n▶ API root authorization");
 {

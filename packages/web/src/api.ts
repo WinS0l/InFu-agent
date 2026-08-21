@@ -239,6 +239,19 @@ export async function fetchAgents(): Promise<AgentInfo[]> {
   return data.agents ?? [];
 }
 
+export interface AgentToolInfo {
+  name: string;
+  description: string;
+  risk: "low" | "medium" | "high";
+}
+
+export async function fetchAgentTools(): Promise<AgentToolInfo[]> {
+  const res = await apiFetch("/api/agents/tools");
+  if (!res.ok) throw new Error(`子智能体工具目录加载失败: ${res.status}`);
+  const data = await res.json();
+  return data.tools ?? [];
+}
+
 /** 保存（创建/更新）agent 文件：level = user（~/.infu/agents）| project（项目 .infu/agents） */
 export const saveAgent = (body: { name: string; level: "user" | "project"; content: string }) =>
   providerApi("/api/agents", "POST", body) as Promise<{ ok: boolean; path: string }>;
@@ -272,7 +285,7 @@ export interface SettingsConfig {
     defaultRoot?: string;
     terminalShell?: "auto" | "cmd" | "powershell" | "bash";
     autoLaunch?: boolean;
-    // v3.5 常规设置（对齐 ZCode：通知/托盘/防休眠/提问自动继续/显示开关/自动归档/保留期）
+    // v3.5 常规设置：通知、托盘、防休眠、提问自动继续、显示开关、自动归档和保留期。
     taskNotifications?: boolean;
     notificationSound?: boolean;
     closeToTray?: boolean;
@@ -468,6 +481,17 @@ export async function terminalResize(id: string, sessionId: string, cols: number
 /** 终止会话（kill 进程树） */
 export async function terminalKill(id: string, sessionId: string) {
   await apiFetch(`/api/terminal/${encodeURIComponent(id)}?sessionId=${encodeURIComponent(sessionId)}`, { method: "DELETE" });
+}
+
+export async function killBackgroundJob(id: string, sessionId: string): Promise<string> {
+  const res = await apiFetch(`/api/jobs/${encodeURIComponent(id)}/kill`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ sessionId }),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok || data.ok === false) throw new Error(data.message || `中断后台任务失败: ${res.status}`);
+  return data.message ?? "已请求中断";
 }
 
 /** SSE 事件分发（v3.1：按连接会话路由——并行多会话时事件写各自缓存，不串扰） */
@@ -787,7 +811,7 @@ export async function maybeMigrateV1(): Promise<boolean> {
  */
 export interface ChatAttachmentInput {
   name: string;
-  kind: "file" | "dir";
+  kind: "file" | "dir" | "image";
   size?: number;
 }
 export interface ChatFileInput {
@@ -864,6 +888,7 @@ export async function sendChat(
         attachments: opts?.attachments,
         files: opts?.files,
         images: opts?.images,
+        paths: opts?.paths,
         // v5.1 补 4：临时联网剩余分钟数（服务端对本会话 setEgressAllow——新会话/续跑均适用）
         egressMinutes,
       }),

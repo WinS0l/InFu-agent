@@ -133,7 +133,7 @@ try {
       await page.addInitScript(() => {
         // 右栏偏好为开启时，新建会话返回欢迎态也必须不渲染工作区；否则欢迎页会
         // 出现一块无法通过顶部会话动作收起的右栏。
-        try { localStorage.setItem("infu-chat", JSON.stringify({ state: { theme: "light", detailsOpen: true }, version: 0 })); } catch { /* 忽略 */ }
+        try { localStorage.setItem("infu-chat", JSON.stringify({ state: { theme: "light", detailsOpen: true, viewMode: "code" }, version: 0 })); } catch { /* 忽略 */ }
       });
       await page.goto(base + "/", { waitUntil: "networkidle", timeout: 30000 });
       // React 真实渲染（#root 有内容）
@@ -143,6 +143,8 @@ try {
       await page.waitForTimeout(700);
       const rootHtmlStable = await page.evaluate(() => (document.getElementById("root")?.innerHTML ?? "").length);
       check("空 trace 欢迎态持续渲染（无 React 更新深度错误）", rootHtmlStable > 50, String(rootHtmlStable));
+      const welcomeHeading = await page.getByText("今天想推进什么？", { exact: true }).count();
+      check("欢迎态忽略遗留代码视图，始终显示聊天欢迎页", welcomeHeading === 1, String(welcomeHeading));
       const workspaceVisibleOnWelcome = await page.getByText("工作区", { exact: true }).isVisible().catch(() => false);
       check("欢迎态不渲染右侧工作区（即使右栏偏好已开启）", !workspaceVisibleOnWelcome, String(workspaceVisibleOnWelcome));
       const suggestions = await page.locator('button[title="填入输入框后可继续补充上下文或直接发送"]').count();
@@ -151,8 +153,10 @@ try {
       check("欢迎态显示紧凑的工作区选择说明", await workspaceSelector.count() >= 1, String(await workspaceSelector.count()));
       const selectorWidth = await workspaceSelector.locator("..").evaluate((element) => Math.round(element.getBoundingClientRect().width));
       check("欢迎态工作区选择器按内容收紧", selectorWidth < 360, String(selectorWidth));
-      const executionSettings = page.getByTitle("执行设置：模型、思考强度与临时联网");
-      check("Composer 将低频配置收纳到执行设置", await executionSettings.count() === 1, String(await executionSettings.count()));
+      const modelControl = page.getByTitle("选择模型与推理强度");
+      check("Composer 直接提供合并的模型与推理选择", await modelControl.count() === 1, String(await modelControl.count()));
+      const collapsedToolDetails = await page.locator('[data-state="ok"]').getByText("IN", { exact: true }).count();
+      check("历史消息流工具详情默认收起", collapsedToolDetails === 0, String(collapsedToolDetails));
       await page.locator('button[title="填入输入框后可继续补充上下文或直接发送"]').first().click();
       const suggestedInput = await page.locator("textarea").inputValue();
       check("建议任务只填入输入框，不会立即执行", suggestedInput === "分析这个项目的结构", suggestedInput);
@@ -165,26 +169,25 @@ try {
       await page.waitForTimeout(800);
       const theme = await page.evaluate(() => document.documentElement.dataset.theme);
       check("服务端配置主题生效（config→store→dataset.theme）", theme === "light", String(theme));
-      // v5.1 补 4：欢迎界面（无活动会话）🌐 临时联网可用——菜单可展开、选时长后本地待定态激活
+      // 欢迎界面可直接设置临时联网时长（无会话时暂存，发送时绑定到新会话）。
       // （无会话时不开 POST，发送消息时随 /api/chat 的 egressMinutes 对本会话生效）
-      await executionSettings.click();
-      const pillClickable = await page.locator("button", { hasText: "临时联网" }).count();
-      check("欢迎界面 🌐 临时联网药丸可见", pillClickable > 0, String(pillClickable));
+      const pillClickable = await page.locator("button", { hasText: "自定义联网" }).count();
+      check("欢迎界面自定义联网按钮可见", pillClickable > 0, String(pillClickable));
       // button:has-text 精确命中按钮（text= 会同时匹配内层 span，严格模式抛错）
-      await page.locator("button", { hasText: "临时联网" }).first().click().catch((e) => console.log("  ⚠ pill click:", String(e).slice(0, 100)));
+      await page.locator("button", { hasText: "自定义联网" }).first().click().catch((e) => console.log("  ⚠ pill click:", String(e).slice(0, 100)));
       await page.waitForTimeout(300);
-      const menuOpen = await page.locator("text=联网时长").count();
+      const menuOpen = await page.locator("text=快捷时长").count();
       check("欢迎界面药丸可展开时长菜单", menuOpen > 0, String(menuOpen));
       await page.locator("button", { hasText: "10 分钟" }).first().click().catch(() => {});
       await page.waitForTimeout(300);
-      const pillActive = await page.locator("text=联网中").count();
+      const pillActive = await page.locator("button", { hasText: "自定义联网" }).count();
       check("欢迎界面选时长后药丸激活（本地待定态）", pillActive > 0, String(pillActive));
       // 关闭恢复
-      await page.locator("button", { hasText: "联网中" }).first().click().catch(() => {});
+      await page.locator("button", { hasText: "自定义联网" }).first().click().catch(() => {});
       await page.waitForTimeout(200);
       await page.locator("button", { hasText: "关闭临时联网" }).first().click().catch(() => {});
       await page.waitForTimeout(300);
-      const pillClosed = await page.locator("text=联网中").count() === 0;
+      const pillClosed = await page.locator("button", { hasText: "关闭临时联网" }).count() === 0;
       check("欢迎界面可关闭临时联网", pillClosed, "");
       // v5.1 补 5：full 档（全权放行）下断网本就放行 → 🌐 临时联网按钮隐藏
       const modeBtn = page.locator('button[title="全局审批档位（写入设置，即时生效）"]');
@@ -192,17 +195,16 @@ try {
       await page.waitForTimeout(200);
       await page.locator("button", { hasText: "全权放行" }).first().click().catch(() => {});
       await page.waitForTimeout(400);
-      const pillHiddenInFull = await page.locator("button", { hasText: "临时联网" }).count() === 0;
+      const pillHiddenInFull = await page.locator("button", { hasText: "自定义联网" }).count() === 0;
       check("full 档下临时联网按钮隐藏", pillHiddenInFull, `pill=${await page.locator("button", { hasText: "临时联网" }).count()}`);
       // 切回非 full 档 → 按钮恢复
       await modeBtn.click().catch(() => {});
       await page.waitForTimeout(200);
       await page.locator("button", { hasText: "全自动" }).first().click().catch(() => {});
       await page.waitForTimeout(400);
-      if (await page.locator("button", { hasText: "临时联网" }).count() === 0) await executionSettings.click();
       const modeLabel = await page.locator('button[title="全局审批档位（写入设置，即时生效）"]').innerText().catch(() => "?");
-      const pillBack = await page.locator("button", { hasText: "临时联网" }).count() > 0;
-      check("切回非 full 档后临时联网按钮恢复", pillBack, `pill=${await page.locator("button", { hasText: "临时联网" }).count()} mode=${modeLabel.trim()}`);
+      const pillBack = await page.locator("button", { hasText: "自定义联网" }).count() > 0;
+      check("切回非 full 档后自定义联网按钮恢复", pillBack, `pill=${await page.locator("button", { hasText: "自定义联网" }).count()} mode=${modeLabel.trim()}`);
       await page.evaluate(() => localStorage.removeItem("infu-chat"));
     } finally {
       await browser.close().catch(() => {});

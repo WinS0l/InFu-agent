@@ -27,7 +27,6 @@ import { currentApprovalPolicy, isToolDisabled, resolveToolRisk } from "../appro
 // v3.6：runAgent 收尾清理本层后台子 Agent/job（子任务随父循环结束；顶层 server/cli
 // finally 清全部 depth<0，此处互补清本级——修复子智能体/定时任务内部启动的后台任务孤儿）
 import { abortBackgroundAgentsByDepth } from "./subagent.js";
-import { abortJobsByDepth } from "../tools/jobs.js";
 import { getTodos } from "../tools/task-tools.js";
 // v6.0（S1）：写后自动验证（写工具成功后自动跑测试，结果回填模型）
 import { maybeAutoVerify } from "./auto-verify.js";
@@ -115,7 +114,13 @@ export interface RunResult {
   steps: number;
   toolCount: number;
   approvals: { required: number; approved: number; denied: number };
-  toolLogs: Array<{ tool: string; args: Record<string, unknown>; ok: boolean; summary: string }>;
+  toolLogs: Array<{
+    tool: string;
+    args: Record<string, unknown>;
+    ok: boolean;
+    summary: string;
+    verification?: { command: string; status: "passed" | "failed"; output: string };
+  }>;
   /** v3：LLM usage 聚合（DeepSeek 缓存命中统计 → StatsLine 命中率；v2.12 四桶） */
   usage?: { cacheHit: number; cacheMiss: number; promptTokens: number; completionTokens: number };
 }
@@ -127,23 +132,28 @@ export function buildDeliverySummary(input: {
   approvals: RunResult["approvals"];
 }): DeliverySummary {
   const changedPaths = new Set<string>();
-  let testsRun = 0;
-  let testsFailed = 0;
+  const verifications: DeliverySummary["verifications"] = [];
   for (const log of input.toolLogs) {
     if ((log.tool === "write_file" || log.tool === "edit_file") && log.ok && typeof log.args.path === "string") changedPaths.add(log.args.path);
     if (log.tool === "run_test") {
-      testsRun++;
-      if (!log.ok) testsFailed++;
+      verifications.push({
+        command: typeof log.args.command === "string" ? log.args.command : "run_test（自动检测）",
+        status: log.ok ? "passed" : "failed",
+        output: log.summary,
+      });
     }
+    if (log.verification) verifications.push(log.verification);
   }
   return {
     changedFiles: changedPaths.size,
+    changedPaths: [...changedPaths].sort((a, b) => a.localeCompare(b)),
     completedItems: input.todos.filter((item) => item.status === "completed").map((item) => item.text),
     pendingItems: [
       ...input.todos.filter((item) => item.status !== "completed").map((item) => item.text),
       ...(input.approvals.denied > 0 ? [`${input.approvals.denied} 项审批未获批准`] : []),
     ],
-    verification: testsRun === 0 ? "not-run" : testsFailed > 0 ? "failed" : "passed",
+    verification: verifications.length === 0 ? "not-run" : verifications.some((item) => item.status === "failed") ? "failed" : "passed",
+    verifications,
   };
 }
 
@@ -225,7 +235,7 @@ export const DEFAULT_SYSTEM_PROMPT = `你是"InFu"，一个务实的 AI 助手�
 9. 运行测试用 run_test（自动检测框架），只有需要自定义命令时才用 run_command。
 10. 每轮只做一个状态改变（一次写操作后先观察结果再继续），成功路径上不要重复执行同一命令——重复调用会打扰用户审批。
 
-异步任务纪律（v3.3，对齐 ZCode <task-notification> 机制）：
+异步任务纪律（v3.3）：
 11. 耗时任务（长命令、独立子任务、搜索调研）优先异步启动：run_command background=true 或 delegate_task background=true——立即拿到 job id / 子智能体 id，**先去做其他工作**，不要阻塞空等。
 12. 后台任务完成时你会收到一条 <task-notification> 系统消息（含 task-id/status/summary）——看到通知后：结果有用就回收（子智能体用 report，job 用 job_output），需要继续驱动就用 send_message，任务已死就中断（interrupt_agent / job_kill）。
 13. 需要结果才能继续时才等待：wait_task（阻塞等待指定任务完成，可设超时）；未完成会返回进度——此时要么继续等，要么先做别的，不要反复轮询同一任务。
@@ -237,7 +247,7 @@ Agent Team 拆解纪律（v6.0 S3，复杂任务的并行协作模式）：
 
 修复与自检闭环（v5.0）：
 17. 任务涉及「修复测试失败/报错」时按收敛闭环执行：先 run_test 复现失败 → 根据失败信息定位修复 → 再 run_test 验证 → 循环直到全绿；连续 3 轮无进展必须**改变策略**（换方案/换文件/缩小范围）或如实说明卡点，不要原样重试同一命令。
-18. 交付前自检：任务改动过代码且项目有测试框架时，交付前用 run_test 验证一次（自动检测框架即可）；测试失败先修复再交付，不要带着已知失败收尾。`;
+18. 交付前自检：仅当本轮实际改动过代码且项目有测试框架时，交付前用 run_test 验证一次；用户只要求打开页面、启动服务、查看内容或执行单一动作时，完成该动作后停止，不要擅自打开浏览器、截图或扩展为验证任务。`;
 
 /**
  * v3.1 附件：用户消息内容 parts（text + 图片视觉 base64）。
@@ -290,6 +300,16 @@ export function withImages(text: string, images: string[]): PromptInput {
   return images.length
     ? [{ type: "text", text }, ...images.map((image): PromptPart => ({ type: "image", image }))]
     : text;
+}
+
+/** A bare attachment request has no actionable text once vision is unavailable. */
+function isImageOnlyAnalysisRequest(prompt: PromptInput): boolean {
+  if (!Array.isArray(prompt) || !prompt.some((part) => part.type === "image")) return false;
+  const text = prompt
+    .filter((part): part is Extract<PromptPart, { type: "text" }> => part.type === "text")
+    .map((part) => part.text.trim())
+    .join("\n");
+  return /^(?:请分析我附加的文件或图片|已附加 \d+ 张图片)[。.!！]?$/.test(text);
 }
 /**
  * v2.6 收尾：工具调用参数 JSON 修复。
@@ -478,7 +498,7 @@ export async function runAgent(opts: AgentRunOptions): Promise<RunResult> {
   try {
 
   /**
-   * v3.3 异步任务编排（对齐 ZCode <task-notification> 机制）：
+    * v3.3 异步任务编排：
    * 后台任务（delegate_task background / run_command background）完成时，
    * 完成点 emit task-notification 事件（前端通知行 + 落库）+ 通过
    * ctx.enqueueTaskNotification 入队本循环的 pendingNotes——每步开始 drain 为
@@ -625,10 +645,12 @@ export async function runAgent(opts: AgentRunOptions): Promise<RunResult> {
     return false;
   };
   let toolCount = 0;
-  const toolLogs: Array<{ tool: string; args: Record<string, unknown>; ok: boolean; summary: string }> = [];
+  const toolLogs: RunResult["toolLogs"] = [];
   const approvals = { required: 0, approved: 0, denied: 0 };
   // v3：LLM usage 聚合（模型 API 返回缓存命中 tokens → 命中率；v2.12 四桶）
   const usage = { cacheHit: 0, cacheMiss: 0, promptTokens: 0, completionTokens: 0 };
+  // Do not let a non-vision model hallucinate an investigation after the user sent only an image.
+  const imageOnlyAnalysisRequest = isImageOnlyAnalysisRequest(prompt);
   // Same-call failure guard: tool result strings often encode expected operational failures rather
   // than throwing. Two unchanged failures require the model to change parameters or strategy.
   const sameCallFailures = new Map<string, number>();
@@ -698,19 +720,21 @@ export async function runAgent(opts: AgentRunOptions): Promise<RunResult> {
         for await (const delta of streamChatWithFailover({
           chain,
           messages,
-          tools: openaiTools,
+          // After a vision rejection, a bare image-analysis request has no remaining textual
+          // evidence. Return the limitation instead of searching unrelated project files.
+          tools: imageDegraded && imageOnlyAnalysisRequest ? [] : openaiTools,
           signal: abortSignal,
           extraBody: thinkingParamsFor,
           // v3.2：断网/瞬时故障重试可见性——退避期间 emit retry 事件（前端状态行倒计时）
           onRetry: (r) => emit({ type: "retry", attempt: r.attempt, maxAttempts: r.maxAttempts, delayMs: r.delayMs, message: r.message }),
         })) {
-          if (delta.reasoning) {
-            reasoningText += delta.reasoning;
-            emit({ type: "reasoning", text: delta.reasoning });
-          }
-          if (delta.text) {
-            text += delta.text;
-            emit({ type: "text", text: delta.text });
+            if (delta.reasoning) {
+              reasoningText += delta.reasoning;
+              if (!imageOnlyAnalysisRequest || imageDegraded) emit({ type: "reasoning", text: delta.reasoning });
+            }
+            if (delta.text) {
+              text += delta.text;
+              if (!imageOnlyAnalysisRequest || imageDegraded) emit({ type: "text", text: delta.text });
           }
           if (delta.toolCalls?.length) {
             rawToolCalls = delta.toolCalls.map((tc) => ({
@@ -752,8 +776,12 @@ export async function runAgent(opts: AgentRunOptions): Promise<RunResult> {
           usage.promptTokens += stepUsage.promptTokens;
           usage.completionTokens += stepUsage.completionTokens;
           stepUsage.cacheHit = stepUsage.cacheMiss = stepUsage.promptTokens = stepUsage.completionTokens = 0;
-          emit({ type: "text", text: "（当前模型不支持图片输入，已自动将图片转为文本提示继续任务）" });
-          continue;
+           // For a bare image request, the final model response is the only user-visible
+           // answer. Do not expose the failed attempt and then append a second summary.
+           if (!imageOnlyAnalysisRequest) {
+             emit({ type: "text", text: "（当前模型不支持图片输入，已自动将图片转为文本提示继续任务）" });
+           }
+           continue;
         }
         // v3.2 上下文窗口超限（对齐 主流：request-error 且 CONTEXT_WINDOW_EXCEEDED →
         // 先裁剪再压缩再重试）：估算可能低估（如 reasoning 长/工具结果大），强制压缩一次
@@ -787,6 +815,12 @@ export async function runAgent(opts: AgentRunOptions): Promise<RunResult> {
     if (callError) {
       emit({ type: "error", message: callError });
       throw new Error(callError);
+    }
+    // The first vision attempt is buffered for bare image requests so a provider rejection
+    // cannot leave a partial answer in the chat before the text-only retry completes.
+    if (imageOnlyAnalysisRequest && !imageDegraded) {
+      if (reasoningText) emit({ type: "reasoning", text: reasoningText });
+      if (text) emit({ type: "text", text });
     }
     // v3.1 审计修复：成功轮才并入全局 usage（失败重试轮的 stepUsage 已在重试前清零）
     usage.cacheHit += stepUsage.cacheHit;
@@ -901,6 +935,7 @@ export async function runAgent(opts: AgentRunOptions): Promise<RunResult> {
       }
       let out = "";
       let ok = true;
+      let verification: { command: string; status: "passed" | "failed"; output: string } | undefined;
       try {
         const execEntry = toolExecutors.get(call.toolName)!; // 预处理已确认存在
         // v3.0 审计修复（D1）：运行时 schema 校验——模型传错类型/字段名时友好报错回填，
@@ -936,7 +971,7 @@ export async function runAgent(opts: AgentRunOptions): Promise<RunResult> {
         );
         // ── v6.0（S1）写后自动验证：写工具成功改动后自动跑测试（general.autoVerify 开关；
         //    按会话+根去抖 60s；结果附在工具结果回填模型；失败静默不阻塞写操作）──
-        out = await maybeAutoVerify({
+        const autoVerify = await maybeAutoVerify({
           tool: call.toolName,
           ok,
           out,
@@ -945,13 +980,15 @@ export async function runAgent(opts: AgentRunOptions): Promise<RunResult> {
           phase: phase?.id,
           abortSignal,
         });
+        out = autoVerify.out;
+        verification = autoVerify.verification;
       } catch (e) {
         ok = false;
         out = `工具执行异常: ${(e as Error).message}`;
       }
        if (isToolResultFailure(ok, out)) sameCallFailures.set(key, previousFailures + 1);
        else sameCallFailures.delete(key);
-        return { call, args, ok, out, diff: toolDiffs.get(call.toolCallId) };
+        return { call, args, ok, out, diff: toolDiffs.get(call.toolCallId), verification };
     };
     const execResults: Awaited<ReturnType<typeof runOne>>[] = [];
     // 只读组：有界滚动池并行（v2.10：单批 ≤10，防单轮 20+ 只读调用同时跑爆内存；主流 maxParallel 同款）；
@@ -970,10 +1007,10 @@ export async function runAgent(opts: AgentRunOptions): Promise<RunResult> {
     const results = execs.map((e) => byCallId.get(e.call.toolCallId)!);
 
     // 3.3) 按原调用顺序回填（tool-result 事件 + 日志 + 消息——顺序与 assistant tool_calls 一致）
-    for (const { call, args, ok, out, diff } of results) {
+    for (const { call, args, ok, out, diff, verification } of results) {
       // summary 推完整输出（v2.1 会话落库与 Diff 面板需要完整内容；显示层自行截断）
       emit({ type: "tool-result", tool: call.toolName, ok, summary: out, diff, callId: call.toolCallId });
-      toolLogs.push({ tool: call.toolName, args, ok, summary: out });
+      toolLogs.push({ tool: call.toolName, args, ok, summary: out, verification });
       // v2.6 收尾：回填模型的消息副本统一裁剪（事件/落库保持完整，仅控模型侧上下文预算）
       toolResultParts.push({ role: "tool", tool_call_id: call.toolCallId, content: trimToolResult(out) });
     }
@@ -1074,7 +1111,8 @@ export async function runAgent(opts: AgentRunOptions): Promise<RunResult> {
   }
   } finally {
     try { abortBackgroundAgentsByDepth(sessionId, delegationDepth); } catch { /* 忽略 */ }
-    try { abortJobsByDepth(sessionId, delegationDepth); } catch { /* 忽略 */ }
+    // Background commands may be development servers. They belong to the session and stay
+    // available for the user to inspect or validate after this Agent turn completes.
   }
 }
 

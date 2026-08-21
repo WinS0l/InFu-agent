@@ -263,7 +263,7 @@ async function getDesktopTab(opts?: { create?: boolean }): Promise<BrowserTab> {
 let browser: Browser | null = null;
 let page: Page | null = null;
 
-/** 探测 chromium 可执行文件（ms-playwright 缓存，zcode/playwright 常用路径） */
+/** 探测 Chromium 可执行文件（优先 ms-playwright 缓存和系统安装路径）。 */
 export function resolveChromiumPath(): string | null {
   const env = process.env.INFU_BROWSER_PATH;
   if (env && existsSync(env)) return env;

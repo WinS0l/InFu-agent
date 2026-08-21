@@ -9,7 +9,7 @@
  *  - 摘要：优先关键键（command/path/query/pattern/topic…），其次 k=v 前几项
  */
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import {
   FileText, FilePen, Scissors, Search, FolderOpen, Terminal,
   GitBranch, GitCompare, FlaskConical, Building2, Wrench, Loader2, Check, X,
@@ -19,6 +19,7 @@ import {
 } from "lucide-react";
 import { useStore, type ToolEventState } from "../store";
 import { CodeBlock } from "./ui";
+import { apiUrl } from "../api";
 
 /** 工具图标映射（主流 variant 图标同语义；新工具补齐 v2.14） */
 const TOOL_ICON: Record<string, React.ElementType> = {
@@ -150,11 +151,15 @@ function SubagentEntry({ subagentId }: { subagentId: string }) {
  *  文件工具摘要 = 可点击路径链接（打开代码界面定位，主流 fileLink 同语义） */
 const FILE_TOOLS = new Set(["read_file", "write_file", "edit_file", "read_files"]);
 function ToolRow({ t }: { t: ToolEventState }) {
+  // 仅当前执行中的工具默认展开；结果回填或下一工具开始后自动收起，仍可手动查看历史。
   const [open, setOpen] = useState(t.status === "running");
+  useEffect(() => { setOpen(t.status === "running"); }, [t.status]);
   const Icon = TOOL_ICON[t.tool] ?? Wrench;
   const running = t.status === "running";
   const failed = t.status === "error";
-  const stats = t.diff;
+  const browserShot = t.tool === "browser_screenshot" ? /截图已保存：(.+\.png)/.exec(t.summary ?? "")?.[1] : undefined;
+  const browserUrl = t.tool === "browser_screenshot" ? /页面：(https?:\/\/\S+)/.exec(t.summary ?? "")?.[1] : undefined;
+  const root = useStore((s) => s.root);
   // v2.14：文件工具摘要 = 路径链接（打开代码界面定位）
   const argPath =
     FILE_TOOLS.has(t.tool)
@@ -201,13 +206,6 @@ function ToolRow({ t }: { t: ToolEventState }) {
         ) : (
           <span className="min-w-0 flex-1 truncate font-mono text-[13px] leading-6 text-sub transition-all duration-150 group-hover/row:-translate-y-px group-hover/row:text-text">{fmtArgs(t.args)}</span>
         )}
-        {stats && (
-          <span className="shrink-0 font-mono text-[12px]">
-            {stats.added > 0 && <span className="text-success">+{stats.added}</span>}
-            {stats.added > 0 && stats.removed > 0 && <span className="text-sub/40"> </span>}
-            {stats.removed > 0 && <span className="text-danger">-{stats.removed}</span>}
-          </span>
-        )}
         {t.tool === "delegate_task" && <DelegateRiskBadge subagentId={t.subagentId} />}
         {running && <span className="h-2 w-2 shrink-0 animate-pulse rounded-full bg-ongoing" />}
       </button>
@@ -216,12 +214,35 @@ function ToolRow({ t }: { t: ToolEventState }) {
           {t.subagentId && <SubagentEntry subagentId={t.subagentId} />}
           <CodeBlock label="IN" text={JSON.stringify(t.args, null, 2)} maxHeight={150} />
           {t.summary && (
-            <CodeBlock label={failed ? "OUT（错误）" : "OUT"} text={t.summary} maxHeight={224} />
+            <>
+              <CodeBlock label={failed ? "OUT（错误）" : "OUT"} text={t.summary} maxHeight={224} />
+               {browserShot && <BrowserEvidence shot={browserShot} url={browserUrl} root={root} />}
+            </>
           )}
         </div>
       )}
     </div>
   );
+}
+
+function BrowserEvidence({ shot, url, root }: { shot: string; url?: string; root: string }) {
+  const src = apiUrl(`/api/browser/screenshots/file?root=${encodeURIComponent(root)}&name=${encodeURIComponent(shot.split(/[\\/]/).pop() ?? "")}`);
+  const openSite = () => {
+    if (!url) return;
+    if (window.infuDesktop) window.infuDesktop.browserOpenExternal(url);
+    else window.open(url, "_blank", "noopener,noreferrer");
+  };
+  const openPreview = () => {
+    const name = shot.split(/[\\/]/).pop() ?? "浏览器验证截图";
+    const store = useStore.getState();
+    store.openRightTab({ id: `browser-shot:${name}`, kind: "attachment", label: name, attachment: { name, kind: "image", preview: src } });
+    store.setDetailsOpen(true);
+  };
+  return <div className="flex items-center gap-2 rounded-lg border border-line bg-hover/30 p-1.5">
+    <button className="cursor-pointer overflow-hidden rounded hover:ring-1 hover:ring-info" onClick={openPreview} title="在右侧工作区预览截图"><img src={src} alt="浏览器验证截图" className="h-12 w-20 object-cover" /></button>
+    <span className="min-w-0 flex-1"><span className="block text-[11px] font-medium text-text">浏览器验证截图</span><span className="block truncate text-[10px] text-caption">{url ?? "点击缩略图预览"}</span></span>
+    {url && <button className="shrink-0 cursor-pointer rounded-md px-1.5 py-1 text-[10px] text-info hover:bg-info-soft" onClick={openSite} title="用默认浏览器打开网站">打开网站</button>}
+  </div>;
 }
 
 /** Timeline 执行记录（v2.14：per-tool 平铺——与 主流 ToolCallTree 同构，无步骤卡片分组） */

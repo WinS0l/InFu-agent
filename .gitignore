@@ -32,8 +32,13 @@ coverage/
 # Rust 构建产物（sandbox-rs）
 target/
 
-# Electron ������release*/ ����⣩
+# Electron ������release*/ ����⣩
 packages/desktop/release*/
 
-# tsc ��������
+# 本地启动器、快捷方式与人工界面参考素材不参与开源分发
+start-infu.bat
+*.lnk
+屏幕截图*.png
+
+# tsc ��������
 *.tsbuildinfo

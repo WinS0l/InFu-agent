@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Brain } from "lucide-react";
 
 /**
@@ -8,7 +8,9 @@ import { Brain } from "lucide-react";
  *  - hover：漂浮放大感（微上浮 + 放大 + 阴影）而非整行选中背景；图标颜色加深
  */
 export default function ReasoningBlock({ text, running }: { text: string; running?: boolean }) {
-  const [open, setOpen] = useState(false);
+  // 只有当前流式思考自动展开；思考结束或进入下一步骤即自动折叠，历史保持安静。
+  const [open, setOpen] = useState(Boolean(running));
+  useEffect(() => { setOpen(Boolean(running)); }, [running]);
   const visible = text.trimEnd();
   const firstLine = visible.split("\n")[0] ?? "";
   const lastLine = visible.slice(visible.lastIndexOf("\n") + 1);

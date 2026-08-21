@@ -3,7 +3,7 @@
  *
  * 痛点：smart（智能）档 medium 全部人工确认、confirm（全确认）档 low 也要确认——
  * Agent 多步任务里同一操作反复出现（如多次 npm install、反复写同一文件）时弹窗轰炸，
- * 直接拉低使用体验。opencode 用 allowedTools 持久白名单，InFu 已有命令白名单/工具覆盖，
+ * 直接拉低使用体验。InFu 已有命令白名单和工具覆盖，
  * 这里补**运行时记忆**：会话内用户批准过一次的操作，本会话后续同参出现直接放行。
  *
  * 安全边界：
@@ -51,11 +51,11 @@ export function clearApprovalMemory(sessionId: string): void {
 
 /**
  * v3.2 会话级全权放行（用户拍板：审批弹窗加「本会话全部放行」按钮）：
- * 开启后本会话内所有审批请求（含 requireExplicit 红线）直接放行——对齐 opencode --auto
+ * 开启后本会话内所有审批请求（含 requireExplicit 红线）直接放行。
  * 真全权语义，但作用域仅当前会话（CLI -y/定时任务无人值守不受影响——无人值守没有按钮可点，
  * 其 requireExplicit 拒绝语义保持不变）。
  * 安全边界：
- * - 显式禁用（toolOverrides disabled）仍拒绝——对齐 opencode 显式 deny 不覆盖
+ * - 显式禁用（toolOverrides disabled）仍拒绝。
  * - 命令审计/事件流照常全量（放行 ≠ 静默）
  * - 会话结束/删除自动清除
  */

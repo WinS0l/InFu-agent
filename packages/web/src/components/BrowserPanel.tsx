@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { ArrowLeft, ArrowRight, RotateCw, X, Globe, Braces, MoreHorizontal, Smartphone, Tablet, Monitor, Plus, ExternalLink, Maximize2 } from "lucide-react";
+import { ArrowLeft, ArrowRight, RotateCw, X, Globe, Braces, MoreHorizontal, Smartphone, Tablet, Monitor, Plus, ExternalLink, Maximize2, Minus } from "lucide-react";
 import { useStore } from "../store";
 import { useClickOutside } from "./useClickOutside";
 import type { BrowserViewState, InfuWebviewElement } from "../desktop";
@@ -46,7 +46,7 @@ function tabTitle(t: Tab): string {
 
 /** 尺寸预设（手机/平板/桌面；fit = 适应窗口） */
 const VIEWPORTS = [
-  { label: "手机 375×667", icon: Smartphone, w: 375, h: 667 },
+  { label: "桌面 1440×900", icon: Monitor, w: 1440, h: 900 },
   { label: "手机 375×812", icon: Smartphone, w: 375, h: 812 },
   { label: "平板 768×1024", icon: Tablet, w: 768, h: 1024 },
   { label: "适应窗口", icon: Monitor, fit: true as const },
@@ -82,6 +82,7 @@ export default function BrowserPanel({ active: isActive }: { active: boolean }) 
   const [customW, setCustomW] = useState("375");
   const [customH, setCustomH] = useState("812");
   const [freeSize, setFreeSize] = useState<{ w?: number; h?: number } | null>(null);
+  const [zoom, setZoom] = useState(100);
   const wvRefs = useRef(new Map<string, InfuWebviewElement>());
   const autoCreatedRef = useRef(false);
   // v3.0 批 12：📄/⋯ 下拉菜单点击空白处自动收起
@@ -93,6 +94,11 @@ export default function BrowserPanel({ active: isActive }: { active: boolean }) 
 
   const active = tabs.find((t) => t.active) ?? null;
   const activeEl = active ? wvRefs.current.get(active.id) : undefined;
+  const changeZoom = (delta: number) => {
+    const next = Math.max(50, Math.min(200, zoom + delta));
+    setZoom(next);
+    void desktop?.browserSetZoom(next / 100);
+  };
 
   /** 对活跃元素执行导航操作（webview 元素自带方法，无需 IPC） */
   const act = <T,>(fn: (el: InfuWebviewElement) => T): T | undefined => {
@@ -239,11 +245,14 @@ export default function BrowserPanel({ active: isActive }: { active: boolean }) 
   const menuBtn = "flex h-7 w-7 shrink-0 cursor-pointer items-center justify-center rounded-lg text-sub transition-colors hover:bg-hover hover:text-text";
   const addr = displayUrl(active?.url ?? "");
 
-  // 自由尺寸：预设/自定义 → 元素 CSS 宽高；fit/null = 100%
+  // 自由尺寸：预设/自定义变成可滚动画布内的浏览器窗口；不会把页面滚动误作窗口移动。
   const freeCss =
     freeSize && freeSize.w
-      ? { width: `${freeSize.w}px`, height: `${freeSize.h}px`, left: "50%", transform: "translateX(-50%)" }
+      ? { width: `${freeSize.w}px`, height: `${freeSize.h}px` }
       : {};
+  const canvasStyle = freeSize?.w && freeSize.h
+    ? { minWidth: `${freeSize.w}px`, minHeight: `${freeSize.h}px` }
+    : undefined;
 
   return (
     <div className="flex h-full min-h-0 flex-col">
@@ -317,6 +326,11 @@ export default function BrowserPanel({ active: isActive }: { active: boolean }) 
               }
             }}
           />
+        </div>
+        <div className="flex shrink-0 items-center rounded-lg border border-line p-0.5">
+          <button className={menuBtn} onClick={() => changeZoom(-10)} title="缩小页面"><Minus className="h-3.5 w-3.5" /></button>
+          <button className="min-w-10 cursor-pointer rounded-md px-1 text-[11px] text-sub hover:bg-hover hover:text-text" onClick={() => { setZoom(100); void desktop.browserSetZoom(1); }} title="重置缩放">{zoom}%</button>
+          <button className={menuBtn} onClick={() => changeZoom(10)} title="放大页面"><Plus className="h-3.5 w-3.5" /></button>
         </div>
         {/* 📄 自由尺寸（面板贴合 = 元素 CSS；内容模拟 = Agent CDP Emulation） */}
         <div className="relative">
@@ -420,8 +434,9 @@ export default function BrowserPanel({ active: isActive }: { active: boolean }) 
         </div>
       </div>
 
-      {/* ── 内容区：webview 元素（active 显示；元素永不从 DOM 移除——移除即销毁 guest）── */}
-      <div className="relative min-h-0 flex-1 overflow-hidden rounded-xl border border-line bg-surface">
+      {/* ── 内容区：自由尺寸时滚动的是外层画布，不是网页；webview 仍常驻，避免 guest 被销毁。 ── */}
+      <div className="min-h-0 flex-1 overflow-auto rounded-xl border border-line bg-surface" data-browser-canvas={freeSize ? "free" : "fit"}>
+        <div className="relative min-h-full min-w-full" style={canvasStyle}>
         {tabs.length === 0 && (
           <div className="absolute inset-0 flex flex-col items-center justify-center gap-2 text-center">
             <Globe className="h-8 w-8 text-sub" />
@@ -439,6 +454,7 @@ export default function BrowserPanel({ active: isActive }: { active: boolean }) 
             style={t.active ? freeCss : undefined}
           />
         ))}
+        </div>
       </div>
     </div>
   );

@@ -23,7 +23,7 @@ export interface ChatMsg {
   fallbacks?: Array<{ from: string; to: string; reason: string }>;
   /** v2.2 上下文压缩记录（历史超预算自动摘要；DB 无损） */
   compressed?: Array<{ before: number; after: number; summary: string }>;
-  /** v3.3 后台任务完成通知（task-notification 事件；EventRow 通知行——对齐 ZCode） */
+  /** v3.3 后台任务完成通知（task-notification 事件；EventRow 通知行）。 */
   taskNotes?: Array<{
     taskType: "subagent" | "job";
     taskId: string;
@@ -118,13 +118,14 @@ export interface AskState {
 }
 
 /** v2.9 右侧栏标签页（浏览器式）类型 */
-export type RightTabKind = "review" | "browser" | "subagent" | "subagents" | "computeruse" | "trace";
+export type RightTabKind = "review" | "browser" | "subagent" | "subagents" | "computeruse" | "trace" | "attachment";
 /** v2.9 右侧栏标签页：review=审查 / browser=浏览器（占位）/ subagent=子 Agent 详情 / subagents=子 Agent 列表 */
 export interface RightTab {
   id: string;
   kind: RightTabKind;
   label: string;
   subagentId?: string;
+  attachment?: AttachmentMeta;
 }
 
 /** v3.1 排队发送：会话运行中预输入的下一条消息（队列项） */
@@ -336,7 +337,7 @@ interface StoreState {
   /** v2.9 右侧栏标签页（浏览器式） */
   rightTabs: RightTab[];
   activeRightTab: string | null;
-  openRightTab: (tab: { id?: string; kind: RightTabKind; label: string; subagentId?: string }) => void;
+  openRightTab: (tab: { id?: string; kind: RightTabKind; label: string; subagentId?: string; attachment?: AttachmentMeta }) => void;
   closeRightTab: (id: string) => void;
   setActiveRightTab: (id: string) => void;
   setReport: (content: string) => void;
@@ -748,8 +749,7 @@ export const useStore = create<StoreState>()(
       phaseModels: {},
       plan: null,
       subagentThreads: {},
-      rightTabs: [],
-      activeRightTab: null,
+      // 右侧工作区跨会话保留；仅用户显式关闭 tab 才关闭。
       todos: [],
       // v3.1：runningIds/sessionCache 不动——其他会话的后台任务继续跑、缓存保留
     }),
@@ -942,8 +942,7 @@ export const useStore = create<StoreState>()(
       out.pendingRollback = null;
       out.approvals = [];
       out.subagentThreads = subagentThreads;
-      out.rightTabs = [];
-      out.activeRightTab = null;
+      // 保持已打开的右侧 tab；会话重放只更新其数据源，不重置用户工作区。
       out.todos = todos;
     }
     // per-session 字段总是写（切换会话回填用）
@@ -1476,8 +1475,18 @@ export const useStore = create<StoreState>()(
     set((s) => {
       const id = tab.id ?? `${tab.kind}:${tab.subagentId ?? Date.now()}`;
       const exists = s.rightTabs.some((t) => t.id === id);
-      if (exists) return { activeRightTab: id };
-      return { rightTabs: [...s.rightTabs, { id, kind: tab.kind, label: tab.label, subagentId: tab.subagentId }], activeRightTab: id };
+      if (exists) {
+        // Attachment previews can be reopened after history hydration; retain the newest
+        // preview payload rather than activating an old tab that only has its label.
+        return {
+          rightTabs: s.rightTabs.map((item) => item.id === id ? { ...item, label: tab.label, attachment: tab.attachment ?? item.attachment } : item),
+          activeRightTab: id,
+        };
+      }
+      return {
+        rightTabs: [...s.rightTabs, { id, kind: tab.kind, label: tab.label, subagentId: tab.subagentId, attachment: tab.attachment }],
+        activeRightTab: id,
+      };
     }),
   closeRightTab: (id) =>
     set((s) => {

@@ -108,7 +108,7 @@ export function createProject(root: string, name?: string): { ok: boolean; proje
     return true;
   });
   if (!saved) return { ok: false, message: `该项目已存在：${r}` };
-  // v3.3 补 23（对齐 opencode project git init API）：新建项目自动初始化 git 仓库——
+  // v3.3：新建项目自动初始化 git 仓库。
   // 非 git 目录 git init（失败静默不阻塞创建）；审查/代码界面的改动 diff 立即可用
   let initNote = "";
   if (!isGitRepoDir(r)) {

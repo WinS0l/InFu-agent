@@ -240,7 +240,7 @@ export interface SandboxConfig {
   mode?: "auto" | "off" | "soft" | "restricted" | "docker";
 }
 
-/** 常规设置（v2.4：Web 默认值；v3.5 扩展对标 ZCode 常规设置） */
+/** 常规设置（Web 默认值与持久化选项）。 */
 export interface GeneralConfig {
   /** 默认项目根目录（Web 输入框初始值） */
   defaultRoot?: string;
@@ -351,12 +351,24 @@ export type RiskLevel = "low" | "medium" | "high";
 /** 分层编排的阶段 */
 export type PhaseId = "planner" | "executor" | "reviewer";
 
+export interface DeliveryVerification {
+  /** 验证工具实际执行的命令；从工具参数/自动验证执行器取得，绝不解析模型文本。 */
+  command: string;
+  status: "passed" | "failed";
+  /** 原始工具输出，供 UI 按需展开。 */
+  output: string;
+}
+
 /** 任务交付的可机读摘要：只来自工具、Todo 与审批结果，UI 不解析模型回复猜测状态。 */
 export interface DeliverySummary {
   changedFiles: number;
+  /** 本轮写工具实际成功写入的相对路径，供交付卡片定位审查 diff。 */
+  changedPaths: string[];
   completedItems: string[];
   pendingItems: string[];
   verification: "not-run" | "passed" | "failed";
+  /** 实际执行过的验证；为空时交付摘要不展示验证区域。 */
+  verifications: DeliveryVerification[];
 }
 
 /**
@@ -410,7 +422,7 @@ export type AgentEvent =
   | { type: "job-start"; id: string; command: string }
   /** 后台命令结束（正常退出/失败/被杀） */
   | { type: "job-done"; id: string; code: number | null; ok: boolean }
-  // ── v3.3 异步任务编排新增（对齐 ZCode <task-notification> 机制）──
+  // ── v3.3 异步任务编排新增。──
   /** 后台任务完成通知（子智能体/job 结束时 emit；前端显示 EventRow 通知行，
    *  运行时注入父循环上下文（loop drain → user XML 消息），rebuild 同格式恢复——
    *  模型「实时感知等待的任务已完成」，自主决定回收结果或继续其他工作） */
@@ -465,12 +477,14 @@ export type AgentEvent =
 export interface AttachmentMeta {
   /** 显示名（文件名或文件夹名） */
   name: string;
-  /** 绝对路径（文件/文件夹引用）；图片为 null（字节不落库） */
+  /** 文件所在绝对路径（图片不落库，仅用 preview 在消息中预览） */
   path?: string;
-  /** 类型：file=文件 / dir=文件夹 / image=图片 */
   kind: "file" | "dir" | "image";
-  /** 字节大小（文件/图片） */
   size?: number;
+  /** 图片 data URL（仅会话事件/UI 预览；不进入持久化的模型上下文） */
+  preview?: string;
+  /** 小型文本附件的安全预览；二进制附件仅展示元数据。 */
+  contentPreview?: string;
 }
 
 /** 运行时模型信息（v2.5：ToolContext 携带，子智能体委派解析子模型用；结构同 registry toRuntimeModel 返回值） */

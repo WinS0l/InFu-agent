@@ -45,7 +45,7 @@ import { envTools } from "./env-tools.js";
 import { backupForRecovery } from "./recovery.js";
 
 /**
- * v3.5 升级 read-before-edit（对齐 ZCode CLI 的 readFileState 机制——三层）：
+ * v3.5 升级 read-before-edit（三层）：
  * ① 未读拒绝：write/edit 前文件必须被 read_file 过（新建文件免读）；
  * ② partial 拒绝：read_file 输出被截断（模型看到不完整内容）视为未读完整，拒绝编辑；
  * ③ stale 检测：每次读取记录文件指纹（mtimeMs + sizeBytes），写时比对——
@@ -846,7 +846,7 @@ export const TOOLS: Record<string, ToolDef> = {
     },
   },
 
-  // ── v3.3 异步任务编排：阻塞等待（对齐 ZCode TaskOutput block=true；
+  // ── v3.3 异步任务编排：阻塞等待。
   //  与 report/job_output（非阻塞查询）互补——需要结果才能继续时才用）──
   wait_task: {
     name: "wait_task",

@@ -1,6 +1,6 @@
 /**
  * 插件市场雏形（v2.7 批 1）——内置官方插件注册表
- * 借鉴 zcode marketplace（source/hash/version 元数据）；当前为「内置注册表」形态：
+ * 内置扩展注册表。官方插件随 InFu 分发，列表可用于安装和启停管理。
  * 官方插件随 InFu 分发，marketplace 列出可一键安装的插件（id/描述/模块路径/版本）。
  * 后续可扩展为远程市场（URL 拉取 manifest）。
  */
@@ -29,14 +29,6 @@ const _registry: MarketplacePlugin[] = [
       "浏览器自动化：打开/导航网页、AI 可访问性树快照、点击/输入/填表、页面 JS 执行、截图视觉验证。用于 Web 前端测试、渲染页面抓取、交互验证（含 control-browser / web-gui-tester 两个技能）。",
     version: "0.2.0",
     path: fileURLToPath(new URL(`./browser/tools${_moduleExt}`, import.meta.url)),
-    source: "builtin",
-  },
-  {
-    id: "document-skills",
-    name: "document-skills",
-    description: "文档处理三件套：docx（Word 创建/编辑/审阅）、pdf（报告/创意/LaTeX/PDF 处理）、pptx（PowerPoint 精确编辑）。",
-    version: "1.0.0",
-    path: fileURLToPath(new URL(`./official/document-skills${_moduleExt}`, import.meta.url)),
     source: "builtin",
   },
   {

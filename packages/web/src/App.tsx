@@ -202,6 +202,7 @@ export default function App() {
   // v3：顶部区域（仅非空会话显示）——「对话/代码」推拉 + 左侧会话归属
   const hasMessages = useStore((s) => s.messages.length > 0);
   const viewMode = useStore((s) => s.viewMode);
+  const effectiveViewMode = hasMessages ? viewMode : "chat";
   const setViewMode = useStore((s) => s.setViewMode);
   // v3.3 补 13：终端开关移入聊天 header 右上角（store 状态与 ChatPanel 共享）
   const terminalOpen = useStore((s) => s.terminalOpen);
@@ -210,7 +211,7 @@ export default function App() {
   const root = useStore((s) => s.root);
   // 欢迎态没有工作区语义：即使用户在上个会话打开过右栏，也不能让空白欢迎页
   // 继承一块无法收起的工作区。detailsOpen 仍作为工作会话的用户偏好保留。
-  const detW = !hasMessages || viewMode === "code" || !detailsOpen ? 0 : detailsWidth;
+  const detW = !hasMessages || effectiveViewMode === "code" || !detailsOpen ? 0 : detailsWidth;
   // v3：顶部栏左侧——项目会话显示项目名，自由会话显示会话名
   const [projects, setProjects] = useState<Array<{ id: string; name: string; root: string }>>([]);
   const sessions = useStore((s) => s.sessions);
@@ -267,7 +268,7 @@ export default function App() {
       <div
         className="relative grid min-h-0 flex-1 overflow-hidden"
         style={{
-          gridTemplateColumns: `${sideW}px minmax(0, 1fr) ${viewMode === "code" ? 0 : detW}px`,
+          gridTemplateColumns: `${sideW}px minmax(0, 1fr) ${effectiveViewMode === "code" ? 0 : detW}px`,
           // 关键：行高约束（防止 grid 隐式行被内容撑高）；有消息时首行为顶部区域
           gridTemplateRows: hasMessages ? "auto minmax(0, 1fr)" : "minmax(0, 1fr)",
           transition: dragging ? "none" : "grid-template-columns 0.3s cubic-bezier(0.4, 0, 0.2, 1)",
@@ -279,7 +280,10 @@ export default function App() {
         />
 
         {/* 中间列与工作区共用一条紧凑顶部基线；正文不再像浮在窗口中的独立白纸。 */}
-        <div className="min-h-0 min-w-0" style={{ gridColumn: 2, gridRow: "1 / span 2" }}>
+      <div
+        className="relative min-h-0 min-w-0"
+        style={{ gridColumn: 2, gridRow: "1 / span 2" }}
+      >
           <div className="flex h-full flex-col overflow-hidden">
             {/* 顶部工作台栏：会话上下文、模式切换与右侧动作在同一视觉基线。 */}
             {hasMessages && (
@@ -340,7 +344,7 @@ export default function App() {
             </div>
           </div>
         </div>
-        {viewMode === "code" && (
+        {effectiveViewMode === "code" && (
           <div
             className="absolute bottom-0 z-40 isolate overflow-hidden rounded-l-[22px] border border-r-0 border-line bg-base shadow-[-5px_10px_26px_rgba(0,0,0,0.10),0_2px_6px_rgba(0,0,0,0.04)]"
             style={{ left: sideW + 8, top: hasMessages ? "40px" : 0, right: 0, backgroundColor: "var(--bg-base)", opacity: 1 }}

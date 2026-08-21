@@ -1,7 +1,9 @@
-import { useEffect, useState } from "react";
-import { Monitor, MonitorUp, MousePointerClick, Keyboard, X, Move, AppWindow, ImageOff } from "lucide-react";
+import { useEffect, useMemo, useState } from "react";
+import { Monitor, MonitorUp, MousePointerClick, Keyboard, Move, AppWindow, ImageOff, ChevronDown } from "lucide-react";
 import { useStore } from "../store";
 import { apiFetch, apiUrl } from "../api";
+
+const EMPTY_TRACE: import("@infu/shared").StoredEvent[] = [];
 
 /**
  * computer-use 面板（v3.0 批 11：vision 底座 UI 落地）
@@ -12,8 +14,10 @@ import { apiFetch, apiUrl } from "../api";
 export default function ComputerUsePane() {
   const desktop = window.infuDesktop;
   const [shots, setShots] = useState<string[]>([]);
-  const [viewing, setViewing] = useState<string | null>(null);
-  const messages = useStore((s) => s.messages);
+  const [logsOpen, setLogsOpen] = useState(false);
+  // Zustand selectors must return a stable empty value; allocating [] here causes React's
+  // useSyncExternalStore snapshot loop and blanks the entire desktop-operation tab.
+  const trace = useStore((s) => s.activeSessionId ? s.traceBySession[s.activeSessionId] ?? EMPTY_TRACE : EMPTY_TRACE);
   // v3.3 补 9：截图事件标记（screen_capture tool-result 到达 +1）+ 当前会话（切换会话也刷新）
   const shotTick = useStore((s) => s.screenShotTick);
   const activeSessionId = useStore((s) => s.activeSessionId);
@@ -39,24 +43,22 @@ export default function ComputerUsePane() {
     return () => { alive = false; };
   }, [desktop, shotTick, activeSessionId]);
 
-  // 大图查看：Esc 关闭
-  useEffect(() => {
-    if (!viewing) return;
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") setViewing(null);
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [viewing]);
-
-  // 当前会话的 screen_* 操作日志
-  const ops = messages.flatMap((m) =>
-    (m.tools ?? []).filter((t) => t.tool.startsWith("screen_")).map((t) => ({
-      tool: t.tool,
-      summary: t.summary ?? "",
-      status: t.status,
-    }))
-  );
+  // The event ledger is durable. Show only the current task, starting from its last user message.
+  const ops = useMemo(() => {
+    const start = trace.map((row) => row.event.type).lastIndexOf("user-message");
+    return trace.slice(start < 0 ? 0 : start + 1).flatMap(({ event }) => event.type === "tool-result" && event.tool.startsWith("screen_") ? [{ tool: event.tool, summary: event.summary, status: event.ok ? "ok" : "error" }] : []).map((item, index) => ({ ...item, round: index + 1 }));
+  }, [trace]);
+  const screenshotRounds = ops.filter((op) => op.tool === "screen_capture").map((op) => op.round);
+  const openShot = (name: string) => {
+    const root = useStore.getState().root;
+    useStore.getState().openRightTab({
+      id: `desktop-shot:${name}`,
+      kind: "attachment",
+      label: name,
+      attachment: { name, kind: "image", preview: apiUrl(`/api/screenshots/file?root=${encodeURIComponent(root)}&name=${encodeURIComponent(name)}`) },
+    });
+    useStore.getState().setDetailsOpen(true);
+  };
 
   if (!desktop) {
     return (
@@ -80,21 +82,25 @@ export default function ComputerUsePane() {
           computer-use
         </div>
         <div className="mt-0.5 text-xs leading-5 text-caption">
-          Agent 通过 screen_capture 截图观察桌面，screen_click / screen_type 执行操作（每次操作需审批）
+          本任务的桌面操作和截图证据。全权放行（full）档已自动允许 screen_* 操作。
         </div>
       </div>
 
-      {/* 操作日志 */}
+      {/* 操作日志：折叠时只流动显示最近一条，展开后保留固定高度滚动区。 */}
       <div className="shrink-0 px-3 pt-2">
-        <div className="mb-1 text-xs font-medium text-sub">操作日志</div>
+        <button className="flex w-full cursor-pointer items-center gap-2 rounded-lg px-1 py-1 text-left text-xs font-medium text-sub hover:bg-hover" onClick={() => setLogsOpen((value) => !value)}>
+          <span className="shrink-0">操作日志</span>
+          {!logsOpen && ops.at(-1) && <span className="min-w-0 flex-1 truncate font-normal text-caption">第 {ops.at(-1)!.round} 步 · {ops.at(-1)!.tool} · {ops.at(-1)!.summary.slice(0, 44)}</span>}
+          <ChevronDown className={`ml-auto h-3.5 w-3.5 transition-transform ${logsOpen ? "rotate-180" : ""}`} />
+        </button>
         {ops.length === 0 ? (
           <div className="rounded-lg border border-line bg-hover/40 px-2.5 py-2 text-xs text-caption">
             暂无桌面操作（让 Agent 用 screen_capture 截图开始）
           </div>
-        ) : (
-          <div className="space-y-1">
-            {ops.slice(-6).reverse().map((op, i) => (
-              <div key={i} className="flex items-start gap-2 rounded-lg border border-line bg-hover/40 px-2.5 py-1.5 text-xs">
+        ) : logsOpen ? (
+          <div className="max-h-44 space-y-1 overflow-y-auto rounded-lg border border-line bg-hover/25 p-1.5">
+            {ops.slice().reverse().map((op) => (
+              <div key={op.round} className="flex items-start gap-2 rounded-md px-2 py-1.5 text-xs hover:bg-hover/60">
                 {op.tool === "screen_capture" ? (
                   <MonitorUp className="mt-0.5 h-3.5 w-3.5 shrink-0 text-info" />
                 ) : op.tool === "screen_click" ? (
@@ -111,15 +117,15 @@ export default function ComputerUsePane() {
                   <Keyboard className="mt-0.5 h-3.5 w-3.5 shrink-0 text-info" />
                 )}
                 <span className="min-w-0 flex-1 truncate text-sub">
-                  <span className="font-medium text-text">{op.tool}</span> {op.summary.slice(0, 60)}
+                  <span className="mr-1 font-mono text-caption">{op.round}.</span><span className="font-medium text-text">{op.tool}</span> {op.summary.slice(0, 80)}
                 </span>
               </div>
             ))}
           </div>
-        )}
+        ) : null}
       </div>
 
-      {/* 截图流 */}
+      {/* 截图流：紧凑纵向证据带，与 screen_capture 对应的操作轮次并列。 */}
       <div className="min-h-0 flex-1 overflow-y-auto px-3 py-2">
         <div className="mb-1 text-xs font-medium text-sub">截图流（{shots.length}）</div>
         {shots.length === 0 ? (
@@ -127,45 +133,26 @@ export default function ComputerUsePane() {
             暂无截图——Agent 调用 screen_capture 后自动出现在这里
           </div>
         ) : (
-          <div className="grid grid-cols-2 gap-1.5">
-            {shots.map((name) => (
+          <div className="space-y-1.5">
+            {shots.map((name, index) => {
+              const round = screenshotRounds[screenshotRounds.length - 1 - index];
+              return (
               <button
                 key={name}
-                className="group cursor-pointer overflow-hidden rounded-lg border border-line bg-hover/40 transition-colors hover:border-info/60"
-                onClick={() => setViewing(name)}
+                className="group flex w-full cursor-pointer items-center gap-2 overflow-hidden rounded-lg border border-line bg-hover/40 p-1 transition-colors hover:border-info/60"
+                onClick={() => openShot(name)}
                 title={name}
               >
                 {/* v3.4 审计修复：apiUrl 拼 token query（生产模式裸 /api 被本地令牌 401——
                     此前桌面打包版截图预览全部失效）；加载失败显示占位，不挂空图 */}
                 <ScreenshotThumb name={name} root={useStore.getState().root} />
-                <div className="truncate px-1.5 py-0.5 text-[10px] text-caption">{name.replace(/^screen-/, "").replace(/\.png$/, "")}</div>
+                <span className="min-w-0 flex-1 text-left"><span className="block text-[11px] font-medium text-text">{round ? `第 ${round} 步截图` : "桌面截图"}</span><span className="block truncate text-[10px] text-caption">点击在工作区预览</span></span>
               </button>
-            ))}
+            ); })}
           </div>
         )}
       </div>
 
-      {/* 大图查看（点击遮罩/×/Esc 关闭） */}
-      {viewing && (
-        <div
-          className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-8"
-          onClick={() => setViewing(null)}
-        >
-          <button
-            className="absolute right-4 top-4 flex h-9 w-9 cursor-pointer items-center justify-center rounded-xl border border-white/20 bg-black/50 text-white/90 transition-colors hover:bg-black/70"
-            onClick={() => setViewing(null)}
-            title="关闭（Esc）"
-          >
-            <X className="h-5 w-5" />
-          </button>
-          <img
-            src={apiUrl(`/api/screenshots/file?root=${encodeURIComponent(useStore.getState().root)}&name=${encodeURIComponent(viewing)}`)}
-            className="max-h-full max-w-full rounded-xl border border-line shadow-lv3"
-            alt={viewing}
-            onError={(e) => { (e.currentTarget as HTMLImageElement).style.display = "none"; }}
-          />
-        </div>
-      )}
     </div>
   );
 }
@@ -175,7 +162,7 @@ function ScreenshotThumb({ name, root }: { name: string; root: string }) {
   const [err, setErr] = useState(false);
   if (err) {
     return (
-      <div className="flex h-20 w-full items-center justify-center bg-hover/40">
+        <div className="flex h-11 w-16 shrink-0 items-center justify-center bg-hover/40">
         <ImageOff className="h-5 w-5 text-caption" />
       </div>
     );
@@ -183,7 +170,7 @@ function ScreenshotThumb({ name, root }: { name: string; root: string }) {
   return (
     <img
       src={apiUrl(`/api/screenshots/file?root=${encodeURIComponent(root)}&name=${encodeURIComponent(name)}`)}
-      className="h-20 w-full object-cover"
+      className="h-11 w-16 shrink-0 rounded object-cover"
       alt={name}
       loading="lazy"
       onError={() => setErr(true)}

@@ -47,7 +47,7 @@ export function parseSkillFrontmatter(content: string): SkillFrontmatter | null 
     if (!kv) continue;
     const key = kv[1];
     let val: string = kv[2].trim();
-    // YAML 块标量（> 折叠 / | 字面）：后续缩进行拼入（Anthropic 官方 document-skills 等用此写法）
+    // YAML 块标量（> 折叠 / | 字面）：后续缩进行拼入。
     if (val === ">" || val === "|") {
       const parts: string[] = [];
       i++;

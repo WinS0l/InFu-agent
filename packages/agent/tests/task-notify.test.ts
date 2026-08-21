@@ -1,5 +1,5 @@
 /**
- * 异步任务编排自测（v3.3：对齐 ZCode <task-notification> 机制）
+ * 异步任务编排自测。
  * 运行：npx tsx packages/agent/tests/task-notify.test.ts
  *
  * 覆盖：

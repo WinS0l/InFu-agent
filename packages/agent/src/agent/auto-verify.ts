@@ -61,27 +61,38 @@ export interface AutoVerifyInput {
   abortSignal?: AbortSignal;
 }
 
+export interface AutoVerification {
+  command: string;
+  status: "passed" | "failed";
+  output: string;
+}
+
+export interface AutoVerifyResult {
+  out: string;
+  verification?: AutoVerification;
+}
+
 /**
- * 写后自动验证入口（loop.ts 工具执行后调用；返回改写后的工具结果文本）。
- * 判定条件不满足时原样返回 out。
+ * 写后自动验证入口（loop.ts 工具执行后调用；返回原工具输出与真实验证记录）。
+ * 判定条件不满足时保持原输出，且不生成验证记录。
  */
-export async function maybeAutoVerify(input: AutoVerifyInput): Promise<string> {
+export async function maybeAutoVerify(input: AutoVerifyInput): Promise<AutoVerifyResult> {
   const cfg = loadConfig();
   // 缺省开；显式关才停
-  if (cfg?.general?.autoVerify === false) return input.out;
-  if (!input.ok) return input.out;
-  if (!WRITE_TOOLS.has(input.tool)) return input.out;
+  if (cfg?.general?.autoVerify === false) return { out: input.out };
+  if (!input.ok) return { out: input.out };
+  if (!WRITE_TOOLS.has(input.tool)) return { out: input.out };
   // 写失败/被拒的结果文本不触发（工具以文本形式返回错误）
-  if (/^(错误|用户拒绝|任务已停止)/.test(input.out)) return input.out;
-  if (input.phase === "planner" || input.phase === "reviewer") return input.out;
+  if (/^(错误|用户拒绝|任务已停止)/.test(input.out)) return { out: input.out };
+  if (input.phase === "planner" || input.phase === "reviewer") return { out: input.out };
 
   const key = `${input.sessionId ?? "cli"}::${path.resolve(input.root)}`;
   const now = Date.now();
   const state = verifyState.get(key);
-  if (state && now - state.at < DEBOUNCE_MS) return input.out;
+  if (state && now - state.at < DEBOUNCE_MS) return { out: input.out };
 
   const cmd = detectTestCommand(input.root);
-  if (!cmd) return input.out;
+  if (!cmd) return { out: input.out };
   // 先占位再执行：验证耗时 > 去抖窗口也不会重入
   verifyState.set(key, { at: now, cmd });
 
@@ -94,7 +105,7 @@ export async function maybeAutoVerify(input: AutoVerifyInput): Promise<string> {
       auditCommand(input.root, cmd, true, "会话级临时联网放行", "egress-allowed-temp");
     } else {
       auditCommand(input.root, cmd, false, egressBlockedMessage(egress), "egress-blocked");
-      return `${input.out}\n\n[自动验证] 测试命令含网络外传已被断网策略拦截（${egressBlockedMessage(egress)}），未执行`;
+      return { out: `${input.out}\n\n[自动验证] 测试命令含网络外传已被断网策略拦截（${egressBlockedMessage(egress)}），未执行` };
     }
   }
 
@@ -105,9 +116,12 @@ export async function maybeAutoVerify(input: AutoVerifyInput): Promise<string> {
     const hint = r.ok
       ? ""
       : "（写后自动验证失败——请优先修复测试，设置 → 常规 → 任务与通知可关闭自动验证）";
-    return `${input.out}\n\n[自动验证] 已自动运行 ${cmd}：${status}${hint}\n${clip(r.out, VERIFY_RESULT_LIMIT)}`;
+    return {
+      out: `${input.out}\n\n[自动验证] 已自动运行 ${cmd}：${status}${hint}\n${clip(r.out, VERIFY_RESULT_LIMIT)}`,
+      verification: { command: cmd, status: r.ok ? "passed" : "failed", output: r.out },
+    };
   } catch (e) {
     // 验证本身异常静默（不阻塞写操作结果）
-    return input.out;
+    return { out: input.out };
   }
 }

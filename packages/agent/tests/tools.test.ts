@@ -109,7 +109,7 @@ check("新文件结构化 diff 准确", recordedDiffs.at(-1)?.added === 1 && rec
 const escape = await run("write_file", { path: "../../evil.txt", content: "x" });
 check("路径越界被拦截", escape.includes("越界"), escape);
 
-// 6. edit_file + read-before-edit（v3.5 升级对齐 ZCode：未读/partial/stale 三层门禁）
+// 6. edit_file + read-before-edit（未读/partial/stale 三层门禁）
 console.log("\n▶ edit_file（read-before-edit 门禁）");
 // 未读直接编辑 → 拒绝
 const ed0 = await run("edit_file", { path: "README.md", old_text: "# Fixture", new_text: "# InFu" });

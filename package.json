@@ -1,8 +1,9 @@
 {
   "name": "infu",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "private": true,
-  "description": "InFu",
+  "description": "Local coding agent for Windows",
+  "license": "Apache-2.0",
   "workspaces": [
     "packages/*"
   ],

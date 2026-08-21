@@ -7,6 +7,7 @@ import SubagentThreadView from "./SubagentThreadView";
 import BrowserPanel from "./BrowserPanel";
 import ComputerUsePane from "./ComputerUsePane";
 import SessionTracePane from "./SessionTracePane";
+import AttachmentPreviewPane from "./AttachmentPreviewPane";
 
 const EMPTY_TRACE: import("@infu/shared").StoredEvent[] = [];
 
@@ -226,7 +227,7 @@ export default function RightRail() {
               onClick={() => setActiveRightTab(t.id)}
               title={t.label}
             >
-              {/* v3.2：活动 tab 顶部 2px 信息蓝指示条（InFu 特色——ZCode/浏览器 tab 同款语义） */}
+              {/* v3.2：活动 tab 顶部 2px 信息蓝指示条。 */}
               {t.id === activeRightTab && (
                 <span className="absolute left-2.5 right-2.5 top-0 h-[2px] rounded-full bg-info" />
               )}
@@ -308,6 +309,8 @@ export default function RightRail() {
           <ComputerUsePane />
         ) : active.kind === "trace" ? (
           <SessionTracePane />
+        ) : active.kind === "attachment" ? (
+          <AttachmentPreviewPane />
         ) : active.subagentId && thread ? (
           <SubagentThreadView thread={thread} />
         ) : (

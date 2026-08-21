@@ -100,7 +100,7 @@ export function rebuildMessages(events: StoredEvent[], opts: RebuildOptions = {}
         break;
       case "task-notification": {
         // v3.3 异步任务编排：后台任务完成通知 → 同运行时注入格式的 user XML 消息
-        // （对齐 ZCode <task-notification>；纯文本 user 消息，不破坏 assistant/tool 配对）
+        // 纯文本 user 消息，不破坏 assistant/tool 配对。
         const n = event as Extract<import("@infu/shared").AgentEvent, { type: "task-notification" }>;
         flush();
         messages.push({

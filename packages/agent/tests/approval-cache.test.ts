@@ -137,7 +137,7 @@ ok("清理后不命中", !approvalRemembered(SID, k));
   ok("bypass 后红线直接放行（无弹窗）", r1 === true && popups === 0);
   const r2 = await guard(ctx, "write_file", "medium", "写入文件：a.ts");
   ok("bypass 后普通审批也直接放行", r2 === true && popups === 0);
-  // 显式禁用工具仍拒绝（对齐 opencode 显式 deny 不覆盖）——v3.5 审计修复：
+  // 显式禁用工具仍拒绝。
   // 原断言恒真（无任何禁用配置，名实不符）；改为注入真实禁用策略验证 guard 拦截
   {
     saveConfig({ models: [], approvalPolicy: { mode: "confirm", toolOverrides: [{ tool: "write_file", disabled: true }] } });

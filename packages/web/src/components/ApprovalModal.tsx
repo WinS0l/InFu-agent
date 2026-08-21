@@ -13,7 +13,7 @@ const RISK_META: Record<string, { label: string; Icon: typeof Shield; cls: strin
  * 审批弹窗（v3：统一 Modal 原语）：Agent 请求执行中/高风险操作时出现（支持队列逐个处理）。
  * 关键操作：遮罩/Esc 均不可关闭，只能显式允许/拒绝。
  * v3.2：新增「本会话全部放行」——本会话内所有后续审批（含联网/自注册/高危命令红线）直接
- * 放行，直到会话结束（对齐 opencode --auto 真全权语义；显式禁用工具仍拒绝；命令审计照常）。
+ * 放行，直到会话结束；显式禁用工具仍拒绝，命令审计照常。
  */
 export default function ApprovalModal() {
   const approvals = useStore((s) => s.approvals);

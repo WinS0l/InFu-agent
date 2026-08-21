@@ -86,6 +86,9 @@ export default function ReviewPane() {
   const [diff, setDiff] = useState("");
   const [loading, setLoading] = useState(false);
   const [testsOpen, setTestsOpen] = useState(false);
+  // 外部入口（交付摘要、工具行）指定文件时，直接进入同一个审查 diff，而非跳到代码正文。
+  const requestedFile = useStore((s) => s.codeViewFile);
+  const setCodeViewFile = useStore((s) => s.setCodeViewFile);
   // v3.4 审计修复：diff 请求竞态守卫——快速连续点两个文件（或期间 root 变化）时，
   // 旧请求的响应晚到会覆盖新选中文件的 diff；序号守卫让过期响应丢弃
   const diffSeq = useRef(0);
@@ -136,6 +139,14 @@ export default function ReviewPane() {
       if (seq === diffSeq.current) setLoading(false);
     }
   };
+
+  useEffect(() => {
+    if (!requestedFile || !files?.some((file) => file.path === requestedFile)) return;
+    void pickFile(requestedFile);
+    setCodeViewFile(null);
+    // pickFile is intentionally component-local and uses current root/files.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [requestedFile, files]);
 
   return (
     <div className="flex h-full min-h-0 flex-col">

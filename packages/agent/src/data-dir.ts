@@ -1,5 +1,5 @@
 /**
- * v3.5 数据目录定位与迁移（对齐 ZCode「根目录可选、内部结构固定」）：
+ * v3.5 数据目录定位与迁移：根目录可选，内部结构固定。
  * - 默认数据目录 = ~/.infu（config.json/infu.db/projects/schedules/memory/skills/agents/plugins/logs 等全部在内）
  * - 用户可通过设置界面把整个数据目录迁移到任意文件夹：旧位置 ~/.infu 只留下一个重定向指针
  *   文件 ~/.infu-redirect.json（{"dir": "<新目录>"}），此后所有模块经 resolveDataDir() 解析新位置。

@@ -3,12 +3,12 @@ import {
   Send, Square, GitBranch, Loader2,
   RotateCcw, AlertTriangle, Files, Folder, FolderOpen, ChevronDown, Check,
   BrainCircuit, ShieldCheck, ShieldAlert, Scale, Cpu, Paperclip, FileText, X, Pencil, Image as ImageIcon, WifiOff, Zap, Globe,
-  CheckCircle2, XCircle, OctagonX, Skull, Command, ListTree, Bot, Activity,
+  CheckCircle2, XCircle, OctagonX, Skull, Command, ListTree, Bot, Activity, ClipboardCheck, ChevronRight,
 } from "lucide-react";
 import { Streamdown } from "streamdown";
 import type { DeliverySummary, PhaseId } from "@infu/shared";
 import { useStore, type ChatMsg, type ToolEventState } from "../store";
-import { sendChat, mergeWorktree, discardWorktree, rewindSession, fetchProjects, fetchConfig, updateConfig, fetchPlugins, setApprovalBypass, fetchReviewFiles, type ApprovalMode, type ChatFileInput, type PluginInfo, egressAllow, egressDisallow } from "../api";
+import { sendChat, mergeWorktree, discardWorktree, rewindSession, fetchProjects, fetchConfig, updateConfig, fetchPlugins, setApprovalBypass, fetchReviewFiles, killBackgroundJob, type ApprovalMode, type ChatFileInput, type PluginInfo, egressAllow, egressDisallow } from "../api";
 import Timeline from "./Timeline";
 import ReasoningBlock from "./ReasoningBlock";
 import QueueDock from "./QueueDock";
@@ -48,6 +48,7 @@ function ActivityDock({ visible }: { visible: boolean }) {
   const [menuOpen, setMenuOpen] = useState(false);
   const [position, setPosition] = useState<{ x: number; y: number } | null>(null);
   const [compact, setCompact] = useState(false);
+  const [stoppingJob, setStoppingJob] = useState<string | null>(null);
   const [summaryIndex, setSummaryIndex] = useState(0);
   const [, setClockTick] = useState(0);
   const dockRef = useRef<HTMLDivElement>(null);
@@ -74,6 +75,17 @@ function ActivityDock({ visible }: { visible: boolean }) {
   const openAgent = (id: string, name: string) => {
     useStore.getState().openRightTab({ id: `subagent:${id}`, kind: "subagent", label: name, subagentId: id });
     useStore.getState().setDetailsOpen(true);
+  };
+  const stopJob = async (id: string) => {
+    if (!activeSessionId || stoppingJob) return;
+    setStoppingJob(id);
+    try {
+      await killBackgroundJob(id, activeSessionId);
+    } catch (e) {
+      useStore.getState().addError(`中断后台命令失败：${(e as Error).message}`);
+    } finally {
+      setStoppingJob(null);
+    }
   };
   const resetIdle = useCallback(() => {
     if (idleTimer.current) clearTimeout(idleTimer.current);
@@ -177,7 +189,7 @@ function ActivityDock({ visible }: { visible: boolean }) {
     {menuOpen && <div className="task-capsule-menu absolute right-0 top-[calc(100%+8px)] w-[286px] overflow-hidden rounded-2xl border border-line bg-elevated">
       <div className="flex items-center gap-2 px-3.5 pb-2 pt-3"><span className={`flex h-6 w-6 items-center justify-center rounded-lg ${active ? "bg-info-soft text-info" : "bg-hover text-sub"}`}>{active ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Activity className="h-3.5 w-3.5" />}</span><span className="min-w-0 flex-1 truncate text-[12px] font-semibold text-text">{sessionTitle}</span></div>
       <div className="max-h-52 space-y-1 overflow-y-auto px-1.5 pb-1.5">
-        {activity.jobs.map(([id, job]) => <div key={id} className="flex items-center gap-2 rounded-xl px-2.5 py-2 text-[12px] text-sub"><span className="text-warn"><Command className="h-3.5 w-3.5" /></span><span className="min-w-0 flex-1"><span className="block truncate text-text">{job.command}</span><span className="block text-[10px] text-caption">后台命令 · 已运行 {fmtDuration(job.startedAt)}</span></span></div>)}
+        {activity.jobs.map(([id, job]) => <div key={id} className="flex items-center gap-2 rounded-xl px-2.5 py-2 text-[12px] text-sub"><span className="text-warn"><Command className="h-3.5 w-3.5" /></span><span className="min-w-0 flex-1"><span className="block truncate text-text">{job.command}</span><span className="block text-[10px] text-caption">后台命令 · 已运行 {fmtDuration(job.startedAt)}</span></span><button className="flex h-6 shrink-0 cursor-pointer items-center gap-1 rounded-md border border-danger/40 px-1.5 text-[10px] text-danger transition-colors hover:bg-danger-soft disabled:cursor-wait disabled:opacity-50" onClick={() => void stopJob(id)} disabled={stoppingJob !== null} title="中断此后台命令并结束其进程树">{stoppingJob === id ? <Loader2 className="h-3 w-3 animate-spin" /> : <Square className="h-2.5 w-2.5" fill="currentColor" />}中断</button></div>)}
         {activity.agents.map(([id, agent]) => <button key={id} onClick={() => openAgent(id, agent.name)} className="flex w-full cursor-pointer items-center gap-2 rounded-xl px-2.5 py-2 text-left text-[12px] text-sub transition-colors hover:bg-hover"><span className="text-success"><Bot className="h-3.5 w-3.5" /></span><span className="min-w-0 flex-1"><span className="block truncate text-text">{agent.name}</span><span className="block truncate text-[10px] text-caption">{agent.prompt}</span></span><span className="text-[10px] text-info">查看</span></button>)}
         {hasDiff && <div className="flex items-center gap-2 rounded-xl px-2.5 py-2 text-[12px] text-sub"><span className="text-info"><Files className="h-3.5 w-3.5" /></span><span className="min-w-0 flex-1 text-text">当前工作区改动</span><span className="font-mono text-[11px]"><span className="text-success">+{diff.added}</span>{" "}<span className="text-danger">-{diff.removed}</span></span></div>}
         {!activity.jobs.length && !activity.agents.length && !hasDiff && <div className="px-2.5 py-3 text-center text-[12px] leading-5 text-sub">目前没有内容。</div>}
@@ -288,14 +300,16 @@ function fmtTokens(n: number): string {
 /** v3.2 事件折叠行（模型降级/上下文压缩——从无框小字升级为可展开事件行）：
  *  24px 单行 = 图标 + 标题 + 2×2 点 + 摘要（截断）+ chevron；点击展开详情区。
  *  InFu 差异化：与思考/工具折叠行同构（16px 节奏平铺），事件即对话流的一部分。 */
-function EventRow({ icon, iconCls, title, summary, detail }: {
+function EventRow({ icon, iconCls, title, summary, detail, active }: {
   icon: React.ReactNode;
   iconCls: string;
   title: string;
   summary: string;
   detail?: React.ReactNode;
+  active?: boolean;
 }) {
   const [open, setOpen] = useState(false);
+  useEffect(() => { setOpen(Boolean(active)); }, [active]);
   return (
     <div className="my-0.5 rounded-lg">
       <button
@@ -369,22 +383,51 @@ function StructuredBlock({ content, tone }: { content: string; tone: "success" |
 }
 
 /** 基于已执行工具的交付摘要；不读取或解析模型最终自然语言。 */
-function DeliverySummaryCard({ tools, delivery }: { tools: ToolEventState[]; delivery?: DeliverySummary }) {
-  const changed = new Set(tools.filter((tool) => tool.status === "ok" && (tool.tool === "write_file" || tool.tool === "edit_file")).map((tool) => String(tool.args.path ?? "")).filter(Boolean));
-  const tests = tools.filter((tool) => tool.tool === "run_test");
-  const changedFiles = delivery?.changedFiles ?? changed.size;
-  if (!changedFiles && !tests.length && !delivery) return null;
-  const failed = delivery ? delivery.verification === "failed" : tests.some((tool) => tool.status === "error");
-  const verification = delivery ? (delivery.verification === "not-run" ? "未运行测试" : delivery.verification === "failed" ? "测试失败" : "测试通过") : !tests.length ? "未运行测试" : failed ? "测试失败" : "测试通过";
+function DeliverySummaryCard({ delivery }: { delivery?: DeliverySummary }) {
+  const [open, setOpen] = useState(false);
+  // 历史会话可能来自 DeliverySummary 扩展前：缺少路径/验证数组不能让整棵 React 根崩溃。
+  const changedPaths = delivery?.changedPaths ?? [];
+  const verifications = delivery?.verifications ?? [];
+  if (!delivery || (!changedPaths.length && !verifications.length)) return null;
+  const openReview = (path: string) => {
+    const store = useStore.getState();
+    store.setCodeViewFile(path);
+    store.openRightTab({ id: "review", kind: "review", label: "审查" });
+    store.setDetailsOpen(true);
+  };
   return (
-    <div className="mb-4 rounded-xl border border-line/80 bg-elevated/55 p-3">
-      <div className="flex items-center gap-2 text-[13px] font-semibold text-text"><CheckCircle2 className="h-4 w-4 text-success" />交付摘要</div>
-      <div className="mt-2 grid grid-cols-3 gap-2 text-[12px]">
-        <div className="rounded-lg bg-hover/70 px-2 py-1.5 text-sub"><span className="block text-[10px] text-caption">改动文件</span><span className="font-medium text-text">{changedFiles} 个</span></div>
-        <div className="rounded-lg bg-hover/70 px-2 py-1.5 text-sub"><span className="block text-[10px] text-caption">验证</span><span className={failed ? "font-medium text-danger" : "font-medium text-text"}>{verification}</span></div>
-        <div className="rounded-lg bg-hover/70 px-2 py-1.5 text-sub"><span className="block text-[10px] text-caption">下一步</span><span className="font-medium text-text">{failed ? "查看失败测试" : "审查改动"}</span></div>
-      </div>
-    </div>
+    <section className="mb-4 overflow-hidden rounded-xl border border-line/80 bg-elevated/55" aria-label="交付摘要">
+      <button
+        className="flex w-full cursor-pointer items-center gap-2 px-3 py-2.5 text-left text-[13px] font-semibold text-text hover:bg-hover/50"
+        onClick={() => setOpen((value) => !value)}
+        aria-expanded={open}
+      >
+        <ClipboardCheck className="h-4 w-4 text-info" />
+        <span className="flex-1">交付摘要</span>
+        <ChevronRight className={`h-4 w-4 text-sub transition-transform ${open ? "rotate-90" : ""}`} />
+      </button>
+      {open && <div className="space-y-3 border-t border-line/70 px-3 py-3 text-[12px]">
+        {changedPaths.length > 0 && <div>
+          <div className="mb-1.5 text-[11px] font-semibold tracking-[0.08em] text-caption">改动文件</div>
+          <div className="space-y-0.5">
+            {changedPaths.map((path) => <button key={path} onClick={() => openReview(path)} className="flex w-full cursor-pointer items-center gap-2 rounded-lg px-2 py-1.5 text-left hover:bg-hover">
+              <FileText className="h-3.5 w-3.5 shrink-0 text-info" />
+              <span className="min-w-0 flex-1 truncate font-mono text-text">{path}</span>
+              <span className="text-caption">查看 diff</span>
+            </button>)}
+          </div>
+        </div>}
+        {verifications.length > 0 && <div>
+          <div className="mb-1.5 text-[11px] font-semibold tracking-[0.08em] text-caption">验证</div>
+          <div className="space-y-1">
+            {verifications.map((item, index) => <details key={`${item.command}-${index}`} className="rounded-lg bg-hover/60 px-2 py-1.5">
+              <summary className="flex cursor-pointer list-none items-center gap-2"><span className={item.status === "passed" ? "text-success" : "text-danger"}>{item.status === "passed" ? "通过" : "失败"}</span><code className="min-w-0 flex-1 truncate font-mono text-[11px] text-text">{item.command}</code></summary>
+              <pre className="mt-2 max-h-36 overflow-auto whitespace-pre-wrap border-t border-line/70 pt-2 font-mono text-[11px] leading-5 text-sub">{item.output}</pre>
+            </details>)}
+          </div>
+        </div>}
+      </div>}
+    </section>
   );
 }
 
@@ -450,6 +493,7 @@ function EgressPill() {
   const activeSessionId = useStore((s) => s.activeSessionId);
   const approvalMode = useStore((s) => s.approvalMode);
   const [menuOpen, setMenuOpen] = useState(false);
+  const [customMinutes, setCustomMinutes] = useState("");
   const ref = useRef<HTMLSpanElement>(null);
   const [, forceTick] = useState(0);
   const remaining = egressUntil ? Math.max(0, Math.round((egressUntil - Date.now()) / 1000)) : 0;
@@ -506,7 +550,6 @@ function EgressPill() {
   };
 
   const active = !!egressUntil && remaining > 0;
-  const label = active ? `联网中 ${Math.ceil(remaining / 60)} 分` : "临时联网";
   return (
     <span className="relative shrink-0" ref={ref}>
       <button
@@ -518,12 +561,13 @@ function EgressPill() {
         onClick={() => setMenuOpen(!menuOpen)}
         title={
           active
-            ? `临时联网（还剩 ${Math.ceil(remaining / 60)} 分钟）——外传命令放行，命令审计照常。点击可关闭或调整时长${activeSessionId ? "" : "（发送消息时对新建会话生效）"}`
-            : "临时允许联网（外传命令不再被断网策略拦截；到期自动失效；命令审计照常）"
+            ? `临时联网已开启（还剩 ${Math.ceil(remaining / 60)} 分钟）——点击可调整或关闭${activeSessionId ? "" : "（发送消息时对新建会话生效）"}`
+            : "自定义临时联网时长（外传命令不再被断网策略拦截；到期自动失效；命令审计照常）"
         }
       >
         <Globe className="h-3 w-3" />
-        <span className="hidden min-[400px]:inline">{label}</span>
+        <span>自定义联网</span>
+        {active && <span className="rounded bg-success/15 px-1 text-[10px]">开</span>}
         <ChevronDown className={`h-3 w-3 transition-transform ${menuOpen ? "rotate-180" : ""}`} />
       </button>
       {menuOpen && (
@@ -537,17 +581,17 @@ function EgressPill() {
               关闭临时联网
             </button>
           )}
-          <div className="px-2.5 pb-0.5 pt-1.5 text-[11px] font-medium text-caption">联网时长</div>
+          <div className="px-2.5 pb-0.5 pt-1.5 text-[11px] font-medium text-caption">快捷时长</div>
           {EGRESS_DURATIONS.map((m) => (
-            <button
-              key={m}
-              className="flex w-full cursor-pointer items-center gap-2 rounded-lg px-2.5 py-1.5 text-left text-[13px] text-text transition-colors hover:bg-hover"
-              onClick={() => void apply(m)}
-            >
+            <button key={m} className="flex w-full cursor-pointer items-center gap-2 rounded-lg px-2.5 py-1.5 text-left text-[13px] text-text transition-colors hover:bg-hover" onClick={() => void apply(m)}>
               <span className="min-w-0 flex-1">{m < 60 ? `${m} 分钟` : `${m / 60} 小时`}</span>
               {active && egressMinutes === m && <Check className="h-3.5 w-3.5 shrink-0 text-info" />}
             </button>
           ))}
+          <div className="mt-1 flex items-center gap-1 border-t border-line px-2 pt-2">
+            <input className="h-7 min-w-0 flex-1 rounded-md border border-line bg-hover px-2 text-xs text-text outline-none focus:border-info/60" inputMode="numeric" value={customMinutes} onChange={(e) => setCustomMinutes(e.target.value.replace(/\D/g, ""))} placeholder="自定义分钟（1–120）" />
+            <button className="h-7 cursor-pointer rounded-md bg-primary px-2 text-xs text-primary-fg hover:bg-primary-hover" onClick={() => { const minutes = Number(customMinutes); if (minutes >= 1 && minutes <= 120) void apply(minutes); }}>开始</button>
+          </div>
         </div>
       )}
     </span>
@@ -588,6 +632,50 @@ function ContextMeter() {  const { estTokens, window, pct } = useContextEstimate
       )}
     </span>
   );
+}
+
+type ModelGroup = { name: string; models: import("@infu/shared").ModelConfig[] };
+function ModelSelectMenu({ groups, modelId, thinkingLevel, thinkingHint, onSelectModel, onSelectThinking, onClose }: {
+  groups: ModelGroup[];
+  modelId: string;
+  thinkingLevel: number;
+  thinkingHint: (level: number) => string;
+  onSelectModel: (id: string) => void;
+  onSelectThinking: (level: number) => void;
+  onClose: () => void;
+}) {
+  const [pane, setPane] = useState<"root" | "model" | "thinking">("root");
+  const model = groups.flatMap((group) => group.models).find((item) => item.id === modelId);
+  const labels = ["低", "中", "高", "MAX"];
+  const back = () => setPane("root");
+  return <div className="absolute bottom-9 right-0 z-50 flex max-h-80 min-w-[240px] flex-col overflow-hidden rounded-xl border border-line bg-elevated p-1 shadow-lv3" role="menu" onKeyDown={(event) => {
+    if (event.key !== "Escape") return;
+    event.preventDefault();
+    if (pane === "root") onClose();
+    else back();
+  }}>
+    {pane === "root" && <>
+      <button className="flex h-10 w-full cursor-pointer items-center gap-2 rounded-lg px-2.5 text-left text-[13px] text-text hover:bg-hover" onClick={() => setPane("model")}>
+        <span className="min-w-0 flex-1">模型</span><span className="max-w-[132px] truncate text-sub">{model?.name ?? "选择模型"}</span><ChevronRight className="h-3.5 w-3.5 text-sub" />
+      </button>
+      <button className="flex h-10 w-full cursor-pointer items-center gap-2 rounded-lg px-2.5 text-left text-[13px] text-text hover:bg-hover" onClick={() => setPane("thinking")}>
+        <span className="min-w-0 flex-1">推理强度</span><span className="text-sub">{labels[thinkingLevel - 1]}</span><ChevronRight className="h-3.5 w-3.5 text-sub" />
+      </button>
+    </>}
+    {pane === "model" && <div className="min-h-0 overflow-y-auto">
+      <button className="flex h-8 w-full cursor-pointer items-center gap-1.5 rounded-lg px-2 text-left text-[12px] text-sub hover:bg-hover" onClick={back}><ChevronRight className="h-3.5 w-3.5 rotate-180" />返回</button>
+      {groups.map((group) => <section key={group.name} role="group">
+        <div className="sticky top-0 bg-elevated px-2.5 pb-0.5 pt-1.5 text-[11px] font-medium text-caption">{group.name}</div>
+        {group.models.map((item) => <button key={item.id} role="menuitemradio" aria-checked={modelId === item.id} className="flex min-h-10 w-full cursor-pointer items-center gap-2 rounded-lg px-2.5 py-1.5 text-left text-[13px] text-text hover:bg-hover" onClick={() => { onSelectModel(item.id); onClose(); }}>
+          <span className="min-w-0 flex-1"><span className="block truncate font-medium">{item.name}</span><span className="block truncate text-[11px] leading-4 text-caption">{item.model}{item.contextWindow ? ` · ${fmtTokens(item.contextWindow)} 窗口` : ""}</span></span>{modelId === item.id && <Check className="h-3.5 w-3.5 shrink-0 text-info" />}
+        </button>)}
+      </section>)}
+    </div>}
+    {pane === "thinking" && <div className="min-h-0 overflow-y-auto">
+      <button className="flex h-8 w-full cursor-pointer items-center gap-1.5 rounded-lg px-2 text-left text-[12px] text-sub hover:bg-hover" onClick={back}><ChevronRight className="h-3.5 w-3.5 rotate-180" />返回</button>
+      {[1, 2, 3, 4].map((level) => <button key={level} role="menuitemradio" aria-checked={thinkingLevel === level} className="flex min-h-10 w-full cursor-pointer items-center gap-2 rounded-lg px-2.5 py-1.5 text-left text-[13px] text-text hover:bg-hover" title={thinkingHint(level)} onClick={() => { onSelectThinking(level); onClose(); }}><span className="min-w-0 flex-1"><span className="block font-medium">{labels[level - 1]}</span><span className="block truncate text-[11px] leading-4 text-caption">{thinkingHint(level)}</span></span>{thinkingLevel === level && <Check className="h-3.5 w-3.5 shrink-0 text-info" />}</button>)}
+    </div>}
+  </div>;
 }
 
 /** 中间栏（v3：——Hero 光晕空态 / 右侧气泡 / 无气泡助手 / 折叠工具行 / 悬浮胶囊输入） */
@@ -644,13 +732,11 @@ export default function ChatPanel() {
   const [narrow, setNarrow] = useState(false);
   // v3：工作区菜单（hero 项目 chip）——项目列表
   const [projects, setProjects] = useState<Array<{ id: string; name: string; root: string }>>([]);
-  // v3：思考模式下拉 + 全局审批档位下拉 + 模型下拉（主流 composer 对齐）
-  const [thinkOpen, setThinkOpen] = useState(false);
+  // 模型与推理强度是同一项任务配置：一个下拉完成选择，避免低频「执行设置」再套一层。
   // v3.5：审批档位提升为全局 store 状态——composer 与设置「命令」Tab 共享同一数据源（双向联动）
   const approvalMode = useStore((s) => s.approvalMode);
   const setApprovalMode = useStore((s) => s.setApprovalMode);
   const [approvalOpen, setApprovalOpen] = useState(false);
-  const [executionSettingsOpen, setExecutionSettingsOpen] = useState(false);
   const [modelOpen, setModelOpen] = useState(false);
   // v3.1 附件：草稿列表 + 添加菜单 + 隐藏文件/文件夹选择器
   const [attachments, setAttachments] = useState<AttachmentDraft[]>([]);
@@ -673,9 +759,7 @@ export default function ChatPanel() {
   // v3.0 批 12：下拉栏点击空白处自动收起（审批/模型/思考/附件）
   const composerRef = useClickOutsideAll([
     () => setApprovalOpen(false),
-    () => setExecutionSettingsOpen(false),
     () => setModelOpen(false),
-    () => setThinkOpen(false),
     () => setAttachOpen(false),
   ]);
   // 运行时锁定会改变本轮执行语义的工具栏；发送仍保留为排队，停止单独可用。
@@ -683,9 +767,7 @@ export default function ChatPanel() {
     if (!running) return;
     setAttachOpen(false);
     setApprovalOpen(false);
-    setExecutionSettingsOpen(false);
     setModelOpen(false);
-    setThinkOpen(false);
   }, [running]);
   // v3.0 批 12：hero 项目选择菜单点击空白处自动收起
   const wsMenuRef = useClickOutside(() => setWsMenuOpen(false));
@@ -918,7 +1000,10 @@ export default function ChatPanel() {
    *  v3.1：当前会话运行中 → 排队发送（输入入队，done 后自动消费） */
   const submit = async () => {
     if (busyRef.current) return; // v4.0（H2）：忙守卫（双击/重复 Enter 防双发）
-    const text = input.trim();
+    // 允许附件独立发送。默认文本只声明附加物类型，不替用户假设“分析”意图。
+    const imageCount = attachments.filter((item) => item.kind === "image" || Boolean(item.dataUrl)).length;
+    const fileCount = attachments.length - imageCount;
+    const text = input.trim() || (attachments.length ? [imageCount ? `已附加 ${imageCount} 张图片。` : "", fileCount ? `已附加 ${fileCount} 个文件或文件夹。` : ""].filter(Boolean).join(" ") : "");
     if (!text) return;
     busyRef.current = true;
     try {
@@ -976,7 +1061,17 @@ export default function ChatPanel() {
           }
         }
       }
-      sendOpts = { files, images, paths };
+      sendOpts = {
+        files,
+        images,
+        paths,
+        attachments: attachments.map((a) => ({
+          name: a.name,
+          path: a.path,
+          kind: a.dataUrl ? "image" : a.kind ?? "file",
+          size: a.size,
+        })),
+      };
     }
     setAttachments([]);
     void sendChat(text, sendOpts);
@@ -994,7 +1089,7 @@ export default function ChatPanel() {
     for (const p of paths) {
       // v4.0（L5）：Windows 反斜杠路径同样切分（原只认 `/`，C:\a\b.txt 整个成为"文件名"）
       const name = p.split(/[\\/]/).filter(Boolean).pop() ?? p;
-      drafts.push({ id: `a${Date.now()}-${drafts.length}`, name, rel: p, path: p });
+      drafts.push({ id: `a${Date.now()}-${drafts.length}`, name, rel: p, path: p, kind: directories ? "dir" : /\.(png|jpe?g|gif|webp)$/i.test(name) ? "image" : "file" });
     }
     if (drafts.length) setAttachments((prev) => [...prev, ...drafts]);
   };
@@ -1104,6 +1199,8 @@ export default function ChatPanel() {
   const usageMiss = useStore((s) => s.usage.cacheMiss);
   const usageOut = useStore((s) => s.usage.completionTokens);
   const usageTotal = usageHit + usageMiss;
+  // 命中率只能使用模型供应商回传的 cacheRead/cacheMiss；不再用对话字符比例伪造缓存命中。
+  const hitRate = usageTotal > 0 ? usageHit / usageTotal : null;
   // v3.0 UI 审查（对话流优化）：lastEditIdx/lastUserIdx 预计算一次，
   // 此前每条消息渲染都 reduce 全列表（O(n²)），流式每帧全量重算
   const lastEditIdx = useMemo(
@@ -1116,17 +1213,6 @@ export default function ChatPanel() {
     () => (pendingRollback ? messages.findIndex((x) => (x.seqStart ?? Infinity) >= pendingRollback.seq) : -1),
     [messages, pendingRollback]
   );
-  const lastTurnChars =
-    lastUserIdx >= 0
-      ? messages.slice(lastUserIdx).reduce((a, m) => a + m.text.length + (m.reasoning?.length ?? 0), 0)
-      : 0;
-  const totalChars = messages.reduce((a, m) => a + m.text.length + (m.reasoning?.length ?? 0), 0);
-  const hitRate =
-    usageTotal > 0
-      ? usageHit / usageTotal
-      : totalChars > 0
-        ? Math.max(0, 1 - lastTurnChars / totalChars)
-        : null;
 
   // v3 思考模式档位（低/中/高/MAX）与审批档位（auto/smart/confirm/full）
   const THINK_LABEL = ["低", "中", "高", "MAX"];
@@ -1323,89 +1409,33 @@ export default function ChatPanel() {
             </div>
           )}
         </span>
-        <button
-          className={`flex h-7 shrink-0 cursor-pointer items-center gap-1 rounded-lg border px-2 text-[12px] font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-40 ${executionSettingsOpen ? "border-info/40 bg-info-soft text-info" : "border-line text-sub hover:bg-hover hover:text-text"}`}
-          onClick={() => setExecutionSettingsOpen((open) => !open)}
-          title="执行设置：模型、思考强度与临时联网"
-          disabled={running}
-        >
-          <BrainCircuit className="h-3.5 w-3.5" />执行设置<ChevronDown className={`h-3 w-3 transition-transform ${executionSettingsOpen ? "rotate-180" : ""}`} />
-        </button>
-        {executionSettingsOpen && <EgressPill />}
+        <EgressPill />
         <span className="ml-auto flex min-w-0 items-center gap-2">
-          {/* 欢迎态先聚焦目标输入；上下文占用只在已有会话的工作 composer 中显示。 */}
-          <span className={`${executionSettingsOpen && !hero ? "hidden min-[560px]:block" : "hidden"}`}>
-            <ContextMeter />
-          </span>
-          {/* 模型选择（v3：自定义下拉，与思考等级同款样式） */}
-          <span className={`${executionSettingsOpen ? "relative min-w-0 shrink-0" : "hidden"}`}>
+          {/* 合并模型与推理：下拉内先选模型，随后直接选择本轮思考强度。 */}
+          <span className="relative min-w-0 shrink-0">
             <button
               className="flex h-7 cursor-pointer items-center gap-1 rounded-lg border border-line px-2 text-[13px] font-medium text-text transition-colors hover:bg-hover disabled:cursor-not-allowed disabled:opacity-40"
               onClick={() => setModelOpen(!modelOpen)}
-              title="当前任务使用的模型"
-              disabled={running}
-            >
-              <span className="max-w-[110px] truncate">{curModel?.name ?? "选择模型"}</span>
-              <ChevronDown className="h-3 w-3 text-sub" />
-            </button>
-            {modelOpen && (
-              <div className="absolute bottom-9 right-0 z-50 max-h-72 min-w-[220px] overflow-y-auto rounded-xl border border-line bg-elevated p-1 shadow-lv3">
-                {PROVIDER_GROUPS.map((g) => (
-                  <div key={g.name}>
-                    <div className="px-2.5 pb-0.5 pt-1.5 text-[11px] font-medium text-caption">{g.name}</div>
-                    {g.models.map((m) => (
-                      <button
-                        key={m.id}
-                        className="flex w-full cursor-pointer items-center gap-2 rounded-lg px-2.5 py-1.5 text-left text-[13px] text-text transition-colors hover:bg-hover"
-                        onClick={() => { setModelId(m.id); setModelOpen(false); }}
-                      >
-                        <span className="min-w-0 flex-1">
-                          <span className="block truncate font-medium">{m.name}</span>
-                          <span className="block truncate text-[11px] leading-4 text-caption">
-                            {m.model}
-                            {m.contextWindow ? ` · ${fmtTokens(m.contextWindow)} 窗口` : ""}
-                            {m.thinkingLevels ? ` · ${m.thinkingLevels} 级思考` : ""}
-                          </span>
-                        </span>
-                        {modelId === m.id && <Check className="h-3.5 w-3.5 shrink-0 text-info" />}
-                      </button>
-                    ))}
-                  </div>
-                ))}
-              </div>
-            )}
-          </span>
-          {/* 思考模式（低/中/高/MAX；极窄视口隐藏防溢出） */}
-          <span className={`${executionSettingsOpen ? "relative shrink-0 max-[480px]:hidden" : "hidden"}`}>
-            <button
-              className="flex h-7 cursor-pointer items-center gap-1 rounded-lg border border-line px-2 text-[13px] font-medium text-text transition-colors hover:bg-hover disabled:cursor-not-allowed disabled:opacity-40"
-              onClick={() => setThinkOpen(!thinkOpen)}
-              title="思考模式（按模型实际级别数映射）"
+              title="选择模型与推理强度"
               disabled={running}
             >
               <BrainCircuit className="h-3.5 w-3.5 text-sub" />
-              思考：{THINK_LABEL[thinkingLevel - 1]}
+              <span className="max-w-[130px] truncate">{curModel?.name ?? "选择模型"} · {THINK_LABEL[thinkingLevel - 1]}</span>
               <ChevronDown className="h-3 w-3 text-sub" />
             </button>
-            {thinkOpen && (
-              <div className="absolute bottom-9 right-0 z-50 min-w-[170px] rounded-xl border border-line bg-elevated p-1 shadow-lv3">
-                {[1, 2, 3, 4].map((lv) => (
-                  <button
-                    key={lv}
-                    className="flex w-full cursor-pointer items-center gap-2 rounded-lg px-2.5 py-1.5 text-left text-[13px] text-text transition-colors hover:bg-hover"
-                    onClick={() => { setThinkingLevel(lv); setThinkOpen(false); }}
-                    title={thinkingHint(lv)}
-                  >
-                    <span className="min-w-0 flex-1">
-                      <span className="block font-medium">{THINK_LABEL[lv - 1]}</span>
-                      <span className="block text-[11px] leading-4 text-caption">{thinkingHint(lv)}</span>
-                    </span>
-                    {thinkingLevel === lv && <Check className="h-3.5 w-3.5 shrink-0 text-info" />}
-                  </button>
-                ))}
-              </div>
+            {modelOpen && (
+              <ModelSelectMenu
+                groups={PROVIDER_GROUPS}
+                modelId={modelId}
+                thinkingLevel={thinkingLevel}
+                thinkingHint={thinkingHint}
+                onSelectModel={setModelId}
+                onSelectThinking={setThinkingLevel}
+                onClose={() => setModelOpen(false)}
+              />
             )}
           </span>
+          <ContextMeter />
           {/* 发送键常驻（运行中点击 = 排队发送，不停止任务）；停止独立小按钮 */}
           {running && (
             <button
@@ -1419,7 +1449,7 @@ export default function ChatPanel() {
           <button
             className="flex h-[34px] w-[34px] shrink-0 cursor-pointer items-center justify-center rounded-full bg-primary text-primary-fg transition-all duration-150 hover:bg-primary-hover disabled:cursor-not-allowed disabled:opacity-40"
             onClick={submit}
-            disabled={!running && !input.trim()}
+            disabled={!running && !input.trim() && attachments.length === 0}
             title={running ? "排队发送（Enter 入队，任务结束后自动发出）" : "发送 (Enter)"}
           >
             <Send className="h-4 w-4" />
@@ -1469,7 +1499,7 @@ export default function ChatPanel() {
 
         {messages.length === 0 ? (
            /* ── 空态 Hero（克制字标：低对比渐变 + 柔和近场光，不使用装饰性常驻动画）
-             v3.3 补 8：无消息时无 header（拖拽区）——顶部加透明 drag 条，窗口最上方任何状态都可拖动（ZCode 式） ── */
+             v3.3：无消息时无 header（拖拽区）——顶部加透明 drag 条，窗口最上方任何状态都可拖动。 ── */
           <div className="relative flex h-full flex-col">
             <div className="shrink-0" style={{ WebkitAppRegion: "drag", height: "36px" } as React.CSSProperties} />
             <div className="relative flex min-h-0 flex-1 flex-col items-center justify-center px-6">
@@ -1706,6 +1736,8 @@ const MessageItem = memo(function MessageItem({
 }) {
   // v3.5 常规设置 showThinking（开关变化触发重渲染）
   const showThinking = useStore((s) => s.uiShowThinking);
+  // 工具开始即代表思考阶段结束：同一消息仍在流式时也要先收起思考详情。
+  const reasoningActive = m.streaming && !m.tools.some((tool) => tool.status === "running");
   return m.role === "user" ? (
     /* 用户消息：右对齐气泡 + 下方悬停操作行（复制/回滚到此）；data-infumsg = 定位浮标锚点 */
     <div data-infumsg={m.id} data-time-hover-root className={`group flex flex-col items-end transition-opacity duration-200 ${pending ? "opacity-40" : ""}`}>
@@ -1716,7 +1748,7 @@ const MessageItem = memo(function MessageItem({
         </div>
       )}
       {/* v3.1 附件行（发送时附加/历史重放） */}
-      {m.attachments && m.attachments.length > 0 && <AttachmentLine items={m.attachments} />}
+       {m.attachments && m.attachments.length > 0 && <AttachmentLine items={m.attachments} />}
       <div className="max-w-[min(525px,82%)] whitespace-pre-wrap rounded-[22px] bg-bubble px-4 py-2.5 text-[15px] leading-[23px] text-text">
         {/* 主流 projectUserText：气泡内 /name @name 词边界 token 渲染为 refChip */}
         {projectRefText(m.text)}
@@ -1760,7 +1792,7 @@ const MessageItem = memo(function MessageItem({
        操作行（复制/时间）只在 turn 末尾的总结消息后出现一次） */
     <div data-time-hover-root className={`group transition-opacity duration-200 ${pending ? "opacity-40" : ""}`}>
       {/* 思考过程（折叠行；v3.5 常规设置 showThinking 可关闭） */}
-      {m.reasoning && showThinking && <ReasoningBlock text={m.reasoning} running={m.streaming} />}
+      {m.reasoning && showThinking && <ReasoningBlock text={m.reasoning} running={reasoningActive} />}
       {/* v2.2 模型降级事件（v3.2：折叠行；展开显示原因明细） */}
       {m.fallbacks && m.fallbacks.length > 0 && (
         <div className="my-0.5 space-y-0.5">
@@ -1803,7 +1835,7 @@ const MessageItem = memo(function MessageItem({
           ))}
         </div>
       )}
-      {/* v3.3 后台任务完成通知（对齐 ZCode <task-notification>：EventRow 通知行——
+      {/* v3.3 后台任务完成通知（EventRow 通知行——
           完成/失败/中止实时可见；展开看摘要；subagent 可点击跳右栏子 Agent tab） */}
       {m.taskNotes && m.taskNotes.length > 0 && (
         <div className="my-0.5 space-y-0.5">
@@ -1876,7 +1908,7 @@ const MessageItem = memo(function MessageItem({
           />
         </div>
       )}
-      {!m.streaming && <DeliverySummaryCard tools={m.tools} delivery={m.delivery} />}
+      {!m.streaming && <DeliverySummaryCard delivery={m.delivery} />}
       {/* 审查意见（v3.1 交付报告已移除；审查保留） */}
       {m.review && <StructuredBlock content={m.review} tone="info" />}
       {m.streaming && !m.text && m.tools.length === 0 && !m.reasoning && (

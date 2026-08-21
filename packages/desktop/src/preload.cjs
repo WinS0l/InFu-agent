@@ -26,6 +26,7 @@ contextBridge.exposeInMainWorld("infuDesktop", {
 
   // v3.0 批 12：附件「选择路径」（系统对话框 → 真实绝对路径；Web 版无此能力走上传）
   selectPaths: (opts) => ipcRenderer.invoke("dialog:select-paths", opts),
+  openProjectFile: (opts) => ipcRenderer.invoke("project:open-file", opts),
 
   // 嵌入式浏览器（webview 元素多 tab）
   browserOpen: () => ipcRenderer.send("browser-view:open"),
@@ -43,6 +44,7 @@ contextBridge.exposeInMainWorld("infuDesktop", {
   // v3.5 修复：UI 侧视口（📄 预设/适应窗口）→ 主进程 CDP Emulation 同步——
   // 此前用户点击只改元素 CSS，Agent 设过的设备度量覆盖（Emulation）残留 → 「适应窗口」无效
   browserSetViewport: (opts) => ipcRenderer.invoke("browser-view:set-viewport", opts),
+  browserSetZoom: (factor) => ipcRenderer.invoke("browser-view:set-zoom", factor),
   // 主进程广播：Agent/主进程请求建 tab / 切 tab（渲染进程创建 webview 元素 / 切换显隐）
   onOpenRequest: (cb) => {
     const listener = (_e, url) => cb(url);

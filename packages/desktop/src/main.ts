@@ -23,7 +23,7 @@
  */
 import { app, BrowserWindow, Tray, Menu, ipcMain, screen, nativeImage, nativeTheme, shell, dialog, powerSaveBlocker, Notification, clipboard, type Rectangle } from "electron";
 import type { IpcMainEvent, IpcMainInvokeEvent, WebContents, WebPreferences } from "electron";
-import { join, dirname } from "node:path";
+import { join, dirname, isAbsolute, resolve, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 import { existsSync, mkdirSync, readFileSync, writeFileSync, renameSync } from "node:fs";
 import { execFileSync, execFile } from "node:child_process";
@@ -192,8 +192,8 @@ function createMainWindow() {
     }
   }, 8000);
   win.webContents.on("did-fail-load", (_e, code, desc) => console.log(`[infu-desktop] 页面加载失败 ${code}: ${desc}`));
-  win.webContents.on("console-message", (_e, level, message) => {
-    if (level >= 2) console.log(`[infu-desktop] 页面 console: ${String(message).slice(0, 200)}`);
+  win.webContents.on("console-message", (_e, level, message, line, sourceId) => {
+    if (level >= 2) console.log(`[infu-desktop] 页面 console: ${String(message).slice(0, 500)} @ ${sourceId}:${line}`);
   });
 
   // 最大化状态同步给渲染进程（标题栏按钮图标切换）
@@ -914,6 +914,47 @@ function registerIpc() {
     if (r.canceled) return [];
     return r.filePaths;
   });
+  ipcMain.handle("project:open-file", async (e, opts: { root?: string; path?: string; editor?: boolean }) => {
+    if (!trusted(e) || typeof opts?.root !== "string" || typeof opts.path !== "string") return "无权打开该文件";
+    // The renderer may name only a relative project file. Never use it as an arbitrary shell path.
+    if (!opts.root || isAbsolute(opts.path)) return "文件路径无效";
+    const root = resolve(opts.root);
+    const target = resolve(root, opts.path || ".");
+    const rel = relative(root, target);
+    if (rel.startsWith("..") || isAbsolute(rel) || !existsSync(target)) return "文件不在当前项目中或已不存在";
+    if (!opts.editor) {
+      // showItemInFolder(directory) reveals the parent directory; opening the root directly
+      // matches the persistent CodeView action when no individual file is selected.
+      if (!opts.path) {
+        const error = await shell.openPath(root);
+        return error || null;
+      }
+      shell.showItemInFolder(target);
+      return null;
+    }
+    const codeCandidates = [
+      process.env.LOCALAPPDATA ? join(process.env.LOCALAPPDATA, "Programs", "Microsoft VS Code", "Code.exe") : "",
+      process.env.ProgramFiles ? join(process.env.ProgramFiles, "Microsoft VS Code", "Code.exe") : "",
+      process.env["ProgramFiles(x86)"] ? join(process.env["ProgramFiles(x86)"], "Microsoft VS Code", "Code.exe") : "",
+    ];
+    // PATH usually contains bin\code.cmd, while the executable one level above is the
+    // reliable launch target. `where` also covers portable/custom installations.
+    try {
+      const where = execFileSync("where.exe", ["code"], { windowsHide: true, encoding: "utf8" });
+      for (const entry of where.split(/\r?\n/).map((item) => item.trim()).filter(Boolean)) {
+        if (/\\bin\\code(?:\.cmd)?$/i.test(entry)) codeCandidates.push(join(dirname(entry), "..", "Code.exe"));
+        else if (/Code\.exe$/i.test(entry)) codeCandidates.push(entry);
+      }
+    } catch { /* PATH has no VS Code command; static candidates still apply. */ }
+    const codeExe = codeCandidates.find((candidate) => candidate && existsSync(candidate));
+    if (!codeExe) return "未找到 VS Code。可安装 Visual Studio Code，或在安装时启用“添加到 PATH”，然后重试。";
+    try {
+      await new Promise<void>((ok, fail) => execFile(codeExe, [target], { windowsHide: false }, (error) => error ? fail(error) : ok()));
+      return null;
+    } catch {
+      return "VS Code 启动失败。请确认安装未损坏，或从资源管理器手动打开该文件。";
+    }
+  });
 
   // 主题联动（设置页切换主题 → titleBarOverlay 原生按钮配色）
   ipcMain.on("theme:set", (e, theme: string) => {
@@ -1055,6 +1096,12 @@ function registerIpc() {
     // 通知渲染进程保持状态一致（fit 清 freeSize）
     const notifyViewport = (globalThis as Record<string, unknown>).__infuNotifyViewport as ((opts: unknown) => void) | undefined;
     notifyViewport?.(opts);
+  });
+  ipcMain.handle("browser-view:set-zoom", async (e, factor: number) => {
+    if (!trusted(e)) return;
+    const wc = activeWc();
+    if (!wc || wc.isDestroyed() || !Number.isFinite(factor)) return;
+    wc.setZoomFactor(Math.max(0.5, Math.min(2, factor)));
   });
 }
 

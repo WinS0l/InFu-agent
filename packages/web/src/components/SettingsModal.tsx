@@ -425,7 +425,7 @@ export default function SettingsModal({ onClose, initialTab = "general" }: Props
                   </div>
                   <div className="text-xs text-sub">仅桌面版生效；Web 版无此能力</div>
                 </div>
-                {/* v3.5 常规设置（对齐 ZCode 常规设置项） */}
+                {/* v3.5 常规设置 */}
                 <div className="space-y-2.5">
                   <Label text="任务与通知" hint="Agent 任务相关行为（写入 config.general 节）" />
                   {[

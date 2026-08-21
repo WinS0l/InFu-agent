@@ -63,6 +63,8 @@ export const READONLY_TOOLS = [
   "wait_task",
   // v3.1：目录树 / 环境 / 时间（只读探索）
   "project_tree", "os_info", "current_time",
+  // 联网调研保持只读：explore 可搜索公开资料并抓取网页正文，仍没有命令/写入能力。
+  "web_search", "webfetch",
   // v6.0：符号索引 / LSP 跳转·引用·补全 / OCR（纯只读语义工具）
   "code_symbols", "lsp_definition", "lsp_references", "lsp_completion", "ocr_image",
 ];
@@ -90,7 +92,7 @@ export const BUILTIN_AGENTS: AgentFileDef[] = [
     body:
       "你是 InFu 的只读探索子智能体（只读探索子智能体）。\n" +
       "要求：\n" +
-      "1. 只有只读工具（read_file / search_code / list_directory / project_scan / git_status / git_diff / use_skill），绝不修改文件、绝不执行命令；\n" +
+      "1. 只使用只读工具（含 web_search / webfetch 用于公开资料调研），绝不修改文件、绝不执行命令；\n" +
       "2. 读摘要而非整文件，定位代码而非审查代码——给出结论（含 file:line 引用），不要文件转储；\n" +
       "3. 完成后输出结构化摘要：结论 / 关键发现（含 file:line）/ 建议，总字数不超过 2000 字。",
   },

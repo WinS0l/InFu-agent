@@ -188,7 +188,7 @@ console.log("▶ guard 集成（write_file × 档位）");
     check("full 档 + requireExplicit：不弹窗", approvals.length === 0, JSON.stringify(approvals));
     check("full 档红线放行后注册成功", fullRegOut.includes("已注册"), fullRegOut);
 
-    // full 档：显式禁用工具仍拒绝（对齐 opencode 显式 deny 不覆盖）
+    // full 档：显式禁用工具仍拒绝。
     saveConfig({ models: [], approvalPolicy: { mode: "full", toolOverrides: [{ tool: "write_file", disabled: true }] } });
     const fullDisabledOut = await TOOLS.write_file.execute({ path: "f.txt", content: "x" }, mkCtx());
     check("full 档 + 禁用工具：仍拒绝", fullDisabledOut.includes("用户拒绝"), fullDisabledOut);

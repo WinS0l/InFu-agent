@@ -1,6 +1,6 @@
 /**
  * skill-creator 官方插件（v2.7）——引导 Agent 创建/迭代高质量 SKILL.md 技能
- * 借鉴 zcode 官方 skill-creator 插件（Anthropic skill-creator 复刻，适配 InFu 目录约定）。
+ * 引导 Agent 创建和维护高质量 SKILL.md 技能。
  */
 import { fileURLToPath } from "node:url";
 

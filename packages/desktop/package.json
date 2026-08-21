@@ -1,8 +1,10 @@
 {
   "name": "@infu/desktop",
-  "version": "0.1.0",
+  "version": "1.0.0",
+  "license": "Apache-2.0",
   "private": true,
   "description": "InFu 桌面端（Electron 壳：宿主 agent 后端 + 嵌入式真浏览器）",
+  "author": "WinS0l",
   "type": "module",
   "main": "dist/main.js",
   "scripts": {
@@ -44,6 +46,7 @@
       "!node_modules/@infu/agent/README.md",
       "!node_modules/@infu/agent/tsconfig*.json",
       "!node_modules/@infu/shared/src/**",
+      "!node_modules/@infu/shared/.infu/**",
       "!node_modules/@infu/sandbox-rs/target/**",
       "!node_modules/@infu/sandbox-rs/src/**",
       "!node_modules/@infu/sandbox-rs/scripts/**",

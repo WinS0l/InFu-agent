@@ -357,7 +357,7 @@ console.log("\n▶ inferResumePhase");
   check("planner 无计划 → 从头", r4.startPhase === undefined);
 }
 
-// ── 8. mcp_register 自注册（opencode config-hook 模式 → 受控工具 + 审批）──
+// ── 8. mcp_register 自注册（受控工具 + 审批）。──
 console.log("\n▶ mcp_register 自注册");
 {
   // v3.6：config 已重定向到临时数据目录（无需备份/恢复真实 ~/.infu/config.json）

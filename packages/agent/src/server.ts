@@ -46,8 +46,8 @@ import { findInstructionFile as _findInstructionFile } from "./memory/infu.js";
 import { buildInfuPrompt, buildMemoryPrompt, findInstructionFile, parseScopeRules, sedimentTask } from "./memory/index.js";
 import { listProjects, createProject, removeProject, resolveProjectByName, ensureGitIgnore, findProjectByRoot } from "./projects.js";
 import { listAgents, buildAgentsPrompt, writeAgentFile, deleteAgentFile } from "./agent/agents.js";
-import { abortBackgroundAgentsByDepth } from "./agent/subagent.js";
-import { abortJobsByDepth } from "./tools/jobs.js";
+import { abortBackgroundAgentsByDepth, SUBAGENT_FORBIDDEN_TOOLS } from "./agent/subagent.js";
+import { killJob } from "./tools/jobs.js";
 import { closeShellSession } from "./tools/persistent-shell.js";
 import { TASK_TEMPLATES } from "./templates.js";
 import { getStore, resetStore } from "./db/store.js";
@@ -67,6 +67,20 @@ const execFileAsync = promisify(execFile);
 
 const MAX_ATTACHMENT_BYTES = 16 * 1024 * 1024;
 const MAX_ATTACHMENT_TOTAL_BYTES = 32 * 1024 * 1024;
+
+/** Each new user task starts with a fresh visual evidence stream. Browser tabs and profile data stay intact. */
+function clearTaskVisualArtifacts(root: string): void {
+  for (const dir of [join(root, ".infu", "screenshots"), join(root, ".infu", "browser")]) {
+    try {
+      if (!existsSync(dir)) continue;
+      for (const name of readdirSync(dir)) {
+        if (/\.png$/i.test(name)) fs.rmSync(join(dir, name), { force: true });
+      }
+    } catch {
+      /* Visual evidence cleanup never blocks task startup. */
+    }
+  }
+}
 
 /** git 命令辅助（cwd = 主仓库） */
 async function git(root: string, args: string[]): Promise<string> {
@@ -592,7 +606,7 @@ const pendingQuestions = new Map<string, { sessionId: string; resolve: (answer: 
     return c.json({ ok: true });
   });
 
-  // ── v3.5 数据目录（对齐 ZCode：根目录可选、内部结构固定；迁移 = 复制 + redirect 指针）──
+  // ── v3.5 数据目录：根目录可选、内部结构固定；迁移 = 复制 + redirect 指针。──
 
   // 读取当前数据目录（Web 设置「数据与统计」展示用）
   app.get("/api/data-dir", (c) => {
@@ -902,6 +916,15 @@ const pendingQuestions = new Map<string, { sessionId: string; resolve: (answer: 
     return c.json({ ok: true, scope, message: msg });
   });
 
+  app.get("/api/browser/screenshots/file", (c) => {
+    const root = authorizedRoot(String(c.req.query("root") ?? ""));
+    const name = String(c.req.query("name") ?? "");
+    const dir = root ? join(root, ".infu", "browser") : "";
+    const file = dir ? join(dir, name) : "";
+    if (!root || !name || !isPathInside(dir, file) || !existsSync(file) || !/\.png$/i.test(name)) return c.notFound();
+    try { return c.body(readFileSync(file), 200, { "content-type": "image/png" }); } catch { return c.notFound(); }
+  });
+
   // ── v3.0 computer-use：截图目录列表 + 文件（ComputerUsePane 实时扫描）──
   app.get("/api/screenshots", (c) => {
     const root = authorizedRoot(String(c.req.query("root") ?? ""));
@@ -1167,6 +1190,11 @@ const pendingQuestions = new Map<string, { sessionId: string; resolve: (answer: 
       const rawPaths: string[] = Array.isArray(body.paths)
         ? body.paths.filter((x: unknown): x is string => typeof x === "string" && x.trim().length > 0)
         : [];
+      const attachmentNamesByPath = new Map(
+        rawAttachments
+          .filter((item) => typeof item.path === "string" && typeof item.name === "string")
+          .map((item) => [path.resolve(item.path!), item.name!] as const)
+      );
       const attachmentImages: string[] = Array.isArray(body.images)
         ? body.images.filter((x: unknown): x is string => typeof x === "string" && x.startsWith("data:image/"))
         : [];
@@ -1289,6 +1317,9 @@ const pendingQuestions = new Map<string, { sessionId: string; resolve: (answer: 
         sessionId = store.createSession({ title, root: persistRoot ?? "", modelId });
         await stream.writeSSE({ event: "session", data: JSON.stringify({ type: "session", id: sessionId }) });
       }
+      // A new user task gets fresh desktop/browser evidence. This does not alter embedded
+      // browser tabs, navigation state, cookies, or any other browser profile data.
+      clearTaskVisualArtifacts(root);
       // 用户消息落库（检查点之一：Rewind 锚点）
       store.appendEvent(sessionId, { type: "user-message", text: prompt });
       // v5.1 补 4：随请求携带的临时联网 → 对本会话立即生效（新会话/续跑都适用；
@@ -1301,6 +1332,7 @@ const pendingQuestions = new Map<string, { sessionId: string; resolve: (answer: 
       // 浏览器 Web 安全限制拿不到文件绝对路径 → 内容上传，服务端暂存后给 Agent 绝对路径引用；
       // 图片 dataURL 直接走视觉（不落库字节）。暂存目录任务结束时统一清理。
       const attachmentItems: AttachmentMeta[] = [];
+      const imagePreviewItems: Array<{ name: string; kind: "image"; preview?: string }> = [];
       const attachDir = join(resolveDataDir(), "attachments", sessionId);
       try {
         if (rawFiles.length) {
@@ -1325,7 +1357,9 @@ const pendingQuestions = new Map<string, { sessionId: string; resolve: (answer: 
                 }
               } catch { /* 提取失败用原文件 */ }
             }
-            attachmentItems.push({ name, path: readablePath, kind: "file", size: f.data ? Math.round((f.data.length * 3) / 4) : undefined });
+            const raw = f.data ? Buffer.from(f.data, "base64") : undefined;
+            const contentPreview = raw && !raw.includes(0) ? raw.subarray(0, 64 * 1024).toString("utf-8") : undefined;
+            attachmentItems.push({ name, path: readablePath, kind: "file", size: raw?.length, contentPreview });
           }
         }
         for (const a of rawAttachments) {
@@ -1341,40 +1375,49 @@ const pendingQuestions = new Map<string, { sessionId: string; resolve: (answer: 
         stopHeartbeat();
         return;
       }
-      // v3.0 批 12：桌面版路径引用——校验存在后直接引用原路径（不复制）
-      // v3.6 审计修复：受保护路径（~/.ssh、数据目录等）拒绝作为附件引用——原实现仅
-      // statSync 存在性检查，任意绝对路径（含 ~/.ssh/id_rsa）进入 extraReadDirs 并被
-      // 注入 prompt 引导 read_file，构成任意文件读取面（用户显式附加的普通文件仍可用）
+      // 桌面版路径引用：普通文件仍只读引用；图片转换为 data URL 注入视觉队列，
+      // 使「系统文件选择器选图」与 Web 上传图片得到同样的模型识别能力。
       for (const p of rawPaths) {
         try {
           if (isProtectedPath(p)) continue;
           const st = statSync(p);
           if (st.isDirectory()) {
-            attachmentItems.push({ name: p.split(/[\/]/).filter(Boolean).pop() ?? p, path: p, kind: "dir" });
+            attachmentItems.push({ name: attachmentNamesByPath.get(path.resolve(p)) ?? p.split(/[\\/]/).filter(Boolean).pop() ?? p, path: p, kind: "dir" });
           } else if (st.isFile()) {
-            attachmentItems.push({ name: p.split(/[\/]/).filter(Boolean).pop() ?? p, path: p, kind: "file", size: st.size });
+            const ext = path.extname(p).toLowerCase();
+            const mime: Record<string, string> = { ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".webp": "image/webp", ".gif": "image/gif" };
+            if (mime[ext] && st.size <= MAX_ATTACHMENT_BYTES) {
+              attachmentImages.push(`data:${mime[ext]};base64,${fs.readFileSync(p).toString("base64")}`);
+              imagePreviewItems.push({ name: attachmentNamesByPath.get(path.resolve(p)) ?? p.split(/[\\/]/).filter(Boolean).pop() ?? `图片 ${imagePreviewItems.length + 1}`, kind: "image", preview: attachmentImages.at(-1)! });
+            } else {
+              const raw = st.size <= 64 * 1024 ? fs.readFileSync(p) : undefined;
+              const contentPreview = raw && !raw.includes(0) ? raw.toString("utf-8") : undefined;
+              attachmentItems.push({ name: attachmentNamesByPath.get(path.resolve(p)) ?? p.split(/[\\/]/).filter(Boolean).pop() ?? p, path: p, kind: "file", size: st.size, contentPreview });
+            }
           }
         } catch { /* 路径不存在/不可读：跳过 */ }
       }
-      // 图片（视觉；不落库字节）
-      for (const img of attachmentImages) {
-        const name = `图片 ${attachmentImages.indexOf(img) + 1}`;
-        attachmentItems.push({ name, kind: "image" });
+      // 图片：视觉队列使用原 data URL；会话事件只保存预览数据供消息流显示。
+      for (const [index, img] of attachmentImages.entries()) {
+        if (imagePreviewItems.some((item) => item.preview === img)) continue;
+        const name = `图片 ${index + 1}`;
+        imagePreviewItems.push({ name, kind: "image", preview: img });
       }
       // 只读白名单：暂存目录（上传）或原路径集合（桌面路径引用）；Agent 可读不可写
       const extraReadDirs = attachmentItems.some((a) => a.kind !== "image")
         ? [...new Set([attachDir, ...rawPaths.map((p) => (p.endsWith("/") || p.endsWith("\\") ? p : dirname(p)))])]
         : [];
       // 附件引用文本（注入所有阶段 prompt；图片在 Executor 阶段走视觉）
-      const attachmentText = attachmentItems.length
-        ? `📎 用户附加了以下附件，需要时请用 read_file 读取（绝对路径）：\n` +
-          attachmentItems
-            .map((a) => `- ${a.name}${a.path ? `（${a.path}）` : "（图片，已发送给你查看）"}${a.kind === "dir" ? "——文件夹，可读取其中的文件" : ""}`)
-            .join("\n")
+      const attachmentText = attachmentItems.length || imagePreviewItems.length
+        ? `📎 用户已附加以下内容：\n` +
+          [
+            ...attachmentItems.map((a) => `- ${a.kind === "dir" ? "文件夹" : "文件"}：${a.name}${a.path ? `（${a.path}）` : ""}${a.kind === "dir" ? "；可读取其中的文件" : ""}`),
+            ...imagePreviewItems.map((a) => `- 图片：${a.name}（已作为视觉输入提供）`),
+          ].join("\n")
         : "";
       // 附件事件落库（重放展示；图片字节不落库）
-      if (attachmentItems.length) {
-        store.appendEvent(sessionId, { type: "attachments", items: attachmentItems });
+      if (attachmentItems.length || imagePreviewItems.length) {
+        store.appendEvent(sessionId, { type: "attachments", items: [...attachmentItems, ...imagePreviewItems] });
       }
 
       // 项目根目录校验：路径不存在/不是目录时直接报明确错误（避免 AI 根据工具报错瞎猜路径）
@@ -1506,7 +1549,7 @@ const pendingQuestions = new Map<string, { sessionId: string; resolve: (answer: 
       // v2.10：选项结构化（label/desc/recommended）；description/multiSelect 透传事件
       // v3.4 审计修复：15 分钟超时兜底——用户不回答 + 任务不中止时 Promise 永久悬挂
       // （子 Agent 卡死等待、资源不释放）；超时返回 null（等价跳过）
-      // v3.5（对标 ZCode 常规设置「提问自动继续」）：general.autoContinueQuestions 开 →
+      // v3.5：general.autoContinueQuestions 开启后自动继续。
       // 5 分钟未回答自动继续（resolve null = Agent 跳过继续）；关 → 一直等待用户回答
       // （仅任务中止可退出；用户显式选择的语义）
       const askUser = async (
@@ -1644,10 +1687,9 @@ const pendingQuestions = new Map<string, { sessionId: string; resolve: (answer: 
           } catch {
             /* 清理失败忽略 */
           }
-          // v2.11：父任务结束 → 中止会话内全部后台子智能体与后台任务（子任务随父结束；
-          // v2.13：depth -1 = 全深度——后台子智能体内部启动的 job 也一并终止）
+          // 子 Agent inherits the parent task lifecycle. Background commands are deliberately
+          // retained: a dev server must remain available for user-driven browser validation.
           try { abortBackgroundAgentsByDepth(sessionId, -1); } catch { /* 忽略 */ }
-          try { abortJobsByDepth(sessionId, -1); } catch { /* 忽略 */ }
           // v3.0 审计修复（S3）：任务结束关闭持久 shell 会话（此前永不清理，泄漏带凭据的常驻进程）
           try { closeShellSession(sessionId); } catch { /* 忽略 */ }
           // v3.4 审计修复（M4）：任务结束补三项会话级清理（此前只在删除会话时清，正常结束的任务
@@ -2031,7 +2073,7 @@ const pendingQuestions = new Map<string, { sessionId: string; resolve: (answer: 
     return c.json({ candidates: resolveProjectByName(name) });
   });
 
-  // v3.3 补 23：一键初始化 git 仓库（审查界面非 git 提示按钮；对齐 opencode project git init API）
+  // v3.3：一键初始化 git 仓库（审查界面非 git 提示按钮）。
   app.post("/api/git-init", async (c) => {
     const body = await c.req.json().catch(() => ({}));
     const root = String(body.root ?? "").trim();
@@ -2383,6 +2425,24 @@ const pendingQuestions = new Map<string, { sessionId: string; resolve: (answer: 
     cfg.skills = (cfg.skills ?? []).filter((s) => s.name !== name);
     saveConfig(cfg);
     return c.json({ ok: true });
+  });
+
+  // 子 Agent 可选工具目录：从当前注册表生成，自动覆盖内置与启用插件工具；架构级禁用项不暴露。
+  app.get("/api/agents/tools", (c) => {
+    const tools = Object.entries(TOOLS)
+      .filter(([name]) => !SUBAGENT_FORBIDDEN_TOOLS.has(name))
+      .map(([name, tool]) => ({ name, description: tool.description, risk: tool.risk }))
+      .sort((a, b) => a.name.localeCompare(b.name));
+    return c.json({ tools });
+  });
+
+  // 追踪胶囊可中断本会话的后台 run_command；仅命中当前 session 的 job 注册表。
+  app.post("/api/jobs/:id/kill", async (c) => {
+    const body = await c.req.json().catch(() => ({}));
+    const sessionId = typeof body.sessionId === "string" ? body.sessionId : "";
+    if (!sessionId || !getStore().getSession(sessionId)) return c.json({ ok: false, message: "会话不存在或 sessionId 缺失" }, 404);
+    const message = killJob(sessionId, c.req.param("id"));
+    return c.json({ ok: !message.startsWith("错误："), message });
   });
 
   // ── v2.5 子智能体管理（agent 文件化定义：内置 > ~/.infu/agents > 项目 .infu/agents；文件系统即注册）──

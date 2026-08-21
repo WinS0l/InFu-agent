@@ -1,7 +1,7 @@
 /**
- * v3.1 工具补齐（对齐 opencode 常用工具集）：
+ * v3.1 文件系统工具。
  * - project_tree：目录树（只读，进 Planner/Reviewer/explore 白名单——探索阶段先看整体结构）
- * - file_ops：文件管理（mv/cp/rm/mkdir，medium 审批——opencode file_ops 同款能力，
+ * - file_ops：文件管理（mv/cp/rm/mkdir，medium 审批，
  *   InFu 此前只有 write/edit/read，缺文件级管理）
  */
 import { z } from "zod";

@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { ChevronRight, FileText, Folder, FolderOpen, Loader2, Search } from "lucide-react";
+import { ChevronRight, FileText, Folder, FolderOpen, Loader2, Search, ExternalLink, Code2 } from "lucide-react";
 import hljs from "highlight.js";
 import { useStore } from "../store";
 import { fetchFsTree, fetchFsFile, type FsTreeFile } from "../api";
@@ -77,6 +77,9 @@ export default function CodeView() {
   const [sel, setSel] = useState<string | null>(null);
   const [content, setContent] = useState<{ content: string; binary?: boolean; size?: number; truncated?: boolean } | null>(null);
   const [loading, setLoading] = useState(false);
+  const [openError, setOpenError] = useState<string | null>(null);
+  const [openMenu, setOpenMenu] = useState(false);
+  const menuRef = useRef<HTMLDivElement>(null);
   // v3.6：文件加载竞态守卫序号（快速连点文件时旧响应作废）
   const fileSeqRef = useRef(0);
 
@@ -170,6 +173,20 @@ export default function CodeView() {
       if (req === fileSeqRef.current) setLoading(false);
     }
   };
+  const openFile = async (editor: boolean) => {
+    if (!root || !window.infuDesktop) return;
+    const message = await window.infuDesktop.openProjectFile({ root: effRoot, path: sel ?? "", editor });
+    setOpenError(message);
+    setOpenMenu(false);
+  };
+  useEffect(() => {
+    if (!openMenu) return;
+    const close = (event: MouseEvent) => {
+      if (!menuRef.current?.contains(event.target as Node)) setOpenMenu(false);
+    };
+    document.addEventListener("mousedown", close);
+    return () => document.removeEventListener("mousedown", close);
+  }, [openMenu]);
 
   return (
     <div className="flex h-full min-h-0 min-w-0 flex-col bg-base">
@@ -277,8 +294,8 @@ export default function CodeView() {
             </div>
           ) : (
             <>
-              <div className="flex shrink-0 items-center gap-2 border-b border-line px-4 py-2">
-                <span className="min-w-0 flex-1 truncate font-mono text-[12px] text-text/90">{sel}</span>
+               <div className="flex shrink-0 items-center gap-2 border-b border-line px-4 py-2">
+                 <span className="min-w-0 flex-1 truncate font-mono text-[12px] text-text/90">{sel}</span>
                 {content?.binary ? (
                   <span className="shrink-0 text-xs text-warn">二进制文件</span>
                 ) : (
@@ -287,7 +304,8 @@ export default function CodeView() {
                     {content?.truncated ? "（已截断）" : ""}
                   </span>
                 )}
-              </div>
+               </div>
+               {openError && <div className="border-b border-warn/30 bg-warn-soft px-4 py-1.5 text-[11px] text-warn">{openError}</div>}
               <div className="min-h-0 flex-1 overflow-auto">
                 {content?.binary ? (
                   <div className="px-4 py-3 text-[13px] text-caption">二进制文件无法预览</div>
@@ -301,6 +319,14 @@ export default function CodeView() {
           )}
         </div>
       </div>
+      {root && window.infuDesktop && <div ref={menuRef} className="fixed right-[140px] top-0 z-50 flex h-10 items-center bg-sidebar pr-2" style={{ WebkitAppRegion: "no-drag" } as React.CSSProperties}>
+        <button className="flex h-8 cursor-pointer items-center gap-1.5 rounded-lg px-2 text-[12px] text-sub transition-colors hover:bg-hover hover:text-text" onClick={() => void openFile(false)} title={sel ? "在资源管理器中显示此文件" : "在资源管理器中打开当前项目"}><ExternalLink className="h-3.5 w-3.5" />资源管理器</button>
+        <button className="flex h-8 w-6 cursor-pointer items-center justify-center rounded-lg text-sub transition-colors hover:bg-hover hover:text-text" onClick={() => setOpenMenu((value) => !value)} title="选择打开方式"><ChevronRight className={`h-3.5 w-3.5 rotate-90 transition-transform ${openMenu ? "rotate-[270deg]" : ""}`} /></button>
+        {openMenu && <div className="absolute right-2 top-10 z-50 min-w-[152px] rounded-xl border border-line bg-elevated p-1 shadow-lv3">
+          <button className="flex w-full cursor-pointer items-center gap-2 rounded-lg px-2.5 py-1.5 text-left text-[12px] text-text hover:bg-hover" onClick={() => void openFile(false)}><ExternalLink className="h-3.5 w-3.5 text-sub" />资源管理器</button>
+          <button className="flex w-full cursor-pointer items-center gap-2 rounded-lg px-2.5 py-1.5 text-left text-[12px] text-text hover:bg-hover" onClick={() => void openFile(true)}><Code2 className="h-3.5 w-3.5 text-info" />VS Code</button>
+        </div>}
+      </div>}
     </div>
   );
 }

@@ -1,0 +1,61 @@
+InFu 1.0.0 Source Build Notes
+================================
+
+This archive intentionally does not include node_modules, local configuration,
+sessions, API keys, logs, screenshots, build output, or Git history.
+
+Requirements
+------------
+- Windows 10 or later
+- Node.js 22.5 or later
+- npm (included with Node.js)
+- Rust and the MSVC C++ Build Tools only when building the Windows native
+  sandbox from source
+
+Install dependencies
+--------------------
+1. Open PowerShell in the extracted InFu folder.
+2. Run:
+
+   npm install
+
+The exact JavaScript dependency tree is pinned in package-lock.json.
+
+Build and run from source
+-------------------------
+Run:
+
+   npm run build
+   npm run build -w @infu/web
+   npm run start -w @infu/desktop
+
+The desktop application uses the built Web assets in packages/web/dist.
+
+Configure a model
+-----------------
+Run:
+
+   npm run config
+
+This creates local configuration in the current Windows user's ~/.infu
+directory. API keys are not part of this archive and should never be committed
+to a repository or uploaded with a backup.
+
+Included bundled extensions
+---------------------------
+- browser-use
+- control-browser
+- web-gui-tester
+- skill-creator
+
+The archive does not include document-processing skills with restrictive
+development-time licenses.
+
+Verification
+------------
+After installing dependencies, run:
+
+   npm test
+   npm run build
+   npm run build -w @infu/web
+   npm run lint

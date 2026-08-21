@@ -4,6 +4,8 @@ InFu is a local coding agent for Windows. Give it a task in plain language and i
 
 It is built for local projects. Model credentials, sessions, logs, attachments, and recovery snapshots stay on the machine unless you explicitly use a model provider or a network-enabled tool.
 
+> New to coding agents? Start with the [Windows quick-start guide](docs/QUICKSTART-ZH.md).
+
 ## What It Includes
 
 - Streaming agent loop with tool calls, retries, fallback models, context compression, token accounting, and task budgets.
@@ -13,13 +15,19 @@ It is built for local projects. Model credentials, sessions, logs, attachments, 
 - Windows desktop application built with Electron, including native window controls, tray integration, embedded browser tabs, and computer-use tools.
 - MCP clients, JavaScript plugins, and `SKILL.md` skills. The bundled open-source extensions are `browser-use` and `skill-creator`.
 
-## Requirements
+## For Windows Users
+
+The first public release is distributed as a portable ZIP. Download it from the GitHub Release page, extract the entire archive to a writable folder, and run `InFu.exe`. No Node.js, Rust, or development tools are required for the portable build.
+
+See [docs/QUICKSTART-ZH.md](docs/QUICKSTART-ZH.md) for step-by-step Chinese instructions, including model configuration and Windows security notices.
+
+## Requirements For Source Builds
 
 - Windows 10 or later
 - Node.js 22.5 or later
 - Rust and the MSVC C++ toolchain only when building the native sandbox from source
 
-The desktop installer is the easiest way to run InFu. To work from source, clone the repository and install dependencies:
+To work from source, clone the repository and install dependencies:
 
 ```powershell
 git clone https://github.com/WinS0l/InFu-agent.git
@@ -110,6 +118,7 @@ The GitHub Actions workflow runs the Windows build, Chromium-backed production E
 
 ## Documentation
 
+- [Windows quick start (Chinese)](docs/QUICKSTART-ZH.md)
 - [Desktop architecture and packaging](docs/DESKTOP.md)
 - [Sandbox and security boundaries](docs/SANDBOX.md)
 - [MCP integration](docs/MCP.md)

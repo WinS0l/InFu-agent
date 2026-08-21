@@ -47,11 +47,13 @@ npm run build -w @infu/web
 npm run start -w @infu/desktop
 ```
 
-For a distributable Windows installer:
+For a portable Windows build:
 
 ```powershell
 npm run pack -w @infu/desktop
 ```
+
+See [docs/RELEASE.md](docs/RELEASE.md) for portable archive use and the unsigned-binary notice.
 
 ### Command line
 

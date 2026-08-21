@@ -59,3 +59,34 @@ After installing dependencies, run:
    npm run build
    npm run build -w @infu/web
    npm run lint
+
+Disaster recovery
+-----------------
+If the computer is lost or its data is erased, restore InFu in this order:
+
+1. Download and extract this source archive to a writable folder.
+2. Install the requirements listed above.
+3. Run `npm install`, then the build and desktop commands in this document.
+4. Run `npm run config` and enter model credentials again.
+5. Open InFu and create or re-open project folders.
+
+This source archive restores the application source, bundled extensions, and
+build instructions. It intentionally cannot restore private sessions, model
+keys, attachments, logs, recovery copies, schedules, or user-installed skills.
+
+To restore those private items, maintain a separate encrypted backup of the
+actual InFu data directory. The default location is `~/.infu`. If
+`~/.infu-redirect.json` exists, read it first: it points to the active data
+directory. Never upload an unencrypted copy of that directory because it can
+contain API keys and private project material.
+
+Recommended private backup set
+------------------------------
+- This clean source archive
+- The portable ZIP and its SHA-256 file
+- An encrypted archive of the active InFu data directory
+- Optional: a `git bundle` backup of local Git history and unpushed branches
+
+After extracting an encrypted data backup, restore it to the same Windows user
+profile before starting InFu. If the original data directory was redirected,
+restore both the data directory and `~/.infu-redirect.json`.

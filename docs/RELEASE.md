@@ -43,3 +43,8 @@ Publish these files for version 1.0.0:
 
 The NSIS installer may be retained for local testing, but is not recommended
 for public distribution until a trusted signing process is available.
+
+## Backups
+
+See [DISASTER-RECOVERY.md](DISASTER-RECOVERY.md) for restoring the source or
+portable build after data loss and for safely backing up private InFu data.

@@ -119,6 +119,7 @@ The GitHub Actions workflow runs the Windows build, Chromium-backed production E
 ## Documentation
 
 - [Windows quick start (Chinese)](docs/QUICKSTART-ZH.md)
+- [Disaster recovery and private data backup](docs/DISASTER-RECOVERY.md)
 - [Desktop architecture and packaging](docs/DESKTOP.md)
 - [Sandbox and security boundaries](docs/SANDBOX.md)
 - [MCP integration](docs/MCP.md)

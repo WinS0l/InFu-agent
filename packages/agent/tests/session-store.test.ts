@@ -75,7 +75,18 @@ const sum = store.summarizeSession(id2);
 check("prompts 序列完整", sum.prompts.length === 2 && sum.prompts[1] === "继续做");
 check("产出取最后一次", sum.lastPlan === "计划A" && sum.lastReview === "审查A" && sum.lastReport === "报告B");
 
-// 6. 删除
+// 6. Job 审计镜像（事件流仍为事实来源，审计表用于查询）
+console.log("\n▶ Job 审计");
+const jobId = store.createSession({ title: "审计", root: "E:\\audit" });
+store.appendEvent(jobId, { type: "job-start", id: "job-1", command: "npm test" });
+check("Job 启动写入审计", store.listJobAudits(jobId)[0]?.status === "running");
+store.appendEvent(jobId, { type: "job-done", id: "job-1", code: 0, ok: true });
+check("Job 完成更新审计", store.listJobAudits(jobId)[0]?.status === "completed" && store.listJobAudits(jobId)[0]?.outputSummary === "exit=0");
+store.appendEvent(jobId, { type: "phase-start", phase: "planner", label: "规划" });
+check("任务快照包含阶段和可恢复性", store.getTaskSnapshot(jobId)?.phase === "planner" && store.getTaskSnapshot(jobId)?.resumability === "safe");
+store.deleteSession(jobId);
+
+// 7. 删除
 console.log("\n▶ 删除");
 store.deleteSession(id2);
 check("删除后不存在", store.getSession(id2) === null);
@@ -83,7 +94,7 @@ check("列表只剩一个", store.listSessions().length === 1);
 store.deleteSession(id);
 check("全部删除", store.listSessions().length === 0);
 
-// 7. v2.6.1 会话管理（重命名/顶置/归档）
+// 8. v2.6.1 会话管理（重命名/顶置/归档）
 console.log("\n▶ 会话管理（重命名/顶置/归档）");
 const m1 = store.createSession({ title: "原始标题", root: "E:\\proj" });
 check("新会话默认未顶置未归档", store.getSession(m1)?.pinned === false && store.getSession(m1)?.archived === false);
@@ -103,7 +114,7 @@ check("全量列表含归档会话", listAll.some((s) => s.id === m1));
 check("恢复归档", store.setArchived(m1, false) && store.getSession(m1)?.archived === false && store.listSessions().some((s) => s.id === m1));
 store.deleteSession(m1);
 
-// 8. v2.6.1 幂等迁移（已有库打开不报错 + 列存在）
+// 9. v2.6.1 幂等迁移（已有库打开不报错 + 列存在）
 console.log("\n▶ 幂等迁移");
 const s2c = new SessionStore(join(dir, "test.db")); // 重复打开：ALTER 幂等
 const m2 = s2c.createSession({ title: "迁移后", root: "E:\\proj" });

@@ -143,8 +143,8 @@ try {
       await page.waitForTimeout(700);
       const rootHtmlStable = await page.evaluate(() => (document.getElementById("root")?.innerHTML ?? "").length);
       check("空 trace 欢迎态持续渲染（无 React 更新深度错误）", rootHtmlStable > 50, String(rootHtmlStable));
-      const welcomeHeading = await page.getByText("今天想推进什么？", { exact: true }).count();
-      check("欢迎态忽略遗留代码视图，始终显示聊天欢迎页", welcomeHeading === 1, String(welcomeHeading));
+      const welcomeHeading = await page.getByText("把想法变成进展。", { exact: true }).count();
+      check("欢迎态忽略遗留代码视图，始终显示新版聊天欢迎页", welcomeHeading === 1, String(welcomeHeading));
       const workspaceVisibleOnWelcome = await page.getByText("工作区", { exact: true }).isVisible().catch(() => false);
       check("欢迎态不渲染右侧工作区（即使右栏偏好已开启）", !workspaceVisibleOnWelcome, String(workspaceVisibleOnWelcome));
       const suggestions = await page.locator('button[title="填入输入框后可继续补充上下文或直接发送"]').count();

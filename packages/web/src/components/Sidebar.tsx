@@ -145,7 +145,7 @@ function SessionRow({ s, onOpen, onRename, onPin, onArchive, busy }: {
 
   return (
     <div
-      className={`group relative flex h-8 cursor-pointer items-center gap-2 rounded-lg px-2 transition-colors duration-150 ${
+      className={`infu-session-row group relative flex h-8 cursor-pointer items-center gap-2 rounded-lg px-2 transition-colors duration-150 ${
         active ? "bg-hover text-text" : "text-text/80 hover:bg-hover/60 hover:text-text"
       } ${busy ? "opacity-60" : ""}`}
       onClick={() => !editing && onOpen()}
@@ -400,11 +400,14 @@ export default function Sidebar({ onOpenSettings, className = "" }: SidebarProps
 
   const freeSessions = sessions.filter((s) => !projectByRoot.has(norm(s.root)));
   const pinnedSessions = sessions.filter((s) => s.pinned);
+  const runningIds = useStore((s) => s.runningIds);
+  const approvals = useStore((s) => s.approvals);
   const visible = (list: SessionMeta[]) => (q ? list.filter((s) => s.title.toLowerCase().includes(q)) : list);
   /** v3：排序方式——最近更新按 updatedAt 降序；手动排序保持原顺序 */
   const sortSessions = (list: SessionMeta[]) =>
     sortMode === "recent" ? [...list].sort((a, b) => b.updatedAt - a.updatedAt) : list;
   const pinnedVisible = visible(sortSessions(pinnedSessions));
+  const runningVisible = visible(sortSessions(sessions.filter((s) => runningIds.includes(s.id) || approvals.some((a) => a.sessionId === s.id))));
   const freeVisible = visible(sortSessions(freeSessions));
   /** v3：单列表（flat）模式——全部会话按排序方式单列展示（行内标注所属项目） */
   const flatVisible = visible(sortSessions(sessions));
@@ -412,7 +415,7 @@ export default function Sidebar({ onOpenSettings, className = "" }: SidebarProps
   /* ── 折叠 rail（56px）：Logo=展开 / 新建 / 设置（v3.3 补：按钮加大）── */
   if (sidebarCollapsed) {
     return (
-      <aside className={`flex min-h-0 flex-col items-center gap-1 bg-sidebar/70 backdrop-blur-2xl py-3 select-none ${className}`}>
+      <aside className={`infu-sidebar flex min-h-0 flex-col items-center gap-1 bg-sidebar/70 backdrop-blur-2xl py-3 select-none ${className}`}>
         <button
           className="flex h-10 w-10 cursor-pointer items-center justify-center rounded-full text-info transition-colors hover:bg-hover"
           onClick={() => setSidebarCollapsed(false)}
@@ -440,7 +443,7 @@ export default function Sidebar({ onOpenSettings, className = "" }: SidebarProps
   }
 
   return (
-    <aside className={`flex min-h-0 min-w-0 flex-col bg-sidebar/70 backdrop-blur-2xl select-none ${className}`}>
+    <aside className={`infu-sidebar flex min-h-0 min-w-0 flex-col bg-sidebar/70 backdrop-blur-2xl select-none ${className}`}>
       {/* Logo 行（与聊天 header 同高）：点击 = 新建会话；右侧折叠按钮；
            v3.0 批 9 = 窗口拖拽区（no-drag 给按钮）
            窗口级顶部统一为 40px（与 Electron 原生控制区同高）
@@ -610,6 +613,28 @@ export default function Sidebar({ onOpenSettings, className = "" }: SidebarProps
           </>
         ) : (
         <>
+        {/* ── 运行中与待审批：多会话并行时的高频入口 ── */}
+        {!collapseAll && runningVisible.length > 0 && (
+          <>
+            <SectionHeader icon={<GitBranch className="h-3.5 w-3.5" />} label="运行中" >
+              <span className="rounded-full bg-info-soft px-1.5 text-[11px] leading-[18px] text-info">{runningVisible.length}</span>
+            </SectionHeader>
+            <div className="mb-1 space-y-0.5">
+              {runningVisible.map((s) => (
+                <SessionRow
+                  key={`running-${s.id}`}
+                  s={s}
+                  onOpen={() => openSession(s.id, s.root)}
+                  onRename={(t) => patchSession(s.id, { title: t })}
+                  onPin={() => patchSession(s.id, { pinned: !s.pinned })}
+                  onArchive={() => patchSession(s.id, { archived: true, pinned: false })}
+                  busy={busyId === s.id}
+                />
+              ))}
+            </div>
+          </>
+        )}
+
         {/* ── 已顶置（项目栏上方） ── */}
         {!collapseAll && pinnedVisible.length > 0 && (
           <>
@@ -660,7 +685,7 @@ export default function Sidebar({ onOpenSettings, className = "" }: SidebarProps
           return (
             <div key={p.id}>
               <div
-                className={`group relative flex h-[34px] cursor-pointer items-center gap-1 rounded-lg px-2 transition-colors duration-150 ${
+                className={`infu-project-row group relative flex h-[34px] cursor-pointer items-center gap-1 rounded-lg px-2 transition-colors duration-150 ${
                   isCurrent ? "bg-hover text-text" : "text-text/85 hover:bg-hover/60 hover:text-text"
                 }`}
                 // v3：项目行点击 = 选中项目；再点一次 = 折叠/展开该项目（项目行即折叠按钮）

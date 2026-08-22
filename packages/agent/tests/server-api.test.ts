@@ -42,6 +42,15 @@ const app = {
   },
 };
 
+// ── 0. Agent 健康信息契约（供欢迎页和桌面托盘使用）──
+console.log("▶ Agent 健康信息");
+{
+  const health = await app.fetch(new Request("http://localhost/api/health"));
+  const data = await health.json() as { ok?: boolean; name?: string; version?: string; uptimeSeconds?: number; tools?: number; sessions?: number; diagnostics?: { database?: string; models?: string; configuredModels?: number; sandbox?: string; browser?: string } };
+  check("健康检查返回结构化运行信息", health.status === 200 && data.ok === true && data.name === "infu-agent" && typeof data.version === "string" && typeof data.uptimeSeconds === "number" && typeof data.tools === "number" && typeof data.sessions === "number", JSON.stringify(data));
+  check("健康检查不泄露凭据且包含诊断摘要", data.diagnostics?.database === "ready" && typeof data.diagnostics.configuredModels === "number" && ["configured", "missing"].includes(data.diagnostics.models ?? "") && ["ready", "unavailable"].includes(data.diagnostics.sandbox ?? "") && ["available", "disabled"].includes(data.diagnostics.browser ?? "") && !JSON.stringify(data).toLowerCase().includes("apikey"), JSON.stringify(data.diagnostics));
+}
+
 // ── 1. /api/approvals/bypass 路由顺序回归（bypass 不被 :id 吞掉）──
 // v4.0 审计修复（H1 缓解）：bypass 必须针对已存在会话（404）+ 开启动作落库审计事件
 console.log("▶ approvals/bypass 路由");

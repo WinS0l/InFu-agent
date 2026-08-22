@@ -654,6 +654,116 @@ export interface StoredEvent {
   event: AgentEvent;
 }
 
+/** 持久化任务状态机（由事件流派生；不替代现有 AgentEvent）。 */
+export type TaskRunStatus =
+  | "queued"
+  | "planning"
+  | "executing"
+  | "waiting_approval"
+  | "verifying"
+  | "completed"
+  | "failed"
+  | "cancelled";
+
+/** 从事件流恢复任务状态；未知/旧事件保持最近已知状态，兼容历史数据库。 */
+export function deriveTaskRunStatus(events: StoredEvent[]): TaskRunStatus {
+  let status: TaskRunStatus = "queued";
+  for (const { event } of events) {
+    switch (event.type) {
+      case "phase-start": status = event.phase === "planner" ? "planning" : event.phase === "reviewer" ? "verifying" : "executing"; break;
+      case "approval-required": status = "waiting_approval"; break;
+      case "approval-result": status = event.approved ? "executing" : "cancelled"; break;
+      case "done": status = "completed"; break;
+      case "error": status = "failed"; break;
+      case "session": case "user-message": if (status === "queued" || status === "completed" || status === "failed" || status === "cancelled") status = "queued"; break;
+    }
+  }
+  return status;
+}
+
+export interface TaskSnapshot {
+  status: TaskRunStatus;
+  goal?: string;
+  phase?: PhaseId;
+  blockedReason?: string;
+  approvals: number;
+  changedFiles: number;
+  verification: "not_run" | "passed" | "failed";
+  resumability: "safe" | "needs_approval" | "history_only";
+  backgroundJobs: number;
+  /** 可视化任务依赖关系；旧事件流为空时保持空数组。 */
+  dependencies?: TaskDependency[];
+}
+
+export interface TaskDependency {
+  id: string;
+  label: string;
+  status: "pending" | "running" | "completed" | "failed";
+  dependsOn: string[];
+}
+
+/** 任务上下文派生器：只读事件流，不触碰执行和审批决策。 */
+export function deriveTaskSnapshot(events: StoredEvent[]): TaskSnapshot {
+  let goal: string | undefined;
+  let phase: PhaseId | undefined;
+  let blockedReason: string | undefined;
+  let approvals = 0;
+  let changedFiles = 0;
+  let verification: TaskSnapshot["verification"] = "not_run";
+  let backgroundJobs = 0;
+  for (const { event } of events) {
+    if (event.type === "user-message" && !goal) goal = event.text.slice(0, 240);
+    if (event.type === "phase-start") phase = event.phase;
+    if (event.type === "approval-required") { approvals++; blockedReason = event.description.slice(0, 240); }
+    if (event.type === "approval-result" && event.approved) blockedReason = undefined;
+    if (event.type === "tool-result") { if (event.diff) changedFiles += event.diff.added + event.diff.removed > 0 ? 1 : 0; if (event.tool.includes("test") || event.tool === "run_command") verification = event.ok ? "passed" : "failed"; }
+    if (event.type === "job-start") backgroundJobs++;
+    if (event.type === "job-done") backgroundJobs = Math.max(0, backgroundJobs - 1);
+  }
+  const status = deriveTaskRunStatus(events);
+  return { status, goal, phase, blockedReason, approvals, changedFiles, verification, backgroundJobs, dependencies: [], resumability: status === "waiting_approval" ? "needs_approval" : status === "completed" || status === "failed" || status === "cancelled" ? "history_only" : "safe" };
+}
+
+/** 工具/后台任务的可审计记录。输入输出只保存摘要，避免把凭据或会话正文复制到审计表。 */
+export interface JobAuditRecord {
+  id: string;
+  sessionId: string;
+  kind: "command" | "subagent" | "tool";
+  status: "running" | "completed" | "failed" | "cancelled" | "killed";
+  startedAt: number;
+  endedAt?: number;
+  inputSummary: string;
+  outputSummary?: string;
+  risk?: RiskLevel;
+  approvalId?: string;
+  tool?: string;
+}
+
+/** 插件/MCP/技能的能力声明，供设置页和诊断面板展示。 */
+export interface CapabilityDeclaration {
+  id: string;
+  kind: "plugin" | "mcp" | "skill";
+  name: string;
+  enabled: boolean;
+  tools: string[];
+  network: "none" | "local" | "remote" | "unknown";
+  writeScope: "none" | "workspace" | "user" | "unknown";
+  envKeys: string[];
+  lastLoad?: "ok" | "failed" | "unknown";
+  errorSummary?: string;
+}
+
+/** 全局通知中心记录。正文保持短摘要，完整上下文仍留在会话事件中。 */
+export interface NotificationRecord {
+  id: string;
+  sessionId?: string;
+  type: "completed" | "failed" | "approval" | "input" | "info";
+  title: string;
+  body: string;
+  createdAt: number;
+  read: boolean;
+}
+
 /** /api/chat 任务请求体 */
 export interface TaskRequest {
   prompt: string;

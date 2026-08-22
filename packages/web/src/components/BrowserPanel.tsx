@@ -29,6 +29,7 @@ interface Tab {
   url: string;
   active: boolean;
   pending?: boolean;
+  error?: string;
 }
 
 /** 地址栏显示过滤：起始页（data:）显示占位 */
@@ -222,12 +223,17 @@ export default function BrowserPanel({ active: isActive }: { active: boolean }) 
       el.addEventListener("page-title-updated", () => update({ title: el.getTitle() }));
       el.addEventListener("did-start-loading", () => setNavState((s) => ({ ...s, isLoading: true })));
       el.addEventListener("did-stop-loading", () => setNavState((s) => ({ ...s, isLoading: false })));
+      el.addEventListener("did-fail-load", (event) => {
+        const detail = event as Event & { errorDescription?: string; errorCode?: number; isMainFrame?: boolean };
+        if (detail.isMainFrame === false) return;
+        update({ error: detail.errorDescription || `页面加载失败（${detail.errorCode ?? "未知错误"}）` });
+      });
       el.addEventListener("dom-ready", () => {
         // 填充真实 webContentsId（主进程注册表 key + CDP 桥就绪）；
         // ⚠️ 绝不能拿 wcId 当 React key（key 变化 → 元素重建 → 新 guest 无限循环）
         const wcId = String(el.getWebContentsId());
         setTabs((ts) =>
-          ts.map((t) => (t.id === tabId ? { ...t, wcId, pending: false, url: el.getURL() || t.url } : t))
+          ts.map((t) => (t.id === tabId ? { ...t, wcId, pending: false, error: undefined, url: el.getURL() || t.url } : t))
         );
         // 主进程激活同步（did-attach-webview 已注册 CDP，这里上报激活）
         if (desktop) desktop.browserSelectTab(wcId);
@@ -442,14 +448,14 @@ export default function BrowserPanel({ active: isActive }: { active: boolean }) 
           </div>
         )}
         {tabs.map((t) => (
-          <webview
-            key={t.id}
-            ref={(el) => attachWebview(el as InfuWebviewElement | null, t.id)}
-            className={`absolute inset-0 h-full w-full transition-opacity ${
-              t.active ? "opacity-100" : "pointer-events-none opacity-0"
-            }`}
-            style={t.active ? freeCss : undefined}
-          />
+          <div key={t.id} className={`absolute inset-0 ${t.active ? "" : "pointer-events-none opacity-0"}`}>
+            <webview
+              ref={(el) => attachWebview(el as InfuWebviewElement | null, t.id)}
+              className="absolute inset-0 h-full w-full"
+              style={t.active ? freeCss : undefined}
+            />
+            {t.active && t.error && <div className="absolute inset-x-4 top-4 z-20 flex items-center gap-2 rounded-xl border border-danger/30 bg-elevated/95 px-3 py-2 text-xs text-danger shadow-lv2"><span className="min-w-0 flex-1 truncate">{t.error}</span><button className="rounded-lg bg-danger-soft px-2 py-1 text-[11px] text-danger hover:bg-danger/15" onClick={() => { setTabs((ts) => ts.map((x) => x.id === t.id ? { ...x, error: undefined } : x)); activeEl?.reload(); }}>重试</button></div>}
+          </div>
         ))}
         </div>
       </div>

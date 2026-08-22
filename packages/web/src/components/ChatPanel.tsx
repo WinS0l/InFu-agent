@@ -1,13 +1,15 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState, lazy, Suspense } from "react";
+import { useVirtualizer } from "@tanstack/react-virtual";
 import {
   Send, Square, GitBranch, Loader2,
   RotateCcw, AlertTriangle, Files, Folder, FolderOpen, ChevronDown, Check,
   BrainCircuit, ShieldCheck, ShieldAlert, Scale, Paperclip, FileText, X, Pencil, WifiOff, Zap, Globe,
   CheckCircle2, XCircle, OctagonX, Skull, Command, ListTree, Bot, Activity, ClipboardCheck, ChevronRight,
+  FolderKanban, ShieldCheck as ShieldCheckIcon, Gauge,
 } from "lucide-react";
-import type { DeliverySummary } from "@infu/shared";
+import { deriveTaskSnapshot, type DeliverySummary } from "@infu/shared";
 import { useStore, type ChatMsg } from "../store";
-import { sendChat, mergeWorktree, discardWorktree, rewindSession, fetchProjects, fetchConfig, updateConfig, fetchPlugins, setApprovalBypass, fetchReviewFiles, killBackgroundJob, type ApprovalMode, type ChatFileInput, type PluginInfo, egressAllow, egressDisallow } from "../api";
+import { sendChat, mergeWorktree, discardWorktree, rewindSession, fetchProjects, fetchConfig, updateConfig, fetchPlugins, setApprovalBypass, fetchReviewFiles, killBackgroundJob, fetchHealth, type ApprovalMode, type ChatFileInput, type PluginInfo, type HealthInfo, egressAllow, egressDisallow } from "../api";
 import Timeline from "./Timeline";
 import ReasoningBlock from "./ReasoningBlock";
 import QueueDock from "./QueueDock";
@@ -51,9 +53,8 @@ function ActivityDock({ visible }: { visible: boolean }) {
   const [diff, setDiff] = useState({ added: 0, removed: 0 });
   const [menuOpen, setMenuOpen] = useState(false);
   const [position, setPosition] = useState<{ x: number; y: number } | null>(null);
-  const [compact, setCompact] = useState(false);
   const [stoppingJob, setStoppingJob] = useState<string | null>(null);
-  const [summaryIndex, setSummaryIndex] = useState(0);
+  const [healthState, setHealthState] = useState<HealthInfo | null>(null);
   const [, setClockTick] = useState(0);
   const dockRef = useRef<HTMLDivElement>(null);
   const drag = useRef<{ offsetX: number; offsetY: number; host: DOMRect; width: number; height: number } | null>(null);
@@ -65,13 +66,9 @@ function ActivityDock({ visible }: { visible: boolean }) {
     useStore.getState().setDetailsOpen(true);
   };
   const hasDiff = diff.added > 0 || diff.removed > 0;
-  const summaries = [
-    hasDiff ? `改动 +${diff.added} / -${diff.removed}` : null,
-    activity.jobs.length ? `后台命令 ${activity.jobs.length}` : null,
-    activity.agents.length ? `子 Agent ${activity.agents.length}` : null,
-    activity.tools[0] ?? null,
-  ].filter((text): text is string => Boolean(text));
-  const capsuleText = summaries[summaryIndex % Math.max(1, summaries.length)] ?? "会话待命";
+  const capsuleText = active
+    ? `运行中 · ${activity.jobs.length + activity.agents.length + activity.tools.length} 项`
+    : hasDiff ? `待命 · +${diff.added} / -${diff.removed}` : "会话待命";
   const fmtDuration = (startedAt: number) => {
     const seconds = Math.max(0, Math.floor((Date.now() - startedAt) / 1000));
     return seconds >= 60 ? `${Math.floor(seconds / 60)}分${String(seconds % 60).padStart(2, "0")}秒` : `${seconds}秒`;
@@ -93,8 +90,7 @@ function ActivityDock({ visible }: { visible: boolean }) {
   };
   const resetIdle = useCallback(() => {
     if (idleTimer.current) clearTimeout(idleTimer.current);
-    setCompact(false);
-    idleTimer.current = setTimeout(() => { setMenuOpen(false); setCompact(true); }, 10000);
+    idleTimer.current = setTimeout(() => { setMenuOpen(false); }, 10000);
   }, []);
   useEffect(() => {
     resetIdle();
@@ -102,11 +98,10 @@ function ActivityDock({ visible }: { visible: boolean }) {
   }, [active, activeSessionId, resetIdle]);
   useEffect(() => { setMenuOpen(false); }, [activeSessionId]);
   useEffect(() => {
-    setSummaryIndex(0);
-    if (summaries.length < 2 || compact) return;
-    const timer = setInterval(() => setSummaryIndex((index) => (index + 1) % summaries.length), 3000);
-    return () => clearInterval(timer);
-  }, [activeSessionId, compact, summaries.length]);
+    let cancelled = false;
+    void fetchHealth().then((value) => { if (!cancelled) setHealthState(value); }).catch(() => { if (!cancelled) setHealthState(null); });
+    return () => { cancelled = true; };
+  }, [activeSessionId, active]);
   useEffect(() => {
     if (!activity.jobs.length) return;
     const timer = setInterval(() => setClockTick((n) => n + 1), 1000);
@@ -174,7 +169,6 @@ function ActivityDock({ visible }: { visible: boolean }) {
     if (!host) return;
     const pill = event.currentTarget.getBoundingClientRect();
     resetIdle();
-    setSummaryIndex(0);
     moved.current = false;
     drag.current = { offsetX: event.clientX - pill.left, offsetY: event.clientY - pill.top, host, width: pill.width, height: pill.height };
     window.addEventListener("pointermove", onMove);
@@ -203,6 +197,7 @@ function ActivityDock({ visible }: { visible: boolean }) {
     {menuOpen && <div className="task-capsule-menu absolute right-0 top-[calc(100%+8px)] w-[286px] overflow-hidden rounded-2xl border border-line bg-elevated">
       <div className="flex items-center gap-2 px-3.5 pb-2 pt-3"><span className={`flex h-6 w-6 items-center justify-center rounded-lg ${active ? "bg-info-soft text-info" : "bg-hover text-sub"}`}>{active ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Activity className="h-3.5 w-3.5" />}</span><span className="min-w-0 flex-1 truncate text-[12px] font-semibold text-text">{sessionTitle}</span></div>
       <div className="max-h-52 space-y-1 overflow-y-auto px-1.5 pb-1.5">
+        {(() => { const snapshot = deriveTaskSnapshot(events); const browserStatus = healthState?.diagnostics?.browser; return <div className="mx-1 mb-1 rounded-xl bg-hover/55 px-2.5 py-2 text-[11px] text-sub"><div className="flex items-center gap-2"><span className={`h-1.5 w-1.5 rounded-full ${browserStatus === "ready" ? "bg-success" : "bg-caption"}`} /><span className="font-medium text-text">{snapshot.status === "waiting_approval" ? "等待审批" : active ? "任务执行中" : "任务待命"}</span><span className="ml-auto text-caption">浏览器 {browserStatus === "ready" ? "在线" : browserStatus === "available" ? "可用" : "未连接"}</span></div>{snapshot.goal && <div className="mt-1 truncate" title={snapshot.goal}>{snapshot.goal}</div>}<div className="mt-1 flex gap-2 text-[10px] text-caption"><span>{snapshot.changedFiles} 个文件改动</span><span>{snapshot.verification === "passed" ? "验证通过" : snapshot.verification === "failed" ? "验证失败" : "未验证"}</span>{snapshot.backgroundJobs > 0 && <span>后台 {snapshot.backgroundJobs}</span>}</div></div>; })()}
         {activity.jobs.map(([id, job]) => <div key={id} className="flex items-center gap-2 rounded-xl px-2.5 py-2 text-[12px] text-sub"><span className="text-warn"><Command className="h-3.5 w-3.5" /></span><span className="min-w-0 flex-1"><span className="block truncate text-text">{job.command}</span><span className="block text-[10px] text-caption">后台命令 · 已运行 {fmtDuration(job.startedAt)}</span></span><button className="flex h-6 shrink-0 cursor-pointer items-center gap-1 rounded-md border border-danger/40 px-1.5 text-[10px] text-danger transition-colors hover:bg-danger-soft disabled:cursor-wait disabled:opacity-50" onClick={() => void stopJob(id)} disabled={stoppingJob !== null} title="中断此后台命令并结束其进程树">{stoppingJob === id ? <Loader2 className="h-3 w-3 animate-spin" /> : <Square className="h-2.5 w-2.5" fill="currentColor" />}中断</button></div>)}
         {activity.agents.map(([id, agent]) => <button key={id} onClick={() => openAgent(id, agent.name)} className="flex w-full cursor-pointer items-center gap-2 rounded-xl px-2.5 py-2 text-left text-[12px] text-sub transition-colors hover:bg-hover"><span className="text-success"><Bot className="h-3.5 w-3.5" /></span><span className="min-w-0 flex-1"><span className="block truncate text-text">{agent.name}</span><span className="block truncate text-[10px] text-caption">{agent.prompt}</span></span><span className="text-[10px] text-info">查看</span></button>)}
         {hasDiff && <div className="flex items-center gap-2 rounded-xl px-2.5 py-2 text-[12px] text-sub"><span className="text-info"><Files className="h-3.5 w-3.5" /></span><span className="min-w-0 flex-1 text-text">当前工作区改动</span><span className="font-mono text-[11px]"><span className="text-success">+{diff.added}</span>{" "}<span className="text-danger">-{diff.removed}</span></span></div>}
@@ -724,6 +719,7 @@ export default function ChatPanel() {
 
   // v2.14 批 10：切换会话时退出编辑态（残留的编辑按钮组/原文不该带到别的会话）
   const activeSid = useStore((s) => s.activeSessionId);
+  const sessions = useStore((s) => s.sessions);
   // v3.2：断网/瞬时故障重试信息（当前视图会话；状态行倒计时显示）
   const retryInfo = useStore((s) => (activeSid ? s.retryBySession[activeSid] : undefined));
   // v3.2：会话级全权放行状态（审批弹窗开启；状态行徽标展示，点击可关闭）
@@ -741,6 +737,8 @@ export default function ChatPanel() {
   const [narrow, setNarrow] = useState(false);
   // v3：工作区菜单（hero 项目 chip）——项目列表
   const [projects, setProjects] = useState<Array<{ id: string; name: string; root: string }>>([]);
+  const [health, setHealth] = useState<HealthInfo | null>(null);
+  const [healthChecked, setHealthChecked] = useState(false);
   // 模型与推理强度是同一项任务配置：一个下拉完成选择，避免低频「执行设置」再套一层。
   // v3.5：审批档位提升为全局 store 状态——composer 与设置「命令」Tab 共享同一数据源（双向联动）
   const approvalMode = useStore((s) => s.approvalMode);
@@ -764,6 +762,17 @@ export default function ChatPanel() {
       useStore.getState().addError("插件列表加载失败，@插件 不可用");
     });
   }, []);
+  useEffect(() => {
+    let cancelled = false;
+    const probe = () => {
+      fetchHealth()
+        .then((data) => { if (!cancelled) { setHealth(data); setHealthChecked(true); } })
+        .catch(() => { if (!cancelled) { setHealth(null); setHealthChecked(true); } });
+    };
+    probe();
+    const timer = window.setInterval(probe, 15000);
+    return () => { cancelled = true; window.clearInterval(timer); };
+  }, []);
   const bottomRef = useRef<HTMLDivElement>(null);
   // v3.0 批 12：下拉栏点击空白处自动收起（审批/模型/思考/附件）
   const composerRef = useClickOutsideAll([
@@ -782,6 +791,15 @@ export default function ChatPanel() {
   const wsMenuRef = useClickOutside(() => setWsMenuOpen(false));
   const scrollRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
+  // Long sessions can contain hundreds of markdown/tool rows. Keep only nearby rows mounted,
+  // while measuring expanded tool output so scroll positions remain stable.
+  const messageVirtualizer = useVirtualizer({
+    count: messages.length,
+    getScrollElement: () => scrollRef.current,
+    estimateSize: () => 220,
+    overscan: 8,
+    getItemKey: (index) => messages[index]?.id ?? index,
+  });
 
   /** v3：审批档位（全局，写入 config 即时生效） */
   const changeApprovalMode = async (mode: ApprovalMode) => {
@@ -842,8 +860,8 @@ export default function ChatPanel() {
   // 重复 Enter/双击可触发双 rewind + 双 sendChat（服务端同会话双发保护前存在竞态窗口）
   const busyRef = useRef(false);
   useEffect(() => {
-    if (atBottomRef.current) bottomRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [messages]);
+    if (atBottomRef.current && messages.length > 0) messageVirtualizer.scrollToIndex(messages.length - 1, { align: "end" });
+  }, [messageVirtualizer, messages]);
 
   // v3：聊天列过窄时隐藏定位浮标
   useEffect(() => {
@@ -858,29 +876,26 @@ export default function ChatPanel() {
 
   /** v3 定位浮标：滚动到第 i 条用户消息 */
   const scrollToUserMsg = (id: string) => {
-    scrollRef.current?.querySelector(`[data-infumsg="${id}"]`)?.scrollIntoView({ behavior: "smooth", block: "start" });
+    const index = messages.findIndex((message) => message.id === id);
+    if (index >= 0) messageVirtualizer.scrollToIndex(index, { align: "start" });
   };
 
   const scrollToBottom = () => {
-    bottomRef.current?.scrollIntoView({ behavior: "smooth" });
+    if (messages.length > 0) messageVirtualizer.scrollToIndex(messages.length - 1, { align: "end" });
+    else bottomRef.current?.scrollIntoView({ behavior: "smooth" });
   };
 
   // v2.9：streamdown 卡片包装去框（表格/代码块）——公共 hook（聊天区 + 子 Agent 共用）
   useCleanMarkdownBoxes(scrollRef, [messages]);
 
   /** v2.14 批 14：计算当前视口显示的「第几段对话」（视口上部 40% 内的最后一条用户消息） */
-  const updateActiveMsg = () => {
+  const updateActiveMsg = useCallback(() => {
     const el = scrollRef.current;
     if (!el) return;
-    const rect = el.getBoundingClientRect();
-    const anchors = [...el.querySelectorAll<HTMLElement>("[data-infumsg]")];
-    let active = 0;
-    for (let i = 0; i < anchors.length; i++) {
-      if (anchors[i].getBoundingClientRect().top - rect.top <= el.clientHeight * 0.4) active = i;
-      else break;
-    }
-    setActiveMsgIdx(active);
-  };
+    const firstVisible = messageVirtualizer.getVirtualItems()[0]?.index ?? 0;
+    const userBeforeView = messages.slice(0, firstVisible + 1).filter((message) => message.role === "user").length;
+    setActiveMsgIdx(Math.max(0, userBeforeView - 1));
+  }, [messages, messageVirtualizer]);
 
   const onScroll = () => {
     const el = scrollRef.current;
@@ -895,7 +910,7 @@ export default function ChatPanel() {
   // 消息变化（新回复/重放）后重新定位浮标
   useEffect(() => {
     updateActiveMsg();
-  }, [messages]);
+  }, [messages, updateActiveMsg]);
 
   /** 进入回滚待定态：锚点 = 被点轮次对应的最后一条用户消息（编辑重发 = 替换它），
    *  该用户消息及之后全部进入待回滚；输入框填充该消息原文。
@@ -1250,7 +1265,7 @@ export default function ChatPanel() {
       requestAnimationFrame(() => inputRef.current?.focus());
     };
     return (
-    <div ref={composerRef} className={`relative mx-auto w-full max-w-[780px] rounded-[20px] border bg-input px-4 pt-3 shadow-lv2 transition-[border-color,box-shadow] duration-150 ${hero ? "border-line/80 shadow-[0_4px_18px_rgba(0,0,0,0.05)]" : "border-line/60 focus-within:border-info/40 focus-within:shadow-[0_8px_30px_rgba(0,0,0,0.12)]"}`}>
+    <div ref={composerRef} className={`infu-composer relative mx-auto w-full max-w-[780px] rounded-[20px] border bg-input px-4 pt-3 shadow-lv2 transition-[border-color,box-shadow] duration-150 ${hero ? "border-line/80 shadow-[0_4px_18px_rgba(0,0,0,0.05)]" : "border-line/60 focus-within:border-info/40 focus-within:shadow-[0_8px_30px_rgba(0,0,0,0.12)]"}`}>
       {/* v2.14 批 10：回滚/编辑待定操作组（输入框左上；大胶囊双按钮——确认 / 取消） */}
       {(pendingRollback || editingSeq != null) && (
         <div className="absolute -top-8 left-2 z-20 flex items-center gap-1.5">
@@ -1511,11 +1526,12 @@ export default function ChatPanel() {
           <div className="relative flex h-full flex-col">
             <div className="shrink-0" style={{ WebkitAppRegion: "drag", height: "36px" } as React.CSSProperties} />
             <div className="relative flex min-h-0 flex-1 flex-col items-center justify-center px-6">
-            <div className="hero-glow" />
+              <div className="hero-glow" />
+              <div className="infu-infinity-bg" aria-hidden="true"><span>∞</span></div>
               <div className="relative flex flex-col items-center text-center">
-                <div className="mb-2 text-[13px] font-medium tracking-[0.16em] text-caption">INFINITE FUTURE · WORKSPACE</div>
-                <h1 className="text-[36px] font-semibold leading-[46px] tracking-[-0.04em] text-text">今天想推进什么？</h1>
-                <p className="mt-2 max-w-[460px] text-[14px] leading-6 text-sub">描述目标、附加上下文，InFu 会在当前项目中规划并执行。</p>
+                <div className="infinite-future-mark mb-3 text-[15px] font-medium tracking-[0.08em] text-text">infinite future</div>
+                <h1 className="text-[40px] font-semibold leading-[1.08] tracking-[-0.045em] text-text">把想法变成进展。</h1>
+                <p className="mt-3 max-w-[480px] text-[14px] leading-6 text-sub">从一个目标开始。InFu 会在你的工作区里读取上下文、拆解任务、执行改动，并留下可核验的证据。</p>
               </div>
              {/* 欢迎态只需确认执行位置：收为紧凑工作区选择器，不与主输入框争夺横向空间。 */}
              <div ref={wsMenuRef} className="relative mt-6 self-center">
@@ -1557,6 +1573,26 @@ export default function ChatPanel() {
                 )}
               </div>
              </div>
+             <div className="mt-5 grid w-full max-w-[780px] grid-cols-1 gap-2.5 sm:grid-cols-3">
+               <div className="welcome-card group">
+                 <span className="welcome-icon bg-info-soft text-info"><FolderKanban className="h-4 w-4" /></span>
+                 <div className="min-w-0"><div className="welcome-card-label">当前工作区</div><div className="truncate text-[13px] font-medium text-text">{root ? rootName : "尚未选择"}</div></div>
+                 <span className="welcome-card-meta">{projects.length} 个项目</span>
+               </div>
+               <div className="welcome-card group">
+                 <span className="welcome-icon bg-success-soft text-success"><Gauge className="h-4 w-4" /></span>
+                 <div className="min-w-0"><div className="welcome-card-label">执行引擎</div><div className="truncate text-[13px] font-medium text-text">{models.find((m) => m.id === modelId)?.name ?? "等待模型"}</div></div>
+                 <span className="welcome-card-meta">{models.length || 0} 可用</span>
+               </div>
+               <div className="welcome-card group">
+                 <span className="welcome-icon bg-warn-soft text-warn"><ShieldCheckIcon className="h-4 w-4" /></span>
+                 <div className="min-w-0"><div className="welcome-card-label">安全策略</div><div className="truncate text-[13px] font-medium text-text">{approvalMode === "full" ? "全权放行" : approvalMode === "confirm" ? "逐项确认" : "智能审批"}</div></div>
+                 <span className={`welcome-card-meta inline-flex items-center gap-1 ${!healthChecked ? "" : health ? "text-success" : "text-danger"}`} title={health ? `v${health.version ?? "unknown"} · ${health.tools ?? 0} 个工具` : healthChecked ? "无法连接到本地 Agent 服务" : "正在连接本地 Agent 服务"}>
+                   <span className={`h-1.5 w-1.5 rounded-full ${!healthChecked ? "bg-caption" : health ? "bg-success" : "bg-danger"}`} />
+                   {!healthChecked ? "检查中" : health ? `${health.sessions ?? sessions.length} 个会话` : "服务离线"}
+                 </span>
+               </div>
+             </div>
              {/* 输入动作与项目资源分层；首条发送后恢复底部固定 composer。 */}
              <div className="mt-2.5 w-full max-w-[780px]">{composer(true)}</div>
              <div className="mt-4 flex w-full max-w-[780px] flex-wrap gap-2 px-1">
@@ -1579,27 +1615,30 @@ export default function ChatPanel() {
           </div>
         ) : (
           /* ── 消息流（用户右侧气泡 r22 / 助手无气泡全宽） ── */
-          <div className="mx-auto flex max-w-[736px] flex-col gap-6 px-8 py-7">
-            {messages.map((m, idx) => {
+          <div className="infu-message-stream mx-auto w-full max-w-[780px] px-8 py-7" style={{ height: messageVirtualizer.getTotalSize(), position: "relative" }}>
+            {messageVirtualizer.getVirtualItems().map((virtualRow) => {
+              const idx = virtualRow.index;
+              const m = messages[idx];
               const pending = rmIdx >= 0 && idx >= rmIdx;
               const turnEnd = idx + 1 >= messages.length || messages[idx + 1].role === "user";
               return (
-                <MessageItem
-                  key={m.id}
-                  m={m}
-                  pending={pending}
-                  turnEnd={turnEnd}
-                  isLastUser={idx === lastUserIdx}
-                  isWorktreeTarget={idx === lastEditIdx}
-                  running={running}
-                  rollbackActive={pendingRollback != null}
-                  worktreeName={worktree?.name ?? null}
-                  mergeBusy={wtBusy}
-                  onAskRewind={askRewind}
-                  onStartEdit={startEdit}
-                  onMerge={doMerge}
-                  onDiscard={doDiscard}
-                />
+                <div key={m.id} ref={messageVirtualizer.measureElement} data-index={virtualRow.index} className="pb-6" style={{ position: "absolute", top: 0, left: 0, width: "100%", transform: `translateY(${virtualRow.start}px)` }}>
+                  <MessageItem
+                    m={m}
+                    pending={pending}
+                    turnEnd={turnEnd}
+                    isLastUser={idx === lastUserIdx}
+                    isWorktreeTarget={idx === lastEditIdx}
+                    running={running}
+                    rollbackActive={pendingRollback != null}
+                    worktreeName={worktree?.name ?? null}
+                    mergeBusy={wtBusy}
+                    onAskRewind={askRewind}
+                    onStartEdit={startEdit}
+                    onMerge={doMerge}
+                    onDiscard={doDiscard}
+                  />
+                </div>
               );
             })}
           </div>
@@ -1654,7 +1693,7 @@ export default function ChatPanel() {
 
       {/* ── 输入区（仅消息非空时渲染——hero 模式下输入框与 hero 内容一起居中） ── */}
       {messages.length > 0 && (
-      <div className="relative shrink-0 border-t border-line/50 bg-ink/92 px-8 pb-3 pt-3 backdrop-blur-sm">
+      <div className="infu-composer-host relative shrink-0 border-t border-line/50 bg-ink/92 px-8 pb-3 pt-3 backdrop-blur-sm">
         {/* 贴输入卡上方的渐隐遮罩（滚动内容渐入背景） */}
         <div
           className="pointer-events-none absolute -top-8 left-0 right-0 h-8"
@@ -1744,7 +1783,7 @@ const MessageItem = memo(function MessageItem({
   const reasoningActive = m.streaming && !m.tools.some((tool) => tool.status === "running");
   return m.role === "user" ? (
     /* 用户消息：右对齐气泡 + 下方悬停操作行（复制/回滚到此）；data-infumsg = 定位浮标锚点 */
-    <div data-infumsg={m.id} data-time-hover-root className={`group flex flex-col items-end transition-opacity duration-200 ${pending ? "opacity-40" : ""}`}>
+    <div data-infumsg={m.id} data-time-hover-root className={`message-item message-user group flex flex-col items-end transition-opacity duration-200 ${pending ? "opacity-40" : ""}`}>
       {pending && (
         <div className="mb-1 flex items-center gap-1 text-xs text-sub">
           <RotateCcw className="h-3 w-3" />
@@ -1794,7 +1833,7 @@ const MessageItem = memo(function MessageItem({
   ) : (
     /* 助手消息（v3：对齐 主流——turn 内连成一条连续流，无头像/无阶段徽标；
        操作行（复制/时间）只在 turn 末尾的总结消息后出现一次） */
-    <div data-time-hover-root className={`group transition-opacity duration-200 ${pending ? "opacity-40" : ""}`}>
+    <div data-time-hover-root className={`message-item message-assistant group transition-opacity duration-200 ${pending ? "opacity-40" : ""}`}>
       {/* 思考过程（折叠行；v3.5 常规设置 showThinking 可关闭） */}
       {m.reasoning && showThinking && <ReasoningBlock text={m.reasoning} running={reasoningActive} />}
       {/* v2.2 模型降级事件（v3.2：折叠行；展开显示原因明细） */}

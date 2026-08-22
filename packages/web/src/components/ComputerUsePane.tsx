@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { Monitor, MonitorUp, MousePointerClick, Keyboard, Move, AppWindow, ImageOff, ChevronDown } from "lucide-react";
+import { Monitor, MonitorUp, MousePointerClick, Keyboard, Move, AppWindow, ImageOff, ChevronDown, RefreshCw, AlertTriangle } from "lucide-react";
 import { useStore } from "../store";
 import { apiFetch, apiUrl } from "../api";
 
@@ -15,6 +15,8 @@ export default function ComputerUsePane() {
   const desktop = window.infuDesktop;
   const [shots, setShots] = useState<string[]>([]);
   const [logsOpen, setLogsOpen] = useState(false);
+  const [scanError, setScanError] = useState<string | null>(null);
+  const [scanning, setScanning] = useState(false);
   // Zustand selectors must return a stable empty value; allocating [] here causes React's
   // useSyncExternalStore snapshot loop and blanks the entire desktop-operation tab.
   const trace = useStore((s) => s.activeSessionId ? s.traceBySession[s.activeSessionId] ?? EMPTY_TRACE : EMPTY_TRACE);
@@ -28,16 +30,18 @@ export default function ComputerUsePane() {
     if (!desktop) return;
     let alive = true;
     const scan = async () => {
+      setScanning(true);
       try {
         const res = await apiFetch(`/api/screenshots?root=${encodeURIComponent(useStore.getState().root)}`);
-        if (!res.ok) return;
+        if (!res.ok) throw new Error(`截图服务返回 ${res.status}`);
         const list = (await res.json()) as string[];
         // 批 12：截图按会话对应——文件名带 <sid8>- 前缀，过滤当前会话；无前缀（旧/无会话）不显示
         const sid = useStore.getState().activeSessionId;
         const prefix = sid ? sid.replace(/[^a-zA-Z0-9-]/g, "").slice(0, 8) + "-" : "__none__";
         const mine = list.filter((n) => n.startsWith(`screen-${prefix}`));
-        if (alive) setShots(mine);
-      } catch { /* 目录不存在/未就绪 */ }
+        if (alive) { setShots(mine); setScanError(null); }
+      } catch (error) { if (alive) setScanError((error as Error).message || "无法读取桌面截图"); }
+      finally { if (alive) setScanning(false); }
     };
     scan();
     return () => { alive = false; };
@@ -81,9 +85,8 @@ export default function ComputerUsePane() {
           <Monitor className="h-4 w-4 text-info" />
           computer-use
         </div>
-        <div className="mt-0.5 text-xs leading-5 text-caption">
-          本任务的桌面操作和截图证据。全权放行（full）档已自动允许 screen_* 操作。
-        </div>
+        <div className="mt-0.5 flex items-center gap-2 text-xs leading-5 text-caption"><span className="min-w-0 flex-1">本任务的桌面操作和截图证据。</span><button className="flex h-6 w-6 shrink-0 items-center justify-center rounded-md text-sub hover:bg-hover hover:text-text" onClick={() => { setShots([]); setScanError(null); }} title="刷新截图列表"><RefreshCw className={`h-3.5 w-3.5 ${scanning ? "animate-spin" : ""}`} /></button></div>
+        {scanError && <div className="mt-2 flex items-start gap-1.5 rounded-lg border border-warn/25 bg-warn-soft/40 px-2 py-1.5 text-[11px] text-warn"><AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" /><span className="min-w-0 flex-1">{scanError}。请确认桌面端权限和项目工作区。</span></div>}
       </div>
 
       {/* 操作日志：折叠时只流动显示最近一条，展开后保留固定高度滚动区。 */}

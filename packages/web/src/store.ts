@@ -118,7 +118,7 @@ export interface AskState {
 }
 
 /** v2.9 右侧栏标签页（浏览器式）类型 */
-export type RightTabKind = "review" | "browser" | "subagent" | "subagents" | "computeruse" | "trace" | "attachment";
+export type RightTabKind = "review" | "browser" | "subagent" | "subagents" | "computeruse" | "trace" | "taskgraph" | "attachment";
 /** v2.9 右侧栏标签页：review=审查 / browser=浏览器（占位）/ subagent=子 Agent 详情 / subagents=子 Agent 列表 */
 export interface RightTab {
   id: string;
@@ -133,6 +133,10 @@ export interface QueueItem {
   id: string;
   text: string;
   ts: number;
+  /** 发送调度优先级：数字越大越先发送。 */
+  priority: "low" | "normal" | "high";
+  /** 依赖的队列项 ID；依赖未完成前不会自动出队。 */
+  dependsOn?: string[];
 }
 
 /** 设置弹窗 Tab（SettingsModal 导航；类型放 store 防 SettingsModal→store 循环 import） */
@@ -583,7 +587,7 @@ export const useStore = create<StoreState>()(
     set((s) => {
       const sid = s.activeSessionId ?? null;
       if (!sid) return {};
-      const item: QueueItem = { id: `q${++msgSeq}`, text, ts: Date.now() };
+      const item: QueueItem = { id: `q${++msgSeq}`, text, ts: Date.now(), priority: "normal" };
       return { queuesBySession: { ...s.queuesBySession, [sid]: [...(s.queuesBySession[sid] ?? []), item] } };
     }),
   removeQueueItem: (sid, id) =>
@@ -612,7 +616,17 @@ export const useStore = create<StoreState>()(
     const s = get();
     const q = s.queuesBySession[sid];
     if (!q || !q.length) return null;
-    const [item, ...rest] = q;
+    const rank = (item: QueueItem) => item.priority === "high" ? 2 : item.priority === "low" ? 0 : 1;
+    const done = new Set<string>();
+    // Dependencies point to earlier queue entries. Completed entries are absent;
+    // unresolved references intentionally keep the item blocked until edited.
+    const candidates = q.map((item, index) => ({ item, index }))
+      .filter(({ item }) => (item.dependsOn ?? []).every((id) => done.has(id) || !q.some((x) => x.id === id)))
+      .sort((a, b) => rank(b.item) - rank(a.item) || a.item.ts - b.item.ts);
+    const selected = candidates[0];
+    if (!selected) return null;
+    const item = selected.item;
+    const rest = q.filter((_, index) => index !== selected.index);
     set({ queuesBySession: { ...s.queuesBySession, [sid]: rest } });
     return item;
   },

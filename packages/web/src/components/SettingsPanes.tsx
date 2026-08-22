@@ -1331,7 +1331,7 @@ function fmtTokens(n: number): string {
 }
 
 // v3.0 UI 审查：模型调色板（横向条形图同日多模型并列条 + 底部图例；按模型名哈希稳定分配）
-const MODEL_COLORS = ["#22C55E", "#679EFE", "#F5A623", "#A78BFA", "#F472B6", "#34D399", "#F87171", "#38BDF8", "#FBBF24", "#E879F9"];
+const MODEL_COLORS = ["#679EFE", "#5FB8A5", "#D49A5B", "#8B86C9", "#B8758E"];
 function modelColor(model: string): string {
   let h = 0;
   for (let i = 0; i < model.length; i++) h = (h * 31 + model.charCodeAt(i)) >>> 0;
@@ -1368,11 +1368,11 @@ export function StatsPane() {
     </div>
   );
 
-  // v3.3 补 12（用户拍板）：统一标尺 8.5 亿 tokens = 100%——按天趋势 Y 轴上限固定
-  // 8.5 亿（不再随数据浮动），热力图色阶同样按 8.5 亿的比例分档（口径一致）：
-  // 日常消耗（几万-几十万 ≈ 0.1% 以下）落在最浅档，真·重度（>1.7 亿）才深色
-  const TOKEN_Y_MAX = 850_000_000;
-  /** 热力图档位说明（i = 档位+1：i 1-5 对应 8.5 亿的 0-20%/20-40%/40-60%/60-80%/80-100%；i 0 = 无） */
+  // 按当前范围自适应图表上限，并留出 25% 头部空间，避免日常用量被固定大数压扁。
+  // 下限 1M 保证低用量仍有可读的高度；热力图与柱图共享同一口径。
+  const rangePeak = Math.max(...(stats?.dailyTrend.map((d) => d.tokens) ?? [0]), 1);
+  const TOKEN_Y_MAX = Math.max(1_000_000, Math.ceil((rangePeak * 1.25) / 1000) * 1000);
+  /** 热力图档位说明（i = 档位+1：相对当前范围上限的 0-20%/20-40%/40-60%/60-80%/80-100%；i 0 = 无） */
   const LEVEL_HINTS = (i: number): string => {
     if (i === 0) return "无";
     const lo = fmtTokens((TOKEN_Y_MAX * ((i - 1) * 20)) / 100);
@@ -1455,9 +1455,7 @@ export function StatsPane() {
                 });
                 return { monday, days };
               });
-              // v3.3 补 12：色阶与按天趋势同标尺（8.5 亿 = 100% 等分 5 档）——
-              // level = floor(当日 / 8.5亿 × 5)：日常消耗（几十万 ≈ 0.1% 以下）落最浅档，
-              // 重度（>1.7 亿 = 20%）逐档加深；口径与趋势图 Y 轴一致（用户拍板）
+              // 色阶与按天趋势共享自适应标尺，低用量也能形成可见层次。
               const levelBg = (tokens: number) => {
                 if (tokens <= 0) return null;
                 const lvl = Math.min(4, Math.floor((tokens / TOKEN_Y_MAX) * 5));
@@ -1491,11 +1489,11 @@ export function StatsPane() {
               return (
                 <>
                   <div className="relative h-60">
-                    {/* 水平网格虚线（0/25/50/75/100%——相对固定上限 8.5 亿） */}
+                    {/* 水平网格虚线（0/25/50/75/100%——相对当前范围上限） */}
                     {[0, 0.25, 0.5, 0.75, 1].map((f) => (
                       <div key={f} className="absolute inset-x-0 border-t border-dashed border-line/50" style={{ bottom: `${f * 100}%` }} />
                     ))}
-                    {/* v3.3 补 12：Y 轴上限固定 8.5 亿（用户拍板）刻度小标 */}
+                    {/* 自适应 Y 轴上限，避免小用量被压扁 */}
                     <div className="absolute right-0 top-0 z-10 rounded bg-ink/80 px-1 text-[10px] leading-4 text-caption">
                       100% = {fmtTokens(TOKEN_Y_MAX)}
                     </div>

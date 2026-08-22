@@ -6,6 +6,22 @@ export default defineConfig(({ mode }) => {
   const token = process.env.INFU_LOCAL_TOKEN;
   return {
   plugins: [react(), tailwindcss()],
+  build: {
+    rollupOptions: {
+      output: {
+        // Keep the workbench shell small; expensive viewers load only when opened.
+        manualChunks(id) {
+          if (!id.includes("node_modules")) return;
+          if (id.includes("mermaid")) return "mermaid";
+          if (id.includes("streamdown") || id.includes("marked") || id.includes("shiki")) return "markdown";
+          if (id.includes("@xterm")) return "terminal";
+          if (id.includes("highlight.js")) return "highlight";
+          if (id.includes("lucide-react")) return "icons";
+          if (id.includes("react") || id.includes("scheduler")) return "react-vendor";
+        },
+      },
+    },
+  },
   server: {
     port: 5174,
     strictPort: true, // 端口被占用时直接报错而不是静默换端口

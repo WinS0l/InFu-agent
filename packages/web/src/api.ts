@@ -1,4 +1,4 @@
-import { readSseData, takeSseFrames, type AgentEvent, type RiskLevel, type SessionMeta, type StoredEvent } from "@infu/shared";
+import { readSseData, takeSseFrames, type AgentEvent, type JobAuditRecord, type RiskLevel, type SessionMeta, type StoredEvent, type TaskDependency, type TaskSnapshot } from "@infu/shared";
 import { useStore } from "./store";
 
 /**
@@ -38,6 +38,16 @@ async function apiFetch(input: RequestInfo | URL, init?: RequestInit): Promise<R
 // v3.0 审计修复（S7）：导出供 store/组件复用（裸 fetch 绕过 API_BASE，桌面 dev 端口错）
 export { apiFetch };
 
+export interface HealthInfo {
+  ok: boolean;
+  name: string;
+  version?: string;
+  uptimeSeconds?: number;
+  tools?: number;
+  sessions?: number;
+  diagnostics?: { database: "ready" | "degraded"; models: "configured" | "missing"; configuredModels: number; sandbox: "ready" | "unavailable"; browser: "ready" | "available" | "stopped" | "disabled" };
+}
+
 /**
  * v3.4 审计修复：资源 URL 生成（img/audio 等浏览器原生加载无法带 header）——
  * 生产模式（同端口）下 /api/* 有本地令牌校验，img 不带 X-InFu-Token 会 401；
@@ -48,6 +58,47 @@ export function apiUrl(p: string): string {
   const token = LOCAL_TOKEN;
   if (!token) return base;
   return `${base}${base.includes("?") ? "&" : "?"}token=${encodeURIComponent(token)}`;
+}
+
+/** 读取本地 Agent 状态；统一走 apiFetch 以兼容桌面开发端口和令牌鉴权。 */
+export async function fetchHealth(): Promise<HealthInfo> {
+  const res = await apiFetch("/api/health", { headers: { accept: "application/json" } });
+  if (!res.ok) throw new Error(`健康检查失败: ${res.status}`);
+  const data = await res.json() as Partial<HealthInfo>;
+  if (data.ok !== true) throw new Error("Agent 服务未就绪");
+  return {
+    ok: true,
+    name: typeof data.name === "string" ? data.name : "infu-agent",
+    version: typeof data.version === "string" ? data.version : undefined,
+    uptimeSeconds: typeof data.uptimeSeconds === "number" ? data.uptimeSeconds : undefined,
+    tools: typeof data.tools === "number" ? data.tools : undefined,
+    sessions: typeof data.sessions === "number" ? data.sessions : undefined,
+    diagnostics: typeof data.diagnostics === "object" && data.diagnostics !== null ? data.diagnostics as HealthInfo["diagnostics"] : undefined,
+  };
+}
+
+export async function fetchTaskSnapshot(sessionId: string): Promise<TaskSnapshot> {
+  const res = await apiFetch(`/api/sessions/${encodeURIComponent(sessionId)}/task-status`);
+  if (!res.ok) throw new Error(`任务状态加载失败: ${res.status}`);
+  return (await res.json() as { task: TaskSnapshot }).task;
+}
+
+export async function fetchJobAudits(sessionId: string): Promise<JobAuditRecord[]> {
+  const res = await apiFetch(`/api/sessions/${encodeURIComponent(sessionId)}/jobs`);
+  if (!res.ok) throw new Error(`任务审计加载失败: ${res.status}`);
+  return (await res.json() as { jobs: JobAuditRecord[] }).jobs ?? [];
+}
+
+export async function fetchTaskGraph(sessionId: string): Promise<TaskDependency[]> {
+  const res = await apiFetch(`/api/sessions/${encodeURIComponent(sessionId)}/task-graph`);
+  if (!res.ok) throw new Error(`任务依赖图加载失败: ${res.status}`);
+  return (await res.json() as { nodes: TaskDependency[] }).nodes ?? [];
+}
+
+export async function fetchCapabilities() {
+  const res = await apiFetch("/api/capabilities");
+  if (!res.ok) throw new Error(`能力声明加载失败: ${res.status}`);
+  return (await res.json() as { capabilities: import("@infu/shared").CapabilityDeclaration[] }).capabilities ?? [];
 }
 
 /** 加载模型列表 */

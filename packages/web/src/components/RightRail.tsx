@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { useClickOutside } from "./useClickOutside";
-import { Bot, FileSearch, Globe, Monitor, X, Loader2, Plus, PanelsTopLeft, ListTree } from "lucide-react";
+import { Bot, FileSearch, Globe, Monitor, X, Loader2, Plus, ListTree, Network, CheckCircle2, CircleAlert, CircleDotDashed } from "lucide-react";
 import { useStore, type RightTab } from "../store";
 import ReviewPane from "./ReviewPane";
 import SubagentThreadView from "./SubagentThreadView";
@@ -8,8 +8,22 @@ import BrowserPanel from "./BrowserPanel";
 import ComputerUsePane from "./ComputerUsePane";
 import SessionTracePane from "./SessionTracePane";
 import AttachmentPreviewPane from "./AttachmentPreviewPane";
+import { fetchTaskGraph } from "../api";
+import type { TaskDependency } from "@infu/shared";
 
-const EMPTY_TRACE: import("@infu/shared").StoredEvent[] = [];
+function TaskGraphPane() {
+  const sessionId = useStore((s) => s.activeSessionId);
+  const [nodes, setNodes] = useState<TaskDependency[]>([]);
+  const [selected, setSelected] = useState<string | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    if (!sessionId) { setNodes([]); return; }
+    void fetchTaskGraph(sessionId).then((value) => { if (!cancelled) setNodes(value); }).catch(() => { if (!cancelled) setNodes([]); });
+    return () => { cancelled = true; };
+  }, [sessionId]);
+  if (!nodes.length) return <div className="flex h-full flex-col items-center justify-center px-6 text-center"><Network className="h-8 w-8 text-sub" /><div className="mt-2 text-[13px] text-sub">暂无任务依赖</div><div className="mt-1 text-xs text-caption">任务开始执行后，这里会显示工具与后台任务的先后关系。</div></div>;
+  return <div className="min-h-0 flex-1 overflow-y-auto px-4 py-4"><div className="mb-3"><div className="text-[14px] font-semibold text-text">任务依赖图</div><div className="mt-1 text-xs text-sub">按执行审计链展示任务顺序，点击节点查看详情。</div></div><div className="relative space-y-2 pl-3">{nodes.map((node, index) => <div key={node.id} className="relative"><div className="absolute -left-3 top-0 h-full w-px bg-line/80" />{index < nodes.length - 1 && <div className="absolute -left-3 top-5 h-[calc(100%+8px)] w-px bg-info/30" />}<button onClick={() => setSelected(selected === node.id ? null : node.id)} className={`relative flex w-full items-center gap-2 rounded-xl border px-3 py-2 text-left transition-colors ${selected === node.id ? "border-info/45 bg-info-soft/45" : "border-line/70 bg-hover/35 hover:bg-hover"}`}><span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-lg bg-elevated text-sub">{node.status === "completed" ? <CheckCircle2 className="h-3.5 w-3.5 text-success" /> : node.status === "failed" ? <CircleAlert className="h-3.5 w-3.5 text-danger" /> : node.status === "running" ? <CircleDotDashed className="h-3.5 w-3.5 animate-spin text-info" /> : <Network className="h-3.5 w-3.5" />}</span><span className="min-w-0 flex-1"><span className="block truncate text-[12px] font-medium text-text">{node.label}</span><span className="block text-[10px] text-caption">{node.status} {node.dependsOn.length ? `· 依赖 ${node.dependsOn.length} 项` : "· 起始节点"}</span></span></button>{selected === node.id && <div className="ml-8 mt-1 rounded-lg bg-hover/40 px-2.5 py-2 text-[11px] text-sub">节点 ID：<span className="font-mono text-caption">{node.id}</span></div>}</div>)}</div></div>;
+}
 
 /**
  * v2.9 右侧栏（浏览器式）：顶部 tab 条（活动高亮 + 状态徽标 + 关闭 ×）+ 内容区。
@@ -73,89 +87,22 @@ function SubagentsList() {
  *  v3.2：主按钮（审查）独立区 + 分隔线 + 三个次按钮（更清晰的层级引导） */
 function RightRailEmpty() {
   const openRightTab = useStore((s) => s.openRightTab);
-  const messages = useStore((s) => s.messages);
-  const approvals = useStore((s) => s.approvals);
-  const activeSessionId = useStore((s) => s.activeSessionId);
-  const trace = useStore((s) => activeSessionId ? s.traceBySession[activeSessionId] ?? EMPTY_TRACE : EMPTY_TRACE);
-  const hasChanges = messages.some((message) => message.tools.some((tool) => tool.tool === "write_file" || tool.tool === "edit_file" || tool.tool === "file_ops"));
-  const hasTestRun = messages.some((message) => message.tools.some((tool) => tool.tool === "run_test"));
-  const hasFailedTest = messages.some((message) => message.tools.some((tool) => tool.tool === "run_test" && tool.status === "error"));
-  const pendingApprovals = approvals.filter((approval) => approval.sessionId === activeSessionId).length;
-  const backgroundRunning = trace.some(({ event }) => event.type === "job-start") && !trace.some(({ event }) => event.type === "job-done");
-  const btn =
-    "group flex w-full cursor-pointer items-center gap-3 rounded-lg px-2.5 py-2.5 text-left transition-colors hover:bg-hover";
+  const btn = "group flex min-h-[74px] w-full cursor-pointer items-center gap-3 rounded-2xl border border-line/60 bg-hover/35 px-4 py-3 text-left transition-colors hover:border-info/30 hover:bg-hover";
+  const items = [
+    { id: "review", label: "审查", sub: "查看改动与验证", icon: <FileSearch className="h-4 w-4" /> },
+    { id: "browser", label: "浏览器", sub: "页面与 Agent 协作", icon: <Globe className="h-4 w-4" /> },
+    { id: "subagents", label: "子 Agent", sub: "委派任务与过程", icon: <Bot className="h-4 w-4" /> },
+    { id: "computeruse", label: "桌面操作", sub: "截图与输入记录", icon: <Monitor className="h-4 w-4" /> },
+    { id: "trace", label: "会话追踪", sub: "事件与用量账本", icon: <ListTree className="h-4 w-4" /> },
+    { id: "taskgraph", label: "任务图", sub: "依赖与执行顺序", icon: <Network className="h-4 w-4" /> },
+  ] as const;
   return (
-    <div className="flex h-full flex-col px-5 pt-6">
-      <div className="mb-4 w-full">
-        <div className="mb-2 flex h-8 w-8 items-center justify-center rounded-lg bg-info-soft text-info"><PanelsTopLeft className="h-4 w-4" /></div>
-        <div className="text-[18px] font-semibold tracking-tight text-text">工作区</div>
-        <div className="mt-1 text-[13px] leading-5 text-sub">并排查看改动、浏览页面和跟踪执行过程。</div>
-      </div>
-      <div className="w-full">
-        {messages.length > 0 && (
-          <div className="mb-3 rounded-xl border border-line/70 bg-elevated/45 p-2.5">
-            <div className="mb-1.5 text-[11px] font-semibold tracking-[0.08em] text-caption">下一步</div>
-            <div className="space-y-0.5">
-              {hasChanges && (
-                <button className="flex w-full cursor-pointer items-center gap-2 rounded-lg px-1.5 py-1 text-left text-[12px] text-text transition-colors hover:bg-hover" onClick={() => openRightTab({ id: "review", kind: "review", label: "审查" })}>
-                  <FileSearch className="h-3.5 w-3.5 text-info" />
-                  <span className="min-w-0 flex-1">查看当前改动</span>
-                  <span className="text-caption">Diff →</span>
-                </button>
-              )}
-              {hasFailedTest && <button className="flex w-full cursor-pointer items-center gap-2 rounded-lg px-1.5 py-1 text-left text-[12px] text-danger transition-colors hover:bg-danger-soft" onClick={() => openRightTab({ id: "review", kind: "review", label: "审查" })}><FileSearch className="h-3.5 w-3.5" /><span className="min-w-0 flex-1">查看失败测试</span><span>→</span></button>}
-              {pendingApprovals > 0 && <button className="flex w-full cursor-pointer items-center gap-2 rounded-lg px-1.5 py-1 text-left text-[12px] text-warn transition-colors hover:bg-warn-soft" onClick={() => openRightTab({ id: "trace", kind: "trace", label: "会话追踪" })}><ListTree className="h-3.5 w-3.5" /><span className="min-w-0 flex-1">处理 {pendingApprovals} 项审批</span><span>→</span></button>}
-              {backgroundRunning && <button className="flex w-full cursor-pointer items-center gap-2 rounded-lg px-1.5 py-1 text-left text-[12px] text-text transition-colors hover:bg-hover" onClick={() => openRightTab({ id: "trace", kind: "trace", label: "会话追踪" })}><ListTree className="h-3.5 w-3.5 text-info" /><span className="min-w-0 flex-1">查看后台任务</span><span className="text-caption">运行中 →</span></button>}
-              <button className="flex w-full cursor-pointer items-center gap-2 rounded-lg px-1.5 py-1 text-left text-[12px] text-text transition-colors hover:bg-hover" onClick={() => openRightTab({ id: "browser", kind: "browser", label: "浏览器" })}>
-                <Globe className="h-3.5 w-3.5 text-info" />
-                <span className="min-w-0 flex-1">在浏览器中验证</span>
-                <span className="text-caption">打开 →</span>
-              </button>
-              {!hasTestRun && <div className="px-1.5 pt-1 text-[11px] leading-4 text-caption">尚未记录测试运行；可在对话中要求 InFu 补充验证。</div>}
-            </div>
-          </div>
-        )}
-        <button
-          className={`${btn} mb-2 border border-info/25 bg-info-soft/45 text-text hover:bg-info-soft`}
-          onClick={() => openRightTab({ id: "review", kind: "review", label: "审查" })}
-          title="查看代码改动（Diff）/ 文件改动记录 / 测试结果"
-        >
-          <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-info text-white shadow-lv1"><FileSearch className="h-4 w-4" /></span>
-          <span><span className="block text-[13px] font-semibold">审查改动</span><span className="mt-0.5 block text-xs text-sub">Diff、文件与测试结果</span></span>
-        </button>
-        <div className="my-2 border-t border-line/70" />
-        <button
-          className={btn}
-          onClick={() => openRightTab({ id: "browser", kind: "browser", label: "浏览器" })}
-          title="浏览器面板（桌面版提供）"
-        >
-          <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-hover text-info group-hover:bg-info-soft"><Globe className="h-4 w-4" /></span>
-          <span><span className="block text-[13px] font-semibold text-text">浏览器</span><span className="mt-0.5 block text-xs text-sub">让 Agent 与页面实时协作</span></span>
-        </button>
-        <button
-          className={btn}
-          onClick={() => openRightTab({ id: "subagents", kind: "subagents", label: "子 Agent" })}
-          title="查看子 Agent 列表与处理过程"
-        >
-          <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-hover text-info group-hover:bg-info-soft"><Bot className="h-4 w-4" /></span>
-          <span><span className="block text-[13px] font-semibold text-text">子 Agent</span><span className="mt-0.5 block text-xs text-sub">查看委派任务与执行过程</span></span>
-        </button>
-        <button
-          className={btn}
-          onClick={() => openRightTab({ id: "computeruse", kind: "computeruse", label: "桌面操作" })}
-          title="桌面操作（截图 → 视觉理解 → 点击/输入；仅桌面版）"
-        >
-          <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-hover text-info group-hover:bg-info-soft"><Monitor className="h-4 w-4" /></span>
-          <span><span className="block text-[13px] font-semibold text-text">桌面操作</span><span className="mt-0.5 block text-xs text-sub">截图、输入与 computer-use 记录</span></span>
-        </button>
-        <button
-          className={btn}
-          onClick={() => openRightTab({ id: "trace", kind: "trace", label: "会话追踪" })}
-          title="查看模型、工具、压缩和重试的原始事件账本"
-        >
-          <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-hover text-info group-hover:bg-info-soft"><ListTree className="h-4 w-4" /></span>
-          <span><span className="block text-[13px] font-semibold text-text">会话追踪</span><span className="mt-0.5 block text-xs text-sub">模型、工具与用量检查器</span></span>
-        </button>
+    <div className="infu-right-empty flex h-full flex-col items-center justify-center px-5 py-8">
+      <div className="mb-6 text-center"><div className="text-[20px] font-semibold tracking-tight text-text">打开标签页</div><div className="mt-1.5 text-[13px] text-sub">选择要在侧边面板中打开的标签。</div></div>
+      <div className="grid w-full max-w-[420px] grid-cols-1 gap-2.5 sm:grid-cols-2">
+        {items.map((item) => <button key={item.id} className={btn} onClick={() => openRightTab({ id: item.id, kind: item.id as RightTab["kind"], label: item.label })} title={item.sub}>
+          <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-sub">{item.icon}</span><span className="min-w-0"><span className="block text-[14px] font-medium text-text">{item.label}</span><span className="mt-0.5 block truncate text-[11px] text-caption">{item.sub}</span></span>
+        </button>)}
       </div>
     </div>
   );
@@ -192,10 +139,11 @@ export default function RightRail() {
     { id: "subagents", kind: "subagents" as const, label: "子 Agent", icon: <Bot className="h-4 w-4" /> },
     { id: "computeruse", kind: "computeruse" as const, label: "桌面操作", icon: <Monitor className="h-4 w-4" /> },
     { id: "trace", kind: "trace" as const, label: "会话追踪", icon: <ListTree className="h-4 w-4" /> },
+    { id: "taskgraph", kind: "taskgraph" as const, label: "任务图", icon: <Network className="h-4 w-4" /> },
   ];
 
   return (
-    <div className="flex h-full min-h-0 min-w-0 flex-col">
+    <div className="infu-right-rail flex h-full min-h-0 min-w-0 flex-col">
       {/* 打开工作 Tab 后才显示浏览器式标签条；空态保持一个安静的顶部工作区入口。 */}
       {rightTabs.length > 0 && <div
         className="relative flex h-9 shrink-0 items-end gap-1 border-b border-line/80 bg-ink px-2 pb-0.5"
@@ -309,6 +257,8 @@ export default function RightRail() {
           <ComputerUsePane />
         ) : active.kind === "trace" ? (
           <SessionTracePane />
+        ) : active.kind === "taskgraph" ? (
+          <TaskGraphPane />
         ) : active.kind === "attachment" ? (
           <AttachmentPreviewPane />
         ) : active.subagentId && thread ? (

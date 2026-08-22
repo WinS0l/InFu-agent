@@ -7,6 +7,8 @@ import ChatPanel from "./components/ChatPanel";
 import ApprovalModal from "./components/ApprovalModal";
 import AskModal from "./components/AskModal";
 import { TerminalToggleButton } from "./components/TerminalPanel";
+import CommandPalette from "./components/CommandPalette";
+import NotificationCenter from "./components/NotificationCenter";
 // v5.0（A5）：重组件懒加载（settings 弹窗 = SettingsPanes 1961 行 + ModelPane + 弹窗本身，
 // 首包约 500KB；CodeView 仅代码模式渲染）——首屏 bundle 显著减负
 const CodeView = lazy(() => import("./components/CodeView"));
@@ -37,6 +39,7 @@ export default function App() {
   const settingsTab = useStore((s) => s.settingsTab);
   const setSettingsTab = useStore((s) => s.setSettingsTab);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [commandOpen, setCommandOpen] = useState(false);
   const [dragging, setDragging] = useState(false);
   const loaded = useRef(false);
   const dragRef = useRef<{ side: "sidebar" | "details"; startX: number; startW: number } | null>(null);
@@ -51,7 +54,8 @@ export default function App() {
         if (!typing) useStore.getState().newSession();
       } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "k") {
         e.preventDefault();
-        focusSearch();
+        if (!typing) setCommandOpen(true);
+        else focusSearch();
       }
     };
     window.addEventListener("keydown", onKey);
@@ -253,7 +257,7 @@ export default function App() {
   const activeProject = projects.find((p) => normP(p.root) === normP(activeSession?.root ?? ""));
 
   return (
-    <div className="relative flex h-full flex-col overflow-hidden bg-ink">
+    <div className="infu-shell relative flex h-full flex-col overflow-hidden bg-ink">
       {/* v3.0 批 9.5：无独立标题栏——三栏顶部顶到最顶；窗口按钮 = 原生 titleBarOverlay
           （右上角悬浮），拖拽区分散到各栏顶部（Sidebar Logo 行 / Chat header / RightRail tab 条） */}
       {/* v2.14 批 5：底层装饰光晕（磨砂玻璃透出物——侧栏 backdrop-blur 后可见，玻璃质感来源） */}
@@ -288,7 +292,7 @@ export default function App() {
             {/* 顶部工作台栏：会话上下文、模式切换与右侧动作在同一视觉基线。 */}
             {hasMessages && (
               <header
-                className="relative flex h-10 shrink-0 items-center bg-sidebar px-4"
+                className="infu-topbar relative flex h-10 shrink-0 items-center bg-sidebar px-4"
                 style={{ WebkitAppRegion: "drag" } as React.CSSProperties}
               >
                 <span className="flex min-w-0 items-center gap-1.5 text-[13px] font-medium text-text" style={{ WebkitAppRegion: "no-drag" } as React.CSSProperties}>
@@ -339,7 +343,7 @@ export default function App() {
               </header>
             )}
             {/* 顶栏无额外底线；正文卡片自身上边线是唯一分隔，贴紧顶部并只在左侧圆角悬浮。 */}
-            <div className="ml-2 min-h-0 flex-1 overflow-hidden rounded-l-[22px] border border-r-0 border-line bg-ink shadow-[-5px_10px_26px_rgba(0,0,0,0.10),0_2px_6px_rgba(0,0,0,0.04)]">
+            <div className="infu-stage ml-2 min-h-0 flex-1 overflow-hidden rounded-l-[22px] border border-r-0 border-line bg-ink shadow-[-5px_10px_26px_rgba(0,0,0,0.10),0_2px_6px_rgba(0,0,0,0.04)]">
               <ChatPanel />
             </div>
           </div>
@@ -356,9 +360,9 @@ export default function App() {
         )}
         {/* 右详情栏：窗口级顶部与聊天顶栏连续无竖线；分隔线从正文共同的 y=40 基线才开始。 */}
         {hasMessages && viewMode === "chat" && (detailsOpen ? (
-          <aside className="row-span-2 flex min-h-0 min-w-0 flex-col bg-ink" style={{ gridColumn: 3 }}>
+          <aside className="infu-context-rail row-span-2 flex min-h-0 min-w-0 flex-col bg-ink" style={{ gridColumn: 3 }}>
             <div className="h-10 shrink-0 bg-sidebar" />
-            <div className="min-h-0 flex-1 border-l border-t border-line">
+            <div className="min-h-0 flex-1 border-t border-line">
               <Suspense fallback={<SuspenseFallback />}><RightRail /></Suspense>
             </div>
           </aside>
@@ -368,7 +372,7 @@ export default function App() {
         {/* 窗口级动作固定在原生控制区左侧：终端在前，右栏展开/收起紧随其后。 */}
         {hasMessages && viewMode === "chat" && (
           <div
-            className="absolute right-[140px] top-0 z-20 flex h-10 items-center gap-1 bg-sidebar pr-2"
+            className="infu-top-actions absolute right-[140px] top-0 z-20 flex h-10 items-center gap-1 bg-sidebar pr-2"
             style={{ WebkitAppRegion: "no-drag" } as React.CSSProperties}
           >
             <TerminalToggleButton open={terminalOpen} onClick={() => setTerminalOpen(!terminalOpen)} />
@@ -414,6 +418,8 @@ export default function App() {
       <ApprovalModal />
       {/* v2.6 收尾：Agent 执行中提问（ask_user 工具） */}
       <AskModal />
+      {commandOpen && <CommandPalette onClose={() => setCommandOpen(false)} onOpenSettings={() => { setSettingsTab("general"); setSettingsOpen(true); }} />}
+      <NotificationCenter />
       {settingsOpen && (
         <Suspense fallback={null}>
           <SettingsModal onClose={() => setSettingsOpen(false)} initialTab={settingsTab} />

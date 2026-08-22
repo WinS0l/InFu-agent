@@ -13,7 +13,7 @@ import { DatabaseSync } from "node:sqlite";
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
-import type { AgentEvent, SessionMeta, SessionStatus, StoredEvent } from "@infu/shared";
+import { deriveTaskSnapshot, type AgentEvent, type JobAuditRecord, type SessionMeta, type SessionStatus, type StoredEvent, type TaskSnapshot, type TaskDependency } from "@infu/shared";
 import { resolveDataDir } from "../data-dir.js";
 
 function defaultDbPath(): string {
@@ -110,6 +110,20 @@ export class SessionStore {
         PRIMARY KEY (session_id, seq)
       );
       CREATE INDEX IF NOT EXISTS idx_events_session ON events(session_id, seq);
+      CREATE TABLE IF NOT EXISTS job_audits (
+        id TEXT PRIMARY KEY,
+        session_id TEXT NOT NULL,
+        kind TEXT NOT NULL,
+        status TEXT NOT NULL,
+        started_at INTEGER NOT NULL,
+        ended_at INTEGER,
+        input_summary TEXT NOT NULL,
+        output_summary TEXT,
+        risk TEXT,
+        approval_id TEXT,
+        tool TEXT
+      );
+      CREATE INDEX IF NOT EXISTS idx_job_audits_session ON job_audits(session_id, started_at);
     `);
     // v2.6.1 幂等迁移：sessions 表加 pinned/archived 列（顶置/归档）
     const cols = this.db.prepare(`PRAGMA table_info(sessions)`).all().map((r: any) => r.name);
@@ -249,6 +263,7 @@ ${summary.slice(0, 2000)}`,
         )
         .get(sessionId, now, JSON.stringify(event), sessionId) as { seq: number } | undefined;
       this.db.prepare(`UPDATE sessions SET updated_at = ? WHERE id = ?`).run(now, sessionId);
+      this.syncJobAudit(sessionId, event, now);
       if (!nested) this.db.exec("COMMIT");
       seq = row ? Number(row.seq) : 0;
     } catch (e) {
@@ -276,12 +291,84 @@ ${summary.slice(0, 2000)}`,
     this.db.exec("BEGIN");
     try {
       this.db.prepare(`DELETE FROM events WHERE session_id = ?`).run(id);
+      this.db.prepare(`DELETE FROM job_audits WHERE session_id = ?`).run(id);
       this.db.prepare(`DELETE FROM sessions WHERE id = ?`).run(id);
       this.db.exec("COMMIT");
     } catch (e) {
       try { this.db.exec("ROLLBACK"); } catch { /* ignore */ }
       throw e;
     }
+  }
+
+  /** 将后台 job 事件镜像到审计表；事件流仍是事实来源，审计表只做可查询索引。 */
+  private syncJobAudit(sessionId: string, event: AgentEvent, now: number): void {
+    if (event.type === "job-start") {
+      this.db.prepare(`INSERT OR REPLACE INTO job_audits
+        (id, session_id, kind, status, started_at, input_summary)
+        VALUES (?, ?, 'command', 'running', ?, ?)`)
+        .run(event.id, sessionId, now, event.command.slice(0, 500));
+    } else if (event.type === "job-done") {
+      this.db.prepare(`UPDATE job_audits SET status = ?, ended_at = ?, output_summary = ? WHERE id = ? AND session_id = ?`)
+        .run(event.ok ? "completed" : "failed", now, `exit=${event.code ?? "null"}`, event.id, sessionId);
+    } else if (event.type === "tool-start") {
+      const id = event.callId ?? `tool:${sessionId}:${now}:${event.tool}`;
+      this.db.prepare(`INSERT OR REPLACE INTO job_audits
+        (id, session_id, kind, status, started_at, input_summary, risk, tool)
+        VALUES (?, ?, 'tool', 'running', ?, ?, ?, ?)`)
+        .run(id, sessionId, now, JSON.stringify(event.args).slice(0, 800), event.risk, event.tool);
+    } else if (event.type === "tool-result") {
+      const query = event.callId
+        ? `UPDATE job_audits SET status = ?, ended_at = ?, output_summary = ? WHERE id = ? AND session_id = ?`
+        : `UPDATE job_audits SET status = ?, ended_at = ?, output_summary = ? WHERE session_id = ? AND kind = 'tool' AND tool = ? AND status = 'running'`;
+      if (event.callId) this.db.prepare(query).run(event.ok ? "completed" : "failed", now, event.summary.slice(0, 800), event.callId, sessionId);
+      else this.db.prepare(query).run(event.ok ? "completed" : "failed", now, event.summary.slice(0, 800), sessionId, event.tool);
+    } else if (event.type === "subagent-start") {
+      this.db.prepare(`INSERT OR REPLACE INTO job_audits
+        (id, session_id, kind, status, started_at, input_summary, tool)
+        VALUES (?, ?, 'subagent', 'running', ?, ?, 'delegate_task')`)
+        .run(event.id, sessionId, now, event.prompt.slice(0, 800));
+    } else if (event.type === "subagent-done") {
+      this.db.prepare(`UPDATE job_audits SET status = ?, ended_at = ?, output_summary = ? WHERE id = ? AND session_id = ?`)
+        .run(event.ok ? "completed" : "failed", now, event.text.slice(0, 800), event.id, sessionId);
+    } else if (event.type === "approval-required") {
+      this.db.prepare(`UPDATE job_audits SET approval_id = ? WHERE session_id = ? AND status = 'running' ORDER BY started_at DESC LIMIT 1`)
+        .run(event.id, sessionId);
+    } else if (event.type === "approval-result" && !event.approved) {
+      this.db.prepare(`UPDATE job_audits SET status = 'cancelled', ended_at = ?, output_summary = '审批拒绝' WHERE approval_id = ? AND session_id = ?`)
+        .run(now, event.id, sessionId);
+    }
+  }
+
+  getTaskSnapshot(sessionId: string): TaskSnapshot | null {
+    const session = this.getSession(sessionId);
+    if (!session) return null;
+    const snapshot = deriveTaskSnapshot(this.getEvents(sessionId));
+    const audits = this.listJobAudits(sessionId, 100).reverse();
+    snapshot.dependencies = audits.map((job, index): TaskDependency => ({
+      id: job.id,
+      label: job.tool ?? job.inputSummary.slice(0, 80),
+      status: job.status === "running" ? "running" : job.status === "completed" ? "completed" : job.status === "failed" || job.status === "killed" ? "failed" : "pending",
+      dependsOn: index > 0 ? [audits[index - 1].id] : [],
+    }));
+    // 服务重启会把残留 running 标记为 stopped；非终态任务必须重新确认后才能继续。
+    if (session.status === "stopped" && ["queued", "planning", "executing", "waiting_approval", "verifying"].includes(snapshot.status)) {
+      snapshot.resumability = "needs_approval";
+      snapshot.blockedReason ??= "服务重启或任务中断后，需要重新确认才能继续";
+    }
+    return snapshot;
+  }
+
+  /** 查询指定会话的后台任务审计记录，供右栏/审查页使用。 */
+  listJobAudits(sessionId: string, limit = 100): JobAuditRecord[] {
+    const rows = this.db.prepare(`SELECT * FROM job_audits WHERE session_id = ? ORDER BY started_at DESC LIMIT ?`).all(sessionId, limit) as Array<Record<string, unknown>>;
+    return rows.map((row) => ({
+      id: String(row.id), sessionId: String(row.session_id), kind: row.kind as JobAuditRecord["kind"],
+      status: row.status as JobAuditRecord["status"], startedAt: Number(row.started_at),
+      endedAt: row.ended_at == null ? undefined : Number(row.ended_at),
+      inputSummary: String(row.input_summary), outputSummary: row.output_summary == null ? undefined : String(row.output_summary),
+      risk: row.risk as JobAuditRecord["risk"], approvalId: row.approval_id == null ? undefined : String(row.approval_id),
+      tool: row.tool == null ? undefined : String(row.tool),
+    }));
   }
 
   /** 更新会话状态（done/error/stopped/running） */

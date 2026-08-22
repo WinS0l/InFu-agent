@@ -1,6 +1,6 @@
 import { useRef, useState } from "react";
-import { GripVertical, Pencil, Send, X } from "lucide-react";
-import { useStore } from "../store";
+import { GripVertical, Pencil, Send, X, ArrowUp, ArrowDown, Minus } from "lucide-react";
+import { useStore, type QueueItem } from "../store";
 import { sendChat } from "../api";
 
 /**
@@ -57,6 +57,11 @@ export default function QueueDock() {
     useStore.getState().reorderQueue(activeSessionId, dragIdx, toIdx);
     setDragIdx(null);
   };
+  const cyclePriority = (id: string, current: QueueItem["priority"]) => {
+    if (!activeSessionId) return;
+    const next = current === "low" ? "normal" : current === "normal" ? "high" : "low";
+    useStore.setState((s) => ({ queuesBySession: { ...s.queuesBySession, [activeSessionId]: (s.queuesBySession[activeSessionId] ?? []).map((x) => x.id === id ? { ...x, priority: next } : x) } }));
+  };
 
   return (
     <div className="mx-auto mb-2 max-w-[780px] rounded-2xl border border-line bg-elevated p-1.5 shadow-lv1">
@@ -74,6 +79,9 @@ export default function QueueDock() {
             title="待发送（任务结束后自动发送；可拖拽调整顺序）"
           >
             <GripVertical className="h-3.5 w-3.5 shrink-0 cursor-grab text-caption" />
+            <button className={`flex h-5 w-5 shrink-0 items-center justify-center rounded-md transition-colors hover:bg-hover ${item.priority === "high" ? "text-danger" : item.priority === "low" ? "text-caption" : "text-info"}`} onClick={() => cyclePriority(item.id, item.priority)} title={`优先级：${item.priority === "high" ? "高" : item.priority === "low" ? "低" : "普通"}（点击切换）`}>
+              {item.priority === "high" ? <ArrowUp className="h-3 w-3" /> : item.priority === "low" ? <ArrowDown className="h-3 w-3" /> : <Minus className="h-3 w-3" />}
+            </button>
             {editingId === item.id ? (
               <input
                 ref={inputRef}

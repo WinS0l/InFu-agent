@@ -63,6 +63,18 @@ function mainActiveTab(): MainTabInfo | null {
   return mainTabs().find((t) => t.active) ?? mainTabs()[0] ?? null;
 }
 
+/** Lightweight liveness probe for diagnostics. It never creates a browser or
+ * reads page content: desktop mode checks the host registry and Web mode checks
+ * the retained Playwright page/process handles. */
+export function browserLiveness(): "ready" | "available" | "stopped" {
+  if (isDesktopMode()) {
+    const tabs = mainTabs();
+    return tabs.some((tab) => tab.id && tab.url !== "") ? "ready" : "available";
+  }
+  if (browser && page) return "ready";
+  return resolveChromiumPath() ? "available" : "stopped";
+}
+
 class DesktopTab implements BrowserTab {
   readonly id: string;
   private cdpClient: CdpClient;

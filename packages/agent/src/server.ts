@@ -22,7 +22,7 @@ import { inflateRawSync } from "node:zlib";
 import path from "node:path";
 import { execFile, execFileSync } from "node:child_process";
 import { promisify } from "node:util";
-import type { ModelConfig, AgentEvent, RiskLevel, InfuConfig, PhaseId, ProviderConfig, AttachmentMeta } from "@infu/shared";
+import { type ModelConfig, type AgentEvent, type RiskLevel, type InfuConfig, type PhaseId, type ProviderConfig, type AttachmentMeta } from "@infu/shared";
 import { loadConfig, saveConfig, resolveFallbackModels, resolveRoleModel, resolveRoleThinking, toRuntimeModel, resolveBaseURL, configPath } from "./providers/registry.js";
 import { resolveDataDir, defaultDataDir, migrateDataDir } from "./data-dir.js";
 import { autoNameSession } from "./session-naming.js";
@@ -2364,6 +2364,23 @@ const pendingQuestions = new Map<string, { sessionId: string; resolve: (answer: 
 
   // ── v2.3 批 2 skill 管理（SKILL.md 社区标准；列表来自用户级/项目级/显式引用）──
 
+  // 能力声明只返回名称、范围标签和环境变量键名，不返回路径、环境变量值或凭据。
+  app.get("/api/capabilities", (c) => {
+    const cfg = readConfigRaw();
+    const capabilities: Array<Record<string, unknown>> = [];
+    for (const p of cfg?.plugins ?? []) {
+      capabilities.push({ id: p.id, kind: "plugin", name: p.id, enabled: p.enabled !== false, tools: [], network: "unknown", writeScope: "unknown", envKeys: [], lastLoad: "unknown" });
+    }
+    for (const m of cfg?.mcpServers ?? []) {
+      capabilities.push({ id: m.id, kind: "mcp", name: m.name, enabled: m.enabled !== false, tools: [], network: m.type === "http" ? "remote" : "local", writeScope: "unknown", envKeys: Object.keys(m.env ?? {}), lastLoad: "unknown" });
+    }
+    try {
+      const root = opts.defaultRoot || process.cwd();
+      for (const s of listSkills(cfg, root)) capabilities.push({ id: s.name, kind: "skill", name: s.name, enabled: true, tools: [], network: "unknown", writeScope: "unknown", envKeys: [], lastLoad: "ok" });
+    } catch { /* 能力面板不可用时仍返回插件/MCP 声明 */ }
+    return c.json({ capabilities });
+  });
+
   // 可用技能列表（含显式引用与来源层级）
   app.get("/api/skills", async (c) => {
     const cfg = readConfigRaw();
@@ -2484,7 +2501,43 @@ const pendingQuestions = new Map<string, { sessionId: string; resolve: (answer: 
     return c.json({ ok: true });
   });
 
-  app.get("/api/health", (c) => c.json({ ok: true, name: "infu-agent", tools: Object.keys(TOOLS).length }));
+  app.get("/api/health", async (c) => {
+    const cfg = loadConfig();
+    let database = "ready";
+    try { getStore().listSessions(1); } catch { database = "degraded"; }
+    const configuredModels = cfg?.models?.filter((model) => Boolean(model.id)).length ?? 0;
+    let browser = cfg?.browser ? "available" : "disabled";
+    try {
+      const { browserLiveness } = await import("./plugin/browser/runtime.js");
+      if (cfg?.browser) browser = browserLiveness();
+    } catch { /* browser diagnostics must never make health fail */ }
+    return c.json({
+      ok: database === "ready", name: "infu-agent", version: "1.0.1", uptimeSeconds: Math.floor(process.uptime()),
+      tools: Object.keys(TOOLS).length, sessions: getStore().listSessions().filter((session) => session.status === "running").length,
+      diagnostics: { database, models: configuredModels > 0 ? "configured" : "missing", configuredModels, sandbox: await winRestrictedAvailable() ? "ready" : "unavailable", browser },
+    });
+  });
+
+  // 可查询的 Job 审计视图：完整输入/输出仍只在事件流中保留摘要，避免泄露会话正文。
+  app.get("/api/sessions/:id/jobs", (c) => {
+    const id = c.req.param("id");
+    if (!getStore().getSession(id)) return c.json({ message: "会话不存在" }, 404);
+    return c.json({ jobs: getStore().listJobAudits(id) });
+  });
+
+  app.get("/api/sessions/:id/task-status", (c) => {
+    const id = c.req.param("id");
+    const store = getStore();
+    if (!store.getSession(id)) return c.json({ message: "会话不存在" }, 404);
+    return c.json({ task: store.getTaskSnapshot(id) });
+  });
+
+  app.get("/api/sessions/:id/task-graph", (c) => {
+    const id = c.req.param("id");
+    const task = getStore().getTaskSnapshot(id);
+    if (!task) return c.json({ message: "会话不存在" }, 404);
+    return c.json({ nodes: task.dependencies ?? [] });
+  });
 
   // ── 静态托管（桌面端同端口托管 web dist：前端相对路径 fetch 零改动）──
   if (opts.staticDir) {

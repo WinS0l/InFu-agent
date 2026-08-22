@@ -59,7 +59,7 @@ jobs:
         run: npm run visual:baseline -w @infu/web
         env:
           INFU_PREVIEW_URL: http://127.0.0.1:5174/
-          INFU_VISUAL_OUTPUT_DIR: packages/web/artifacts/visual-current
+          INFU_VISUAL_OUTPUT_DIR: artifacts/visual-current
 
       - name: Compare visual baseline pixels
         shell: pwsh
@@ -74,8 +74,8 @@ jobs:
           }
         env:
           INFU_PREVIEW_URL: http://127.0.0.1:5174/
-          INFU_VISUAL_OUTPUT_DIR: packages/web/artifacts/visual-compare
-          INFU_VISUAL_REFERENCE_DIR: packages/web/artifacts/visual-reference
+          INFU_VISUAL_OUTPUT_DIR: artifacts/visual-compare
+          INFU_VISUAL_REFERENCE_DIR: artifacts/visual-reference
           INFU_VISUAL_THRESHOLD: "0.001"
 
       - name: Upload visual baselines

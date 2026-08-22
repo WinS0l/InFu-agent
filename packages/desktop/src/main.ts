@@ -112,14 +112,14 @@ function saveWindowState(win: BrowserWindow) {
   } catch { /* 忽略 */ }
 }
 
-// 原生最小化/最大化/关闭控制带独立于 40px 工作台基线，保持更紧凑的 32px 高度。
-const TITLEBAR_HEIGHT = 32;
+// 原生窗口控制区与工作台顶部共用同一条 40px 基线，避免右上角形成独立色块。
+const TITLEBAR_HEIGHT = 40;
 
 // ── 主题联动：原生按钮区、窗口底色与 renderer 顶部使用同一个纯色表面。──
 function themeOverlayColors(theme: string) {
   return theme === "light"
-    ? { color: "#F9FAFB", symbolColor: "#0F1115" }
-    : { color: "#1B1B1C", symbolColor: "#F9FAFB" };
+    ? { color: "#F2F7F7", symbolColor: "#0F1115" }
+    : { color: "#1A2021", symbolColor: "#F9FAFB" };
 }
 function applyThemeOverlay(win: BrowserWindow, theme?: string) {
   try {

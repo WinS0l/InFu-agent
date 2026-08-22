@@ -186,19 +186,19 @@ body {
   padding-inline: 8px;
 }
 .infu-topbar {
-  height: 52px !important;
+  height: 40px !important;
   border-bottom: 1px solid var(--border-l2);
-  background: color-mix(in srgb, var(--bg-base) 94%, var(--bg-sidebar)) !important;
+  background: var(--bg-sidebar) !important;
 }
 .infu-top-actions {
-  height: 52px !important;
-  background: color-mix(in srgb, var(--bg-base) 94%, var(--bg-sidebar)) !important;
+  height: 40px !important;
+  background: var(--bg-sidebar) !important;
 }
 .infu-stage {
   margin-left: 8px !important;
   border: 1px solid var(--border-l2) !important;
   border-radius: 26px 0 0 26px !important;
-  box-shadow: 0 10px 28px rgba(0,0,0,.08) !important;
+  box-shadow: -2px 8px 18px rgba(0,0,0,.045) !important;
   background: var(--bg-base) !important;
 }
 .infu-context-rail {
@@ -206,7 +206,7 @@ body {
   background: color-mix(in srgb, var(--bg-base) 97%, var(--bg-sidebar)) !important;
 }
 .infu-context-rail > :first-child {
-  height: 52px !important;
+  height: 40px !important;
   background: transparent !important;
 }
 .infu-composer {

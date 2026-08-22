@@ -17,6 +17,7 @@ export default function ComputerUsePane() {
   const [logsOpen, setLogsOpen] = useState(false);
   const [scanError, setScanError] = useState<string | null>(null);
   const [scanning, setScanning] = useState(false);
+  const [refreshTick, setRefreshTick] = useState(0);
   // Zustand selectors must return a stable empty value; allocating [] here causes React's
   // useSyncExternalStore snapshot loop and blanks the entire desktop-operation tab.
   const trace = useStore((s) => s.activeSessionId ? s.traceBySession[s.activeSessionId] ?? EMPTY_TRACE : EMPTY_TRACE);
@@ -45,7 +46,7 @@ export default function ComputerUsePane() {
     };
     scan();
     return () => { alive = false; };
-  }, [desktop, shotTick, activeSessionId]);
+  }, [desktop, shotTick, activeSessionId, refreshTick]);
 
   // The event ledger is durable. Show only the current task, starting from its last user message.
   const ops = useMemo(() => {
@@ -85,7 +86,7 @@ export default function ComputerUsePane() {
           <Monitor className="h-4 w-4 text-info" />
           computer-use
         </div>
-        <div className="mt-0.5 flex items-center gap-2 text-xs leading-5 text-caption"><span className="min-w-0 flex-1">本任务的桌面操作和截图证据。</span><button className="flex h-6 w-6 shrink-0 items-center justify-center rounded-md text-sub hover:bg-hover hover:text-text" onClick={() => { setShots([]); setScanError(null); }} title="刷新截图列表"><RefreshCw className={`h-3.5 w-3.5 ${scanning ? "animate-spin" : ""}`} /></button></div>
+        <div className="mt-0.5 flex items-center gap-2 text-xs leading-5 text-caption"><span className="min-w-0 flex-1">本任务的桌面操作和截图证据。</span><button className="flex h-6 w-6 shrink-0 items-center justify-center rounded-md text-sub hover:bg-hover hover:text-text" onClick={() => { setShots([]); setScanError(null); setRefreshTick((value) => value + 1); }} title="刷新截图列表"><RefreshCw className={`h-3.5 w-3.5 ${scanning ? "animate-spin" : ""}`} /></button></div>
         {scanError && <div className="mt-2 flex items-start gap-1.5 rounded-lg border border-warn/25 bg-warn-soft/40 px-2 py-1.5 text-[11px] text-warn"><AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" /><span className="min-w-0 flex-1">{scanError}。请确认桌面端权限和项目工作区。</span></div>}
       </div>
 

@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { ArrowLeft, ArrowRight, RotateCw, X, Globe, Braces, MoreHorizontal, Smartphone, Tablet, Monitor, Plus, ExternalLink, Maximize2, Minus } from "lucide-react";
 import { useStore } from "../store";
 import { useClickOutside } from "./useClickOutside";
-import type { BrowserViewState, InfuWebviewElement } from "../desktop";
+import type { InfuWebviewElement } from "../desktop";
 
 /**
  * 嵌入式真浏览器面板（v3.0 批 8 定稿：<webview> 元素 + 主进程 CDP 桥）
@@ -30,7 +30,6 @@ interface Tab {
   active: boolean;
   pending?: boolean;
 }
-const EMPTY: BrowserViewState = { tabs: [], active: null };
 
 /** 地址栏显示过滤：起始页（data:）显示占位 */
 function displayUrl(url: string): string {
@@ -90,7 +89,6 @@ export default function BrowserPanel({ active: isActive }: { active: boolean }) 
   const seqRef = useRef(0);
   const tabsRef = useRef(tabs);
   tabsRef.current = tabs;
-  const openRightTab = useStore((s) => s.openRightTab);
 
   const active = tabs.find((t) => t.active) ?? null;
   const activeEl = active ? wvRefs.current.get(active.id) : undefined;
@@ -196,7 +194,6 @@ export default function BrowserPanel({ active: isActive }: { active: boolean }) 
     autoCreatedRef.current = true;
     createTab();
     // createTab only appends one local tab. StrictMode is guarded by the ref above.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [desktop, isActive, tabs.length]);
 
   /** webview 元素挂载后初始化（React 19 对 webview 属性用 property 会丢失 → setAttribute） */

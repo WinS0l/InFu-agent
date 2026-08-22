@@ -248,6 +248,7 @@ const usageAgg = { cacheHit: 0, cacheMiss: 0, promptTokens: 0, completionTokens:
       // v3.1：附件引用文本 + 图片视觉 parts
       prompt: execPromptInput(attachText(prompt)),
       tools: executorTools ? withMcpTools(TOOLS, executorTools) : TOOLS,
+      pinnedToolNames: Object.keys(TOOLS),
       hooks,
       root,
       projectRoot,
@@ -471,6 +472,7 @@ const usageAgg = { cacheHit: 0, cacheMiss: 0, promptTokens: 0, completionTokens:
     // v3.1：附件图片仅 Executor 阶段走视觉
     prompt: execPromptInput(execPrompt),
     tools: executorTools ? withMcpTools(TOOLS, executorTools) : TOOLS,
+    pinnedToolNames: Object.keys(TOOLS),
     hooks,
     root,
     projectRoot,

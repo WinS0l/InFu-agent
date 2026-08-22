@@ -19,7 +19,7 @@ import { streamChatWithFailover, ModelChain, type ModelCandidate } from "../prov
 import { zodToJsonSchema, isContextWindowExceeded, type ChatMessageLike } from "../providers/chat.js";
 import { resolveContextWindow, buildThinkingParamsForModel, mapThinkingLevel } from "../providers/registry.js";
 import {
-  compressMessages, estimateTokens, SUMMARIZE_PROMPT,
+  compressMessages, estimateTokens, pruneHistoricalToolResults, SUMMARIZE_PROMPT,
   COMPRESS_TRIGGER_RATIO,
   recordUsageCalibration, contextCalibrationFactor,
 } from "./context.js";
@@ -60,6 +60,10 @@ export interface AgentRunOptions {
   /** 初始对话消息（v2.2 断点恢复/继续会话的消息级重建；提供时追加在 system 之后，prompt 作为新 user 消息在最后） */
   initialMessages?: ChatMessageLike[];
   tools: Record<string, ToolDef>;
+  /** 工具面策略：auto 在大型 MCP/插件注册表中按任务收窄；all 保持全部工具（调试/兼容）。 */
+  toolSelection?: "auto" | "all";
+  /** auto 模式必须保留的宿主工具；扩展工具只在语义命中时进入模型工具面。 */
+  pinnedToolNames?: string[];
   /** 项目根目录（工具操作边界） */
   root: string;
   /** 项目归属根目录（worktree 执行时用于项目记忆/历史；缺省等同 root） */
@@ -123,6 +127,58 @@ export interface RunResult {
   }>;
   /** v3：LLM usage 聚合（DeepSeek 缓存命中统计 → StatsLine 命中率；v2.12 四桶） */
   usage?: { cacheHit: number; cacheMiss: number; promptTokens: number; completionTokens: number };
+}
+
+/**
+ * 可用于离线评测、会话诊断和未来统计页的运行指标。
+ * 只从结构化工具审计与 provider usage 计算，不从最终自然语言猜测任务是否成功。
+ */
+export interface AgentRunMetrics {
+  toolCalls: number;
+  failedToolCalls: number;
+  recoveryGuidanceCount: number;
+  verificationCount: number;
+  passedVerificationCount: number;
+  deniedApprovals: number;
+  totalTokens: number;
+  cacheHitRate: number | null;
+}
+
+export function summarizeAgentMetrics(result: Pick<RunResult, "toolLogs" | "approvals" | "usage">): AgentRunMetrics {
+  const failedToolCalls = result.toolLogs.filter((log) => isToolResultFailure(log.ok, log.summary)).length;
+  const verificationLogs = result.toolLogs.filter((log) => log.tool === "run_test" || log.verification);
+  const passedVerificationCount = verificationLogs.filter((log) => log.tool === "run_test" ? log.ok : log.verification?.status === "passed").length;
+  const cacheHit = result.usage?.cacheHit ?? 0;
+  const cacheMiss = result.usage?.cacheMiss ?? 0;
+  return {
+    toolCalls: result.toolLogs.length,
+    failedToolCalls,
+    recoveryGuidanceCount: result.toolLogs.filter((log) => log.summary.includes("[恢复建议：")).length,
+    verificationCount: verificationLogs.length,
+    passedVerificationCount,
+    deniedApprovals: result.approvals.denied,
+    totalTokens: (result.usage?.promptTokens ?? 0) + (result.usage?.completionTokens ?? 0),
+    cacheHitRate: cacheHit + cacheMiss > 0 ? cacheHit / (cacheHit + cacheMiss) : null,
+  };
+}
+
+const SOURCE_FILE_RE = /\.(?:[cm]?[jt]sx?|py|go|rs|java|kt|kts|cs|cpp|cc|c|h|hpp|vue|svelte)$/i;
+
+/** 最后一次源代码写入之后是否缺少成功验证。 */
+export function needsFreshVerification(toolLogs: RunResult["toolLogs"]): boolean {
+  let lastMutation = -1;
+  let lastPassedVerification = -1;
+  for (let i = 0; i < toolLogs.length; i++) {
+    const log = toolLogs[i];
+    if (
+      (log.tool === "write_file" || log.tool === "edit_file") &&
+      log.ok &&
+      typeof log.args.path === "string" &&
+      SOURCE_FILE_RE.test(log.args.path)
+    ) lastMutation = i;
+    if ((log.tool === "run_test" && log.ok) || log.verification?.status === "passed") lastPassedVerification = i;
+  }
+  return lastMutation >= 0 && lastPassedVerification < lastMutation;
 }
 
 /** 从已执行工具、Todo 与审批结果生成交付摘要；绝不从模型回复文本推断任务状态。 */
@@ -247,7 +303,9 @@ Agent Team 拆解纪律（v6.0 S3，复杂任务的并行协作模式）：
 
 修复与自检闭环（v5.0）：
 17. 任务涉及「修复测试失败/报错」时按收敛闭环执行：先 run_test 复现失败 → 根据失败信息定位修复 → 再 run_test 验证 → 循环直到全绿；连续 3 轮无进展必须**改变策略**（换方案/换文件/缩小范围）或如实说明卡点，不要原样重试同一命令。
-18. 交付前自检：仅当本轮实际改动过代码且项目有测试框架时，交付前用 run_test 验证一次；用户只要求打开页面、启动服务、查看内容或执行单一动作时，完成该动作后停止，不要擅自打开浏览器、截图或扩展为验证任务。`;
+18. 交付前自检：仅当本轮实际改动过代码且项目有测试框架时，交付前用 run_test 验证一次；用户只要求打开页面、启动服务、查看内容或执行单一动作时，完成该动作后停止，不要擅自打开浏览器、截图或扩展为验证任务。
+19. 工具返回错误时，先读取其中的「恢复建议」并改变路径、参数、权限条件或方法；同一参数的失败不可重试。无法恢复时说明已验证的事实和下一步所需条件。
+20. 浏览器/桌面任务按闭环执行：先 snapshot 或 screen_tree 获取当前可观察状态，执行操作后立即 browser_verify 或 screen_verify；验证失败时刷新状态再调整定位，禁止依据旧坐标、旧编号或猜测宣布成功。`;
 
 /**
  * v3.1 附件：用户消息内容 parts（text + 图片视觉 base64）。
@@ -360,6 +418,75 @@ export function trimToolResult(out: string, max = TRIM_TOOL_RESULT): string {
   return out.slice(0, head) + `\n…（中间输出已截断，完整内容见会话记录；共 ${out.length} 字符）…\n` + out.slice(-tail);
 }
 
+// 大型 MCP/插件注册表会让工具 schema 既吃 token 又干扰选择。小注册表始终完整保留；
+// 大注册表只投放核心能力及与用户任务语义命中的工具。这只影响模型可见面，执行端
+// 的审批、路径和沙箱策略仍是安全边界。
+const TOOL_AUTO_LIMIT = 64;
+const TOOL_SELECTION_LIMIT = 72;
+const TOOL_CORE = new Set([
+  "project_tree", "project_scan", "list_directory", "glob", "read_file", "read_files", "search_code",
+  "git_status", "git_diff", "write_file", "edit_file", "file_ops", "run_test", "todo_write", "ask_user",
+]);
+const TOOL_INTENT: Array<{ words: string[]; hints: string[] }> = [
+  { words: ["浏览器", "网页", "网站", "browser", "url", "登录", "下载", "上传"], hints: ["browser"] },
+  { words: ["桌面", "屏幕", "窗口", "鼠标", "键盘", "ocr", "截图", "desktop", "screen", "window"], hints: ["screen", "ocr", "vision"] },
+  { words: ["git", "提交", "分支", "commit", "diff", "合并"], hints: ["git_"] },
+  { words: ["测试", "test", "验证", "构建", "build", "lint"], hints: ["test", "lint", "build", "verify"] },
+  { words: ["搜索", "查找", "search", "索引", "symbol", "引用", "reference"], hints: ["search", "glob", "symbol", "lsp_"] },
+  { words: ["终端", "命令", "shell", "command", "powershell", "npm"], hints: ["command", "terminal", "shell", "job_"] },
+];
+
+export function selectRelevantTools(
+  tools: Record<string, ToolDef>,
+  prompt: string,
+  mode: "auto" | "all" = "auto",
+  pinnedToolNames: readonly string[] = [],
+): Record<string, ToolDef> {
+  const entries = Object.entries(tools);
+  if (mode === "all" || entries.length <= TOOL_AUTO_LIMIT) return tools;
+  const lower = prompt.toLowerCase();
+  const pinned = new Set(pinnedToolNames);
+  const selected = new Set(entries.filter(([name]) => TOOL_CORE.has(name) || pinned.has(name)).map(([name]) => name));
+  const rank = (name: string, tool: ToolDef): number => {
+    const haystack = `${name} ${tool.description}`.toLowerCase();
+    let score = lower.includes(name.toLowerCase()) ? 100 : 0;
+    for (const group of TOOL_INTENT) {
+      if (group.words.some((word) => lower.includes(word)) && group.hints.some((hint) => haystack.includes(hint))) score += 30;
+    }
+    for (const word of lower.match(/[a-z][a-z0-9_-]{2,}/g) ?? []) if (haystack.includes(word)) score += 4;
+    return score;
+  };
+  const ranked = entries
+    .filter(([name]) => !selected.has(name))
+    .map(([name, tool]) => ({ name, score: rank(name, tool) }))
+    .filter((entry) => entry.score > 0)
+    .sort((a, b) => b.score - a.score || a.name.localeCompare(b.name));
+  for (const entry of ranked) {
+    if (selected.size >= TOOL_SELECTION_LIMIT) break;
+    selected.add(entry.name);
+  }
+  // 没有命中时仍补入稳定排序的工具，避免泛化任务因工具面过窄而失能。
+  for (const [name] of entries.sort(([a], [b]) => a.localeCompare(b))) {
+    if (selected.size >= TOOL_SELECTION_LIMIT) break;
+    selected.add(name);
+  }
+  return Object.fromEntries(entries.filter(([name]) => selected.has(name)));
+}
+
+/** 把典型运行失败转成可执行的恢复线索，提示模型改变策略而非盲目重试。 */
+export function withFailureRecoveryHint(out: string, ok: boolean): string {
+  if (!isToolResultFailure(ok, out) || /恢复建议：/.test(out)) return out;
+  const lower = out.toLowerCase();
+  let hint: string | undefined;
+  if (/不存在|not found|enoent|no such file/.test(lower)) hint = "先用 project_tree、glob 或 search_code 确认路径/名称，再改参数；不要原样重试。";
+  else if (/权限|拒绝|access denied|eperm|eacces/.test(lower)) hint = "检查路径作用域和审批状态；需要时请求用户授权，或改用允许的目录/工具。";
+  else if (/超时|timeout|timed out/.test(lower)) hint = "缩小查询/命令范围，检查后台任务状态；不要立刻重复同一长操作。";
+  else if (/网络|network|fetch failed|connect|连接/.test(lower)) hint = "检查联网策略与服务状态；仅在条件变化后重试，或采用离线替代方案。";
+  else if (/测试失败|test failed|\bfailed\b/.test(lower)) hint = "先阅读失败断言和相关 diff，修复最小原因后再运行针对性验证。";
+  else if (/参数|schema|validation/.test(lower)) hint = "根据错误逐项修正参数类型/字段；不要复用原参数。";
+  return hint ? `${out}\n\n[恢复建议：${hint}]` : out;
+}
+
 // ── v2.12 工具 schema 精简（Token 成本杠杆：MCP 大 schema 可吃 67K token）──
 // 纯裁剪（不影响工具执行——执行端直接读 args，不依赖 schema 完整）；只作用于
 // 组装给模型的 JSON Schema，zod 原 schema（事件/落库/校验）不动。
@@ -444,7 +571,7 @@ export async function runAgent(opts: AgentRunOptions): Promise<RunResult> {
     emit, requestApproval, maxSteps = 30, abortSignal,
     phase, suppressFinal = false, initialMessages, thinkingLevel = 2, hooks,
     delegationDepth = 0, scopeRules, askUser, extraReadDirs, sessionId, agentChannel, sandboxMode,
-    taskTokenBudget = 0,
+    taskTokenBudget = 0, toolSelection = "auto", pinnedToolNames = [],
   } = opts;
 
   /**
@@ -551,7 +678,8 @@ export async function runAgent(opts: AgentRunOptions): Promise<RunResult> {
   // v2.12：schema 精简（compactJsonSchema）——MCP/插件大 schema 吃大量 token 的最大成本杠杆；
   // 工具 description 也截断（内置工具手写描述普遍 <800 无感，MCP 超长被裁）
   // 固定工具序列化顺序：扩展加载顺序变化不应打碎提供商的 prompt/KV cache 前缀。
-  const allowed = Object.entries(tools).sort(([a], [b]) => a.localeCompare(b));
+  const selectedTools = selectRelevantTools(tools, promptText(prompt), toolSelection, pinnedToolNames);
+  const allowed = Object.entries(selectedTools).sort(([a], [b]) => a.localeCompare(b));
   const openaiTools = allowed.map(([name, t]) => ({
     type: "function" as const,
     function: {
@@ -575,6 +703,14 @@ export async function runAgent(opts: AgentRunOptions): Promise<RunResult> {
    * v3.2：force=true 强制压缩一次（API 400 上下文超限时——估算可能低估，直接压到目标）。
    */
   const ensureContextBudget = async (force = false): Promise<boolean> => {
+    // 常规长任务的成本控制：即使远未达到 1M 上下文窗口，也不反复发送很早的
+    // 大型工具输出。最近 6 条保持完整，历史细节仍可从无损事件流恢复。
+    const historicalPruned = pruneHistoricalToolResults(messages);
+    if (historicalPruned !== messages) {
+      const before = estimateTokens(messages);
+      messages = historicalPruned;
+      emit({ type: "context-compressed", before, after: estimateTokens(messages), summary: "" });
+    }
     const window = resolveContextWindow({
       provider: chain.active.provider as any,
       model: chain.active.model,
@@ -655,6 +791,7 @@ export async function runAgent(opts: AgentRunOptions): Promise<RunResult> {
   // than throwing. Two unchanged failures require the model to change parameters or strategy.
   const sameCallFailures = new Map<string, number>();
   const toolDiffs = new Map<string, { added: number; removed: number }>();
+  let verificationGateUsed = false;
 
   // 审批计数（包装 requestApproval），工具层走计数版
   const guardedApproval = async (
@@ -866,6 +1003,20 @@ export async function runAgent(opts: AgentRunOptions): Promise<RunResult> {
       });
 
     if (!calls.length) {
+      // 发布级交付门禁：源代码写入后没有任何成功验证时，给模型一次补验证机会。
+      // 只触发一次，避免无测试框架或用户明确不要求测试时形成无限循环。
+      if (!verificationGateUsed && needsFreshVerification(toolLogs) && step + 1 < maxSteps) {
+        verificationGateUsed = true;
+        messages.push({
+          role: "assistant",
+          content: text,
+        });
+        messages.push({
+          role: "user",
+          content: "<verification-required>检测到最后一次源代码修改后尚无成功验证。请先使用 run_test 执行最小且相关的验证；若项目确实没有可运行测试，请基于 read_file/git_diff 给出可观察证据并明确说明未运行测试的原因，然后再交付。</verification-required>",
+        });
+        continue;
+      }
       const finalText = text;
       const result = { text: finalText, steps: step + 1, toolCount, approvals, toolLogs, usage };
       // done carries a structured delivery summary so clients never infer outcome from prose.
@@ -986,6 +1137,7 @@ export async function runAgent(opts: AgentRunOptions): Promise<RunResult> {
         ok = false;
         out = `工具执行异常: ${(e as Error).message}`;
       }
+       out = withFailureRecoveryHint(out, ok);
        if (isToolResultFailure(ok, out)) sameCallFailures.set(key, previousFailures + 1);
        else sameCallFailures.delete(key);
         return { call, args, ok, out, diff: toolDiffs.get(call.toolCallId), verification };

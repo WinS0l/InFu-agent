@@ -137,7 +137,7 @@ console.log("▶ guard 集成（write_file × 档位）");
     root: proj,
     cwd: proj,
     requestApproval: async (desc, risk) => { approvals.push({ desc, risk }); return true; },
-    emit: (e: AgentEvent) => {},
+    emit: (_e: AgentEvent) => {},
   });
 
   try {

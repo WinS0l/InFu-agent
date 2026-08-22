@@ -4,7 +4,6 @@ import { useStore } from "./store";
 import { fetchModels, fetchSessions, fetchSessionEvents, maybeMigrateV1, fetchConfig, fetchProjects } from "./api";
 import Sidebar from "./components/Sidebar";
 import ChatPanel from "./components/ChatPanel";
-import RightRail from "./components/RightRail";
 import ApprovalModal from "./components/ApprovalModal";
 import AskModal from "./components/AskModal";
 import { TerminalToggleButton } from "./components/TerminalPanel";
@@ -12,6 +11,7 @@ import { TerminalToggleButton } from "./components/TerminalPanel";
 // 首包约 500KB；CodeView 仅代码模式渲染）——首屏 bundle 显著减负
 const CodeView = lazy(() => import("./components/CodeView"));
 const SettingsModal = lazy(() => import("./components/SettingsModal"));
+const RightRail = lazy(() => import("./components/RightRail"));
 const SuspenseFallback = () => <div className="flex h-full items-center justify-center text-xs text-caption">加载中…</div>;
 
 /**
@@ -231,7 +231,7 @@ export default function App() {
       // 事件），由 store 状态驱动它消费建 webview（修复「Agent 打开浏览器无内容」）
       useStore.getState().setPendingBrowserOpen(url ?? "");
     });
-  }, []);
+  }, [setDetailsOpen]);
 
   // v3.0 批 12：孤儿 root 清理——persist 的 root 若不属于任何已注册项目（项目已删除），
   // 且无会话引用它，启动时自动清空（否则删除项目后新建会话仍显示旧项目名）
@@ -358,7 +358,9 @@ export default function App() {
         {hasMessages && viewMode === "chat" && (detailsOpen ? (
           <aside className="row-span-2 flex min-h-0 min-w-0 flex-col bg-ink" style={{ gridColumn: 3 }}>
             <div className="h-10 shrink-0 bg-sidebar" />
-            <div className="min-h-0 flex-1 border-l border-t border-line"><RightRail /></div>
+            <div className="min-h-0 flex-1 border-l border-t border-line">
+              <Suspense fallback={<SuspenseFallback />}><RightRail /></Suspense>
+            </div>
           </aside>
         ) : (
           <></>

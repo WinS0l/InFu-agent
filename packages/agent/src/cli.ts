@@ -10,32 +10,27 @@
  * 模型配置：~/.infu/config.json（见 README）
  */
 
-import { resolve, dirname } from "node:path";
-import { writeFileSync, existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";
-import { spawnSync, execFileSync } from "node:child_process";
-import { createRequire } from "node:module";
-import { randomUUID } from "node:crypto";
-import { tmpdir } from "node:os";
+import { resolve } from "node:path";
+import { writeFileSync, existsSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
-import type { AgentEvent, InfuConfig, ModelConfig, ProviderKind } from "@infu/shared";
+import type { AgentEvent, ModelConfig, ProviderKind } from "@infu/shared";
 import { resolveDataDir } from "./data-dir.js";
 import { loadConfig, saveConfig, resolveModel, resolveFallbackModels, resolveRoleModel, toRuntimeModel, configPath } from "./providers/registry.js";
 import { TOOLS } from "./tools/index.js";
-import { runAgent, makeApprovalHandler, DEFAULT_SYSTEM_PROMPT } from "./agent/loop.js";
-import { sanitizeEnv } from "./sandbox/index.js";
+import { makeApprovalHandler } from "./agent/loop.js";
 import { runOrchestratedTask } from "./agent/orchestrator.js";
 import { findTemplate, renderTemplate } from "./templates.js";
 import { getStore } from "./db/store.js";
 import { rebuildMessages } from "./db/rebuild.js";
 import { inferResumePhase } from "./agent/resume.js";
 import { resolveApprovalPolicy, shouldAutoApprove, currentApprovalPolicy } from "./approval/policy.js";
-import { loadMcpTools, withMcpTools } from "./mcp/index.js";
+import { loadMcpTools } from "./mcp/index.js";
 import { mcpCli } from "./mcp/cli.js";
-import { loadPlugins, withPlugins } from "./plugin/index.js";
+import { loadPlugins } from "./plugin/index.js";
 import { listSkills, buildSkillsPrompt, clearPluginSkillDirs } from "./plugin/skills.js";
 import { clearTodos } from "./tools/task-tools.js";
 import { listAgents, buildAgentsPrompt } from "./agent/agents.js";
-import { buildInfuPrompt, buildMemoryPrompt, findInstructionFile, parseScopeRules, sedimentTask } from "./memory/index.js";
+import { buildInfuPrompt, buildMemoryPrompt, findInstructionFile, parseScopeRules } from "./memory/index.js";
 import { autoNameSession } from "./session-naming.js";
 import { pluginCli, skillCli } from "./plugin/cli.js";
 import { agentCli } from "./agent/agent-cli.js";
@@ -44,8 +39,6 @@ import { closeShellSession } from "./tools/persistent-shell.js";
 import { clearObservedFiles } from "./tools/index.js";
 import { clearApprovalMemory, clearSessionBypass } from "./approval/cache.js";
 import type { ChatMessageLike } from "./providers/chat.js";
-
-const require = createRequire(import.meta.url);
 
 // ── 终端着色 ──
 const C = {
@@ -550,7 +543,7 @@ async function main() {
   let initialMessages: ChatMessageLike[] | undefined;
   // v2.3 阶段级精确续跑：已确认过计划的会话 → 跳过规划阶段（executor 起点）
   let resumePoint: ReturnType<typeof inferResumePhase> = {};
-  let effectivePrompt = prompt;
+  const effectivePrompt = prompt;
   const sessionArg = getArg("--session");
   if (sessionArg) {
     const s = store.getSession(sessionArg);

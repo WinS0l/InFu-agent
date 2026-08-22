@@ -152,7 +152,7 @@ try {
 // 7. 用户中止不重试
 console.log("\n▶ 用户中止不重试");
 const ac = new AbortController();
-installFetch((call, init) => {
+installFetch((call, _init) => {
   if (call === 1) throw new TypeError("fetch failed");
   return sse('data: {"choices":[{"delta":{"content":"x"}}]}\n\ndata: [DONE]\n\n');
 });

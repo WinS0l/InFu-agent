@@ -11,7 +11,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setDataDirForTest } from "../src/data-dir.js";
-import type { ToolContext, RiskLevel } from "@infu/shared";
+import type { ToolContext } from "@infu/shared";
 
 const SID = "test-session";
 let pass = 0, fail = 0;

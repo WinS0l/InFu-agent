@@ -7,7 +7,6 @@
 
 import { cpSync, existsSync, rmSync } from "node:fs";
 import { join, resolve } from "node:path";
-import type { InfuConfig } from "@infu/shared";
 import { loadConfig, saveConfig } from "../providers/registry.js";
 import { resolveDataDir } from "../data-dir.js";
 import { loadPlugins } from "./index.js";

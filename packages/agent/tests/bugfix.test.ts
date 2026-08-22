@@ -68,7 +68,7 @@ function check(name: string, cond: boolean, detail = "") {
   console.log("\n▶ junction 逃逸拦截（真实目录联接）");
   {
     const { execFileSync } = await import("node:child_process");
-    const { mkdtempSync, mkdirSync, writeFileSync, existsSync } = await import("node:fs");
+    const { mkdtempSync, mkdirSync, writeFileSync } = await import("node:fs");
     const { tmpdir } = await import("node:os");
     const { join } = await import("node:path");
     const base = mkdtempSync(join(tmpdir(), "infu-junc-"));

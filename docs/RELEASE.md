@@ -3,7 +3,7 @@
 ## Windows Portable Build
 
 The portable archive contains the complete Electron application. Download
-`InFu-1.0.0-win-x64-portable.zip`, extract the whole archive to a writable
+`InFu-1.0.1-win-x64-portable.zip`, extract the whole archive to a writable
 folder, and run `InFu.exe` from that folder.
 
 Do not copy only `InFu.exe`. Electron also requires the adjacent `resources`,
@@ -36,10 +36,10 @@ npm run start -w @infu/desktop
 
 ## Release Assets
 
-Publish these files for version 1.0.0:
+Before publishing, run `npm run release:verify`. Publish these files for version 1.0.1:
 
-- `InFu-1.0.0-win-x64-portable.zip`
-- `InFu-1.0.0-win-x64-portable.zip.sha256`
+- `InFu-1.0.1-win-x64-portable.zip`
+- `InFu-1.0.1-win-x64-portable.zip.sha256`
 
 The NSIS installer may be retained for local testing, but is not recommended
 for public distribution until a trusted signing process is available.

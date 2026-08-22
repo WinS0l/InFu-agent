@@ -757,7 +757,7 @@ export const useStore = create<StoreState>()(
   /** 历史会话重放：事件流 → 消息（复用消息结构，右侧 Diff/文件改动一并恢复）。
    *  v3.1：写入 sessionId 对应缓存；sessionId === activeSessionId 或未传时同步视图 messages */
   loadSession: (events, sessionId, forceView = false) => {
-    let msgs: ChatMsg[] = [];
+    const msgs: ChatMsg[] = [];
     const fileChanges: string[] = [];
     let diffContent = "";
     let shotTick = 0; // v3.3 补 9：重放路径的 screen_capture 事件计数
@@ -969,7 +969,7 @@ export const useStore = create<StoreState>()(
   /** v2.13：仅写会话缓存与 per-session 字段的重放（后台会话收尾重放用——
    *  不写视图全局字段；被新 run 接管的跳过判断由调用方（api.ts finally）负责） */
   loadSessionCache: (events, sessionId) => {
-    let msgs: ChatMsg[] = [];
+    const msgs: ChatMsg[] = [];
     let cur: ChatMsg | null = null;
     let phase: PhaseId | undefined;
     let currentStep = 1;

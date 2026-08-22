@@ -17,7 +17,7 @@ import {
   createTerminalSession, getTerminalSession, writeInput, resizeSession, killTerminalSession,
   listTerminalSessions, closeAllTerminalSessions, subscribeOutput,
 } from "../src/terminal/session.js";
-import { mkdtempSync, writeFileSync, readFileSync, existsSync, mkdirSync, rmSync } from "node:fs";
+import { mkdtempSync, writeFileSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";

@@ -5,7 +5,7 @@
  * 复用 v2.7 文件索引（loadIndex 加速文件清单），按行建倒排，BM25 打分。
  */
 import { readFileSync } from "node:fs";
-import { resolve, relative } from "node:path";
+import { relative } from "node:path";
 import { isPathInside } from "./util.js";
 
 /** 中文 bigram + 英文词分词 */
@@ -17,13 +17,6 @@ export function tokenize(text: string): string[] {
   const cjk = text.replace(/[^\u4e00-\u9fff]/g, "");
   for (let i = 0; i < cjk.length - 1; i++) tokens.push(cjk.slice(i, i + 2));
   return tokens;
-}
-
-interface Doc {
-  file: string;
-  lines: string[];
-  terms: Map<string, number>; // term → 行内出现次数
-  length: number;
 }
 
 const STOP = new Set(["", "的", "了", "在", "是", "与", "和", "或", "及", "对", "为", "有", "这", "那", "中", "上", "下", "不", "也", "就", "都", "而", "于", "其", "之", "以", "被", "把", "让", "向", "从", "到", "会", "能", "可", "要", "将", "着", "过", "吗", "呢", "啊", "吧"]);

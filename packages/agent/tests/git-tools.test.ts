@@ -3,7 +3,7 @@
  * 运行：npx tsx packages/agent/tests/git-tools.test.ts
  */
 import { TOOLS } from "../src/tools/index.js";
-import { mkdtempSync, writeFileSync, existsSync, rmSync } from "node:fs";
+import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFileSync } from "node:child_process";

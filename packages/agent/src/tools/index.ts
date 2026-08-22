@@ -6,7 +6,7 @@
 import { z } from "zod";
 import fs from "node:fs";
 import path, { join } from "node:path";
-import type { ToolDef, ToolContext, RiskLevel } from "@infu/shared";
+import type { ToolDef, RiskLevel } from "@infu/shared";
 import {
   sanitizeEnv, isProtectedPath, auditCommand, containsSensitiveOutput,
 } from "../sandbox/index.js";
@@ -15,7 +15,7 @@ import { registerMcpServer, type RegisterInput } from "../mcp/register.js";
 import { registerPlugin, type RegisterPluginInput } from "../plugin/register.js";
 import { listSkills, readSkillContent } from "../plugin/skills.js";
 import { listAgents, readAgentFile } from "../agent/agents.js";
-import { DANGEROUS, isDangerousCommand } from "../sandbox/dangerous.js";
+import { isDangerousCommand } from "../sandbox/dangerous.js";
 import { delegateTasks, describeDelegation, isReadOnlyDelegation, startBackgroundSubagent,
   listBackgroundAgents, getBackgroundAgent, interruptBackgroundAgent, sendMessageToAgent, getAgentReport,
   availableSubagentSlots, MAX_ACTIVE_SUBAGENTS_PER_SESSION,
@@ -28,7 +28,6 @@ import { isEgressAllowed } from "../egress-allow.js";
 import {
   clip, MAX_OUTPUT, MAX_FILE_READ, runShell, execLocal, sandboxTag, walkFiles, guard, isPathInside,
   isReadOnlySessionRoot, sessionRootReadOnlyBlock, markObservedFile, assertObservedFileFresh,
-  clearObservedFiles, resetObservedFiles,
 } from "./util.js";
 import { webTools } from "./web.js";
 import { gitTools } from "./git-tools.js";
@@ -36,7 +35,7 @@ import { taskTools } from "./task-tools.js";
 import { sessionTools } from "./session-tools.js";
 import { visionTools } from "./vision.js";
 import { semanticSearch } from "./semantic.js";
-import { execPersistent, closeShellSession } from "./persistent-shell.js";
+import { execPersistent } from "./persistent-shell.js";
 import { lspDiagnose, lspGotoDefinition, lspCompletions, lspFindReferences } from "./lsp.js";
 import { loadIndex } from "../index/index.js";
 import { searchSymbols, type SymbolKind } from "../index/symbols.js";

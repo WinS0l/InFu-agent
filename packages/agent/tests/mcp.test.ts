@@ -22,7 +22,7 @@ import { registerMcpServer, mcpIdFromName } from "../src/mcp/register.js";
 import { TOOLS } from "../src/tools/index.js";
 import { inferResumePhase } from "../src/agent/resume.js";
 import { parseInfuConfig } from "@infu/shared";
-import type { AgentEvent, McpServerConfig, ToolDef } from "@infu/shared";
+import type { AgentEvent, McpServerConfig } from "@infu/shared";
 import { z } from "zod";
 import { readFileSync, writeFileSync, rmSync, mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";

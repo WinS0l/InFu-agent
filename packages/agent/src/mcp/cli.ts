@@ -6,7 +6,7 @@
  * 同一 CLI 进程内同时只有一个向导运行，不抢 stdin）。
  */
 
-import type { InfuConfig, McpServerConfig } from "@infu/shared";
+import type { McpServerConfig } from "@infu/shared";
 import { loadConfig, saveConfig } from "../providers/registry.js";
 import { connectMcp, resolveToolRisk } from "./index.js";
 

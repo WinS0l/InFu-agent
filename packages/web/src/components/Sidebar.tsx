@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   Plus, Search, Puzzle, FolderOpen, Folder, ChevronRight, Pin, PinOff, Archive, Pencil,
-  Check, X, Trash2, MessageSquare, MessageSquarePlus, ChevronsDownUp, Cog, PanelLeftClose,
+  Check, X, Trash2, MessageSquare, ChevronsDownUp, Cog, PanelLeftClose,
   MoreHorizontal, ListFilter, GitBranch,
 } from "lucide-react";
 import type { SessionMeta } from "@infu/shared";
@@ -103,9 +103,8 @@ export function RowMenu({ items, onClose }: {
 }
 
 /** 会话行（主流 规格：32px 高 r8，悬停时间换成 ⋯ 菜单；无状态圆点） */
-function SessionRow({ s, projectName, onOpen, onRename, onPin, onArchive, busy }: {
+function SessionRow({ s, onOpen, onRename, onPin, onArchive, busy }: {
   s: SessionMeta;
-  projectName?: string;
   onOpen: () => void;
   onRename: (title: string) => void;
   onPin: () => void;
@@ -255,7 +254,6 @@ interface SidebarProps {
 export default function Sidebar({ onOpenSettings, className = "" }: SidebarProps) {
   const root = useStore((s) => s.root);
   const setRoot = useStore((s) => s.setRoot);
-  const runningIds = useStore((s) => s.runningIds);
   const sessions = useStore((s) => s.sessions);
   const activeSessionId = useStore((s) => s.activeSessionId);
   const setActiveSessionId = useStore((s) => s.setActiveSessionId);
@@ -601,7 +599,6 @@ export default function Sidebar({ onOpenSettings, className = "" }: SidebarProps
                 <SessionRow
                   key={s.id}
                   s={s}
-                  projectName={projectByRoot.get(norm(s.root))?.name}
                   onOpen={() => openSession(s.id, s.root)}
                   onRename={(t) => patchSession(s.id, { title: t })}
                   onPin={() => patchSession(s.id, { pinned: !s.pinned })}
@@ -622,7 +619,6 @@ export default function Sidebar({ onOpenSettings, className = "" }: SidebarProps
                 <SessionRow
                   key={s.id}
                   s={s}
-                  projectName={projectByRoot.get(norm(s.root))?.name}
                   onOpen={() => openSession(s.id, s.root)}
                   onRename={(t) => patchSession(s.id, { title: t })}
                   onPin={() => patchSession(s.id, { pinned: !s.pinned })}

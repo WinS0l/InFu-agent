@@ -36,12 +36,17 @@ jobs:
           npx tsc -p packages/web/tsconfig.json --noEmit
           npx tsc -p packages/desktop/tsconfig.json --noEmit
 
+      - name: Build desktop application
+        run: npm run build -w @infu/desktop
+
+      - name: Verify bundled skills
+        run: node scripts/skills-check.mjs
+
       - name: Rust check (sandbox-rs)
         run: cargo check
         working-directory: packages/sandbox-rs
 
       - name: Lint
-        # Warning baseline is informational; emit normal text rather than GitHub error annotations.
         run: npm run lint -- --format stylish
 
       - name: Test (full suite via test-runner)

@@ -208,14 +208,6 @@ async function lspRun(
     p.stdin!.on("error", () => { /* 已关闭 */ });
     // 审计修复：proc 级 error（spawn 失败/异常退出）无监听会 throw 崩掉宿主进程
     p.on("error", () => { if (!settled) { settled = true; clearTimeout(timer); try { p.kill(); } catch { /* 忽略 */ } resolveReady(); } });
-    const sendOne = (command: string, args: Record<string, unknown>): Promise<LspOutcome> => {
-      const id = ++seq;
-      return new Promise((res) => {
-        pending.set(id, res);
-        try { p.stdin!.write(JSON.stringify({ seq: id, type: "request", command, arguments: args }) + "\n"); }
-        catch { pending.delete(id); res({ success: false }); }
-      });
-    };
     p.on("spawn", () => {
       void (async () => {
         for (let i = 0; i < requests.length; i++) {

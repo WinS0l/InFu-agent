@@ -24,7 +24,6 @@ import { startBackgroundJob, killJob } from "../src/tools/jobs.js";
 import { TOOLS } from "../src/tools/index.js";
 import { rebuildMessages } from "../src/db/rebuild.js";
 import type { StoredEvent } from "@infu/shared";
-import type { ChatMessageLike } from "../src/providers/chat.js";
 
 let passed = 0;
 let failed = 0;
@@ -70,7 +69,7 @@ const okSse = (text: string) => sse(`data: {"choices":[{"delta":{"content":"${te
   // ── 1. job 完成通知（notify 回调 + 事件 + 三态）──
   console.log("\n▶ job 完成通知");
   {
-    let events: AgentEvent[] = [];
+    const events: AgentEvent[] = [];
     let note: any = null;
     const h = startBackgroundJob(
       `node -e "console.log('job-output-line')"`, root, SID, 0,
@@ -84,7 +83,7 @@ const okSse = (text: string) => sse(`data: {"choices":[{"delta":{"content":"${te
     check("notify 摘要裁剪命令名", note.name === `node -e "console.log('job-output-line')"`);
   }
   {
-    let events: AgentEvent[] = [];
+    const events: AgentEvent[] = [];
     let note: any = null;
     const h = startBackgroundJob(`node -e "process.exit(3)"`, root, SID, 0, (e) => events.push(e), (n) => { note = n; });
     const done = await waitUntil(() => h.status !== "running");
@@ -104,7 +103,7 @@ const okSse = (text: string) => sse(`data: {"choices":[{"delta":{"content":"${te
   console.log("\n▶ 后台子智能体完成通知");
   {
     installFetch({ "sub-m": () => okSse("子任务完成：找到 3 处问题") });
-    let events: AgentEvent[] = [];
+    const events: AgentEvent[] = [];
     let note: any = null;
     const ctx: DelegationContext = {
       tools: TOOLS,

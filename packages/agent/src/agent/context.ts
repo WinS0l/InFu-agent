@@ -150,6 +150,38 @@ export function pruneToolResults(messages: ChatMessageLike[]): ChatMessageLike[]
   return changed ? next : messages;
 }
 
+/**
+ * 长任务不能只在接近上下文窗口时才处理工具输出：对 1M 窗口而言，几十次 6KB
+ * 工具结果不会触发压缩，却会在之后每一轮重复计费。保留最近几条完整结果作为
+ * 当前操作的工作集；更早的大结果压成可诊断的头尾证据。完整原文仍在事件流中，
+ * Agent 需要细节时可重新 read/search，而不会默默丢失工具调用配对。
+ */
+export function pruneHistoricalToolResults(messages: ChatMessageLike[], keepRecent = 6): ChatMessageLike[] {
+  const toolIndexes = messages
+    .map((m, i) => m.role === "tool" ? i : -1)
+    .filter((i) => i >= 0);
+  if (toolIndexes.length <= keepRecent) return messages;
+  const preserved = new Set(toolIndexes.slice(-keepRecent));
+  const THRESHOLD = 2500;
+  const HEAD = 1600;
+  const TAIL = 600;
+  let changed = false;
+  const next = messages.map((m, i) => {
+    if (m.role !== "tool" || preserved.has(i)) return m;
+    const text = contentText(m);
+    if (text.length <= THRESHOLD) return m;
+    changed = true;
+    return {
+      ...m,
+      content:
+        text.slice(0, HEAD) +
+        `\n[... 较早工具结果已压缩（原 ${text.length} 字符；完整内容见会话记录，可按需重新读取） ...]\n` +
+        text.slice(-TAIL),
+    };
+  });
+  return changed ? next : messages;
+}
+
 /** 历史文本序列化（v2.10 已由「消息前缀 + 末尾指令」取代摘要输入；保留给测试与工具链） */
 
 /** 历史文本序列化（摘要输入；每消息与总长都截断防爆） */
@@ -194,7 +226,7 @@ const SUMMARY_MUST_BE_SMALLER = true;
  * 这里把边界向前回溯到配对起点（assistant 消息或 user 边界），保证工具对完整保留。
  */
 export function balanceToolPairs(messages: ChatMessageLike[], keepFrom: number): number {
-  let kf = keepFrom;
+  const kf = keepFrom;
   // kept 区第一条是 tool 结果消息 → 其配对 assistant 也必须留在 kept
   const firstKept = messages[kf];
   if (!firstKept || firstKept.role !== "tool" || !firstKept.tool_call_id) return kf;
@@ -276,7 +308,7 @@ export async function compressMessages(
   let summary = "";
   try {
     summary = (await summarize(toCompress)).trim();
-  } catch (e) {
+  } catch {
     summary = "";
   }
   // v3.2：摘要合理性检查——摘要自身估算 ≥ 被替换内容时拒绝（对齐 主流 framedSummary

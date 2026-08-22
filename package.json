@@ -1,6 +1,6 @@
 {
   "name": "infu",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "private": true,
   "description": "Local coding agent for Windows",
   "license": "Apache-2.0",
@@ -13,8 +13,10 @@
     "config": "npm run cli -w @infu/agent -- config",
     "start": "npm run start -w @infu/agent",
     "test": "npx tsx scripts/test-runner.ts",
-    "lint": "eslint \"packages/*/src/**/*.{ts,tsx}\" \"packages/*/tests/**/*.ts\" --max-warnings 999999",
-    "probe": "npx tsx scripts/probe.ts"
+    "lint": "eslint \"packages/*/src/**/*.{ts,tsx}\" \"packages/*/tests/**/*.ts\" --max-warnings 0",
+    "probe": "npx tsx scripts/probe.ts",
+    "release:verify": "node scripts/release-check.mjs",
+    "release:pack": "npm run release:verify && npm run pack -w @infu/desktop && node scripts/package-audit.mjs"
   },
   "engines": {
     "node": ">=22.5"

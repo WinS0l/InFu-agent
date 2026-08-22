@@ -7,7 +7,6 @@
  */
 import { rebuildMessages } from "../src/db/rebuild.js";
 import type { StoredEvent, AgentEvent } from "@infu/shared";
-import type { ChatMessageLike } from "../src/providers/chat.js";
 
 let passed = 0;
 let failed = 0;

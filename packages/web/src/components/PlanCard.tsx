@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { ClipboardCheck, Send, X, PencilLine, MessageSquarePlus } from "lucide-react";
+import { Send, X, PencilLine, MessageSquarePlus } from "lucide-react";
 import { useStore } from "../store";
 import { postPlanDecision } from "../api";
 

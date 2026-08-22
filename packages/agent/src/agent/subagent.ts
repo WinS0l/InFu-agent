@@ -165,7 +165,7 @@ export function abortBackgroundAgentsByDepth(sessionId: string | undefined, pare
   const key = sessionId ?? "";
   const m = backgroundAgents.get(key);
   if (!m) return;
-  for (const [id, h] of [...m.entries()]) {
+  for (const [, h] of [...m.entries()]) {
     if ((parentDepth < 0 || h.parentDepth === parentDepth) && h.status !== "done" && h.status !== "error") h.abort.abort();
   }
 }

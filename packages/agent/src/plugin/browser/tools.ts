@@ -27,6 +27,18 @@ const skillDir = (name: string) => fileURLToPath(new URL(`./skills/${name}`, imp
 const NET_TIMEOUT = 30000;
 
 /**
+ * 页面文字不是可信指令。对会提交、购买、授权、下载或泄露凭据的动作，保持
+ * 普通浏览操作的低摩擦体验，同时提升到显式高风险审批。这里刻意只匹配用户
+ * 传入的定位描述，不把不可信网页正文直接当作审批依据。
+ */
+const HIGH_IMPACT_ACTION = /(?:\b(?:pay|purchase|buy|checkout|place\s+order|submit|publish|send|delete|remove|download|upload|authorize|grant|install)\b|付款|支付|购买|下单|提交|发布|发送|删除|移除|下载|上传|授权|安装)/i;
+const SENSITIVE_FIELD = /(?:\b(?:password|passcode|token|secret|api[ _-]?key|credit.?card|card.?number|cvv|ssn)\b|密码|口令|令牌|密钥|信用卡|银行卡|身份证)/i;
+
+async function browserGuard(ctx: ToolContext, tool: string, description: string, highImpact = false): Promise<boolean> {
+  return guard(ctx, tool, highImpact ? "high" : "low", description, highImpact);
+}
+
+/**
  * v4.0 审计修复（H4）：浏览器导航 SSRF 门禁——与 webfetch 防护对齐。
  * 浏览器携带用户登录会话（Cookie），信息价值远高于 webfetch：云元数据
  * （169.254.169.254）/内网管理页（192.168/10/172.16）/本机服务（127.0.0.1）的
@@ -81,6 +93,24 @@ ${clip(bodyText.trim(), 4000) || "（无文本内容）"}`
   );
 }
 
+async function verifyPage(tab: BrowserTab, kind: "title" | "url" | "text" | "selector", expected: string): Promise<string> {
+  let actual = "";
+  let ok = false;
+  if (kind === "title") actual = await tab.title();
+  else if (kind === "url") actual = await tab.url();
+  else if (kind === "text") actual = await tab.bodyText();
+  else {
+    const found = await tab.evaluate(`return (() => { try { return !!document.querySelector(${JSON.stringify(expected)}); } catch { return false; } })()`);
+    actual = String(found);
+    ok = found === true;
+  }
+  if (kind !== "selector") ok = actual.includes(expected);
+  const evidence = kind === "text" ? clip(actual, 600) : actual;
+  return ok
+    ? `验证通过：${kind} 包含 ${JSON.stringify(expected)}\n证据：${evidence}`
+    : `验证失败：${kind} 未匹配 ${JSON.stringify(expected)}\n当前 URL：${await tab.url()}\n证据：${evidence}`;
+}
+
 export const browserTools: ToolDef[] = [
   {
     name: "browser_navigate",
@@ -96,7 +126,7 @@ export const browserTools: ToolDef[] = [
       // v4.0 审计修复（H4）：SSRF 门禁（内网/云元数据 IP 直写拒绝）
       const ssrf = ssrfBlockReason(args.url);
       if (ssrf) return `错误：${ssrf}`;
-      if (!(await guard(ctx, "browser_navigate", "low", `浏览器访问：${args.url}`))) {
+      if (!(await browserGuard(ctx, "browser_navigate", `浏览器访问：${args.url}`))) {
         return "用户拒绝：未联网访问（InFu 默认断网，联网需人工审批放行）";
       }
       try {
@@ -105,6 +135,26 @@ export const browserTools: ToolDef[] = [
         return `已打开 ${await tab.url()}\n\n${await snapshot(tab)}`;
       } catch (e) {
         return `浏览器导航失败：${(e as Error).message}`;
+      }
+    },
+  },
+  {
+    name: "browser_verify",
+    description:
+      "验证当前页面的可观察结果，不修改页面。kind=title/url/text/selector，expected 为必须出现的文本或 CSS 选择器。每次提交、发布、导航或关键点击后都应调用它；失败时返回当前 URL 和证据，方便重新快照或恢复。",
+    risk: "low",
+    schema: z.object({
+      kind: z.enum(["title", "url", "text", "selector"]).describe("验证标题、URL、页面文本或 CSS 元素"),
+      expected: z.string().min(1).describe("title/url/text 的包含文本，或 selector 的 CSS 选择器"),
+    }),
+    async execute(args) {
+      try {
+        const tab = await getPage();
+        const kind = args.kind as "title" | "url" | "text" | "selector";
+        const expected = args.expected as string;
+        return await verifyPage(tab, kind, expected);
+      } catch (e) {
+        return `验证失败：${(e as Error).message}`;
       }
     },
   },
@@ -135,7 +185,7 @@ export const browserTools: ToolDef[] = [
     async execute(args, ctx) {
       const code = args.code as string;
       if (typeof code !== "string" || !code.trim()) return "错误：code 必填";
-      if (!(await guard(ctx, "browser_eval", "low", `浏览器执行 JS：${code.slice(0, 40)}`))) return "用户拒绝：未执行";
+      if (!(await browserGuard(ctx, "browser_eval", `浏览器执行 JS：${code.slice(0, 40)}`))) return "用户拒绝：未执行";
       try {
         const tab = await getPage();
         let arg: unknown;
@@ -151,14 +201,21 @@ export const browserTools: ToolDef[] = [
   },
   {
     name: "browser_click",
-    description: "点击页面元素。target 优先用 browser_snapshot 的 [编号]（如 3，与快照单一来源最可靠）；其次 text=可访问名（如 text=登录）；CSS 选择器最后（仅当快照无法表达）。点击后自动返回新快照。",
+    description: "点击页面元素。target 优先用 browser_snapshot 的 [编号]（如 3，与快照单一来源最可靠）；其次 text=可访问名（如 text=登录）；CSS 选择器最后（仅当快照无法表达）。点击后自动返回新快照；提供 expected 时会在同一次调用中验证结果。",
     // v2.10 批 5：浏览器交互降 low（已授权使用浏览器，对齐主流不逐次弹窗）
     risk: "low",
-    schema: z.object({ target: z.string().describe("快照编号（如 3）或 CSS/文本选择器") }),
+    schema: z.object({
+      target: z.string().describe("快照编号（如 3）或 CSS/文本选择器"),
+      expected: z.object({
+        kind: z.enum(["title", "url", "text", "selector"]),
+        value: z.string().min(1),
+      }).optional().describe("可选的点击后结果验证；value 为应出现的文本或 CSS 选择器"),
+    }),
     async execute(args, ctx) {
       const target = args.target as string;
       if (typeof target !== "string" || !target.trim()) return "错误：target 必填";
-      if (!(await guard(ctx, "browser_click", "low", `浏览器点击：${target}`))) return "用户拒绝：未点击";
+      const highImpact = HIGH_IMPACT_ACTION.test(target);
+      if (!(await browserGuard(ctx, "browser_click", `${highImpact ? "高影响" : ""}浏览器点击：${target}`, highImpact))) return "用户拒绝：未点击";
       try {
         const tab = await getPage();
         let out: string;
@@ -180,7 +237,11 @@ export const browserTools: ToolDef[] = [
         }
         await tab.waitForLoad(5000).catch(() => {});
         snapshotHandles.delete(tab.id);
-        return out + "\n\n" + (await snapshot(tab));
+        const state = await snapshot(tab);
+        const expected = args.expected as { kind: "title" | "url" | "text" | "selector"; value: string } | undefined;
+        if (!expected) return out + "\n\n" + state;
+        const verification = await verifyPage(tab, expected.kind, expected.value);
+        return out + "\n\n" + verification + "\n\n" + state;
       } catch (e) {
         return `点击失败：${(e as Error).message}（请重新 browser_snapshot 确认编号/选择器）`;
       }
@@ -195,7 +256,7 @@ export const browserTools: ToolDef[] = [
     async execute(args, ctx) {
       const text = args.text as string;
       if (typeof text !== "string") return "错误：text 必填";
-      if (!(await guard(ctx, "browser_type", "low", `浏览器输入：${text.slice(0, 40)}`))) return "用户拒绝：未输入";
+      if (!(await browserGuard(ctx, "browser_type", `浏览器输入：${text.slice(0, 40)}`))) return "用户拒绝：未输入";
       try {
         const tab = await getPage();
         // 纯 JS 注入 activeElement（不依赖键盘焦点——焦点解耦，根治输入污染）
@@ -207,20 +268,28 @@ export const browserTools: ToolDef[] = [
   },
   {
     name: "browser_fill",
-    description: "定位输入框并填入值（等价 click+clear+type）。selector 优先用快照中的可访问名（如 text=用户名）或 placeholder 文本（如 输入搜索词）；CSS 选择器仅当快照无法表达。",
+    description: "定位输入框并填入值（等价 click+clear+type）。selector 优先用快照中的可访问名（如 text=用户名）或 placeholder 文本（如 输入搜索词）；CSS 选择器仅当快照无法表达。提供 expected 时会验证填写后的可观察页面状态，敏感值不会作为验证证据回显。",
     // v2.10 批 5：同 click
     risk: "low",
     schema: z.object({
       selector: z.string().describe("输入框 CSS 选择器、placeholder 或可访问名"),
       value: z.string().describe("填入的值"),
+      expected: z.object({
+        kind: z.enum(["title", "url", "text", "selector"]),
+        value: z.string().min(1),
+      }).optional().describe("可选的填写后结果验证"),
     }),
     async execute(args, ctx) {
       const { selector, value } = args as { selector: string; value: string };
       if (typeof selector !== "string" || typeof value !== "string") return "错误：selector/value 必填";
-      if (!(await guard(ctx, "browser_fill", "low", `浏览器填写 ${selector} = ${value.slice(0, 40)}`))) return "用户拒绝：未填写";
+      const sensitive = SENSITIVE_FIELD.test(selector);
+      const safeValue = sensitive ? "[已遮蔽]" : value.slice(0, 40);
+      if (!(await browserGuard(ctx, "browser_fill", `${sensitive ? "敏感字段" : ""}浏览器填写 ${selector} = ${safeValue}`, sensitive))) return "用户拒绝：未填写";
       try {
         const tab = await getPage();
-        return await tab.fill(selector, value);
+        const out = await tab.fill(selector, value);
+        const expected = args.expected as { kind: "title" | "url" | "text" | "selector"; value: string } | undefined;
+        return expected ? `${out}\n${await verifyPage(tab, expected.kind, expected.value)}` : out;
       } catch (e) {
         return `填写失败：${(e as Error).message}`;
       }
@@ -375,7 +444,7 @@ export default {
   name: "browser-use",
   description:
     "浏览器自动化：打开/导航网页、AI 可访问性树快照（主流 domSnapshot 同款）、点击/输入/填表/页面 JS 执行、截图视觉验证。用于 Web 前端测试、渲染页面抓取、交互验证（对齐主流 browser-use）。",
-  version: "0.2.0",
+  version: "1.0.1",
   tools: browserTools,
   skills: [skillDir("control-browser"), skillDir("web-gui-tester")],
 };

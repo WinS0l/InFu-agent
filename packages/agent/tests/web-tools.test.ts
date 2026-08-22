@@ -84,7 +84,7 @@ const autoCtx: ToolContext = { ...ctx, requestApproval: async () => { netApprova
 const wfAuto = await TOOLS.webfetch.execute({ url: base }, autoCtx);
 check("webfetch 自动放行执行成功", wfAuto.includes("Hello InFu"), wfAuto);
 check("webfetch 未触发审批", netApprovals === 0, `approvals=${netApprovals}`);
-const wsAuto = await TOOLS.web_search.execute({ query: "infu" }, autoCtx);
+await TOOLS.web_search.execute({ query: "infu" }, autoCtx);
 // v3.6 恒真断言修复：原 web_search 走真实 Bing/DDG 网络（成败皆过、测不到解析正确性）
 // → mock Bing RSS 返回固定结果，断言真实解析（标题/链接/摘要字段）
 const ORIG_FETCH = globalThis.fetch;

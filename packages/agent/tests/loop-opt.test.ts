@@ -2,7 +2,8 @@
  * v2.6 收尾工具调用优化自测（畸形 JSON 修复 / 结果裁剪 / 写工具分组）
  * 运行：npx tsx packages/agent/tests/loop-opt.test.ts
  */
-import { repairToolArgs, trimToolResult, TRIM_TOOL_RESULT, isMutatingTool, isToolResultFailure, shouldBlockSameCallFailure, buildDeliverySummary } from "../src/agent/loop.js";
+import { repairToolArgs, trimToolResult, TRIM_TOOL_RESULT, isMutatingTool, isToolResultFailure, shouldBlockSameCallFailure, buildDeliverySummary, selectRelevantTools, withFailureRecoveryHint, needsFreshVerification } from "../src/agent/loop.js";
+import { z } from "zod";
 
 let passed = 0;
 let failed = 0;
@@ -48,6 +49,28 @@ check("成功结果不计失败", !isToolResultFailure(true, "已写入 x.ts"));
 check("用户拒绝不计入失败（保留下次审批）", !isToolResultFailure(true, "用户拒绝：未写入"));
 check("两次失败前允许调整", !shouldBlockSameCallFailure(1));
 check("两次同参失败后阻止第三次执行", shouldBlockSameCallFailure(2));
+check("不存在错误给出定位恢复建议", withFailureRecoveryHint("错误：文件不存在", true).includes("project_tree、glob 或 search_code"));
+check("成功结果不附加恢复建议", withFailureRecoveryHint("已完成", true) === "已完成");
+
+// 4.1 大工具注册表按任务收窄，降低 MCP/插件 schema 噪声；小注册表保持完全兼容。
+console.log("\n▶ 工具面按任务收窄");
+const toolStub = { description: "测试工具", risk: "low" as const, schema: z.object({}), async execute() { return "ok"; } };
+const manyTools: Record<string, any> = Object.fromEntries(Array.from({ length: 80 }, (_, i) => [`plugin_${i}`, { ...toolStub, name: `plugin_${i}` }]));
+manyTools.browser_snapshot = { ...toolStub, name: "browser_snapshot", description: "读取浏览器网页 DOM" };
+manyTools.read_file = { ...toolStub, name: "read_file" };
+const browserTools = selectRelevantTools(manyTools, "检查浏览器网页并验证结果");
+check("大注册表限制在固定工具预算", Object.keys(browserTools).length <= 72, String(Object.keys(browserTools).length));
+check("意图命中的浏览器工具保留", Boolean(browserTools.browser_snapshot));
+check("核心文件工具始终保留", Boolean(browserTools.read_file));
+const pinnedTools = selectRelevantTools(manyTools, "普通任务", "auto", ["plugin_79"]);
+check("宿主声明的固定工具不被扩展路由隐藏", Boolean(pinnedTools.plugin_79));
+check("小注册表不裁剪", Object.keys(selectRelevantTools({ a: { ...toolStub, name: "a" }, b: { ...toolStub, name: "b" } }, "任意任务")).length === 2);
+check("源码修改后需要新验证", needsFreshVerification([{ tool: "edit_file", args: { path: "src/a.ts" }, ok: true, summary: "ok" }]));
+check("修改后的成功测试满足验证门禁", !needsFreshVerification([
+  { tool: "edit_file", args: { path: "src/a.ts" }, ok: true, summary: "ok" },
+  { tool: "run_test", args: {}, ok: true, summary: "passed" },
+]));
+check("文档修改不强制运行代码测试", !needsFreshVerification([{ tool: "edit_file", args: { path: "README.md" }, ok: true, summary: "ok" }]));
 
 // 5. Structured delivery summary: only structured tool/todo data, never final natural-language guessing.
 console.log("\n▶ 结构化交付摘要");

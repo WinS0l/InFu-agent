@@ -26,7 +26,7 @@ const ctx: ToolContext = {
   cwd: proj,
   requestApproval: async () => true,
   emit: (e) => events.push(e),
-  askUser: async (q, opts) => "用户自定义回答",
+  askUser: async (_q, _opts) => "用户自定义回答",
 };
 const run = (name: string, args: Record<string, unknown>) => TOOLS[name].execute(args, ctx);
 

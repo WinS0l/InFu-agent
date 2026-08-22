@@ -20,7 +20,7 @@ It intentionally does not contain personal information:
 
 ## Restore From the Source Archive
 
-1. Extract `InFu-1.0.0-source.zip` to a writable folder.
+1. Extract `InFu-1.0.1-source.zip` to a writable folder.
 2. Install Node.js 22.5 or later.
 3. Install Rust and the MSVC C++ Build Tools if you need to build the Windows native sandbox.
 4. Open PowerShell in the extracted folder.

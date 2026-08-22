@@ -335,7 +335,7 @@ export default function TerminalPanel() {
   useEffect(() => {
     const t = termRef.current;
     if (t) t.options.theme = xtermTheme(resolvedDark);
-  }, [theme]);
+  }, [theme, resolvedDark]);
 
   // A PTY is scoped to the session root it was created for. Do not leave it
   // interactive under another session's title/root after a sidebar switch.

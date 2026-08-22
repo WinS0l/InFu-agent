@@ -74,7 +74,7 @@ check("openssl s_client 命中", detectEgress("openssl s_client -connect h:443")
 console.log("\n▶ run_command 断网策略");
 const proj = mkdtempSync(join(tmpdir(), "infu-net-"));
 writeFileSync(join(proj, "package.json"), JSON.stringify({ name: "net-fixture", version: "1.0.0" }));
-const env = sanitizeEnv();
+sanitizeEnv();
 const events: AgentEvent[] = [];
 const mkCtx = (approve: boolean): ToolContext => ({
   root: proj,

@@ -56,6 +56,7 @@ const SUITES: string[] = [
   "v212.test.ts",
   "task-notify.test.ts",
   "auto-verify.test.ts",
+  "agent-reliability.test.ts",
   "budget.test.ts",
   "symbols.test.ts",
   "lsp-nav.test.ts",

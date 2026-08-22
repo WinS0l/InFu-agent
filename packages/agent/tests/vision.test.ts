@@ -103,6 +103,8 @@ const st = await TOOLS.screen_tree.execute({ max_depth: 6, max_elements: 50, pid
 check("screen_tree 返回 UI 树", st.includes("【桌面 UI 可访问性树】") && st.includes('[0] Button "确定"') && st.includes("100,200 80x30"), st.slice(0, 120));
 check("screen_tree 参数透传", treeOpts?.maxDepth === 6 && treeOpts?.maxElements === 50 && treeOpts?.pid === 1234, JSON.stringify(treeOpts));
 check("screen_tree 未注入视觉队列（纯文本）", ctx.visionQueue!.length === preLen, String(ctx.visionQueue!.length));
+const sv = await TOOLS.screen_verify.execute({ expected: "搜索框", pid: 1234 }, { ...ctx, callId: "c4v" });
+check("screen_verify 返回 UI 验证证据", sv.startsWith("验证通过") && sv.includes("证据"), sv.slice(0, 180));
 // 超长树截断（mock 10000 字符 > 8000 截断线）
 (globalThis as Record<string, unknown>).__infuScreenTree = async () => "行\n".repeat(5000);
 const stLong = await TOOLS.screen_tree.execute({}, { ...ctx, callId: "c5" });
@@ -130,6 +132,10 @@ check("拒绝时未点击", deniedOut.includes("用户拒绝"), deniedOut);
 check("medium 审批被触发", denied, "未触发审批");
 const okOut = await TOOLS.screen_click.execute({ x: 10, y: 20 }, { ...ctx, callId: "c5" });
 check("批准后点击成功", okOut.includes("已点击 (10, 20)"), okOut);
+(globalThis as Record<string, unknown>).__infuScreenTree = async () =>
+  '【窗口】 测试应用\n  [0] Button "确定"\n  [1] Edit "搜索框"';
+const verifiedClick = await TOOLS.screen_click.execute({ x: 10, y: 20, expected: "确定", pid: 1234 }, { ...ctx, callId: "c5v" });
+check("screen_click 单次调用包含操作后验证", verifiedClick.includes("验证通过") && verifiedClick.includes("确定"), verifiedClick);
 const controller = new AbortController();
 await TOOLS.screen_move.execute({ x: -1910, y: 20 }, { ...ctx, callId: "absolute", abortSignal: controller.signal });
 check("桌面输入使用绝对坐标并透传取消信号", receivedSignal === controller.signal && receivedInput?.action === "move" && receivedInput.params[0] === -1910, JSON.stringify(receivedInput));
@@ -137,7 +143,9 @@ check("桌面输入使用绝对坐标并透传取消信号", receivedSignal === 
 // 6. 其余 screen_* 通道
 console.log("\n> screen_type / scroll / key / move / drag / windows");
 const t1 = await TOOLS.screen_type.execute({ text: "hello" }, { ...ctx, callId: "c6" });
-check("type 成功", t1.includes("已输入 hello"), t1);
+check("type 成功且不回显输入", t1.includes("已输入 5 个字符") && !t1.includes("hello"), t1);
+const t1v = await TOOLS.screen_type.execute({ text: "secret-value", expected: "搜索框", pid: 1234 }, { ...ctx, callId: "c6v" });
+check("screen_type 单次调用验证且不泄露输入", t1v.includes("验证通过") && !t1v.includes("secret-value"), t1v);
 const t2 = await TOOLS.screen_scroll.execute({ direction: "down", amount: 2 }, { ...ctx, callId: "c7" });
 check("scroll 成功", t2.includes("已滚动 down 2"), t2);
 const t3 = await TOOLS.screen_key.execute({ keys: "ctrl+c" }, { ...ctx, callId: "c8" });
@@ -146,7 +154,7 @@ const t4 = await TOOLS.screen_move.execute({ x: 5, y: 6 }, { ...ctx, callId: "c9
 check("move 成功", t4.includes("已移动到 (5, 6)"), t4);
 const t5 = await TOOLS.screen_drag.execute({ x1: 0, y1: 0, x2: 100, y2: 100 }, { ...ctx, callId: "c10" });
 check("drag 成功", t5.includes("已拖拽"), t5);
-(globalThis as Record<string, unknown>).__infuScreenWindows = async (action: string) => "OK list";
+(globalThis as Record<string, unknown>).__infuScreenWindows = async (_action: string) => "OK list";
 const t6 = await TOOLS.screen_windows.execute({ action: "list" }, { ...ctx, callId: "c11" });
 check("windows list 成功", t6.includes("OK"), t6);
 const t7 = await TOOLS.screen_windows.execute({ action: "activate", name: "notepad" }, { ...ctx, callId: "c12" });

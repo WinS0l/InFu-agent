@@ -22,7 +22,7 @@ import { inflateRawSync } from "node:zlib";
 import path from "node:path";
 import { execFile, execFileSync } from "node:child_process";
 import { promisify } from "node:util";
-import type { ModelConfig, AgentEvent, RiskLevel, InfuConfig, PhaseId, ProviderConfig, SessionMeta, AttachmentMeta } from "@infu/shared";
+import type { ModelConfig, AgentEvent, RiskLevel, InfuConfig, PhaseId, ProviderConfig, AttachmentMeta } from "@infu/shared";
 import { loadConfig, saveConfig, resolveFallbackModels, resolveRoleModel, resolveRoleThinking, toRuntimeModel, resolveBaseURL, configPath } from "./providers/registry.js";
 import { resolveDataDir, defaultDataDir, migrateDataDir } from "./data-dir.js";
 import { autoNameSession } from "./session-naming.js";
@@ -32,7 +32,6 @@ import { clearRecovery, cleanupRecovery } from "./tools/recovery.js";
 import { clearApprovalMemory, clearSessionBypass, setSessionBypass, isSessionBypassed } from "./approval/cache.js";
 import { setEgressAllow, clearEgressAllow, isEgressAllowed, egressAllowRemaining } from "./egress-allow.js";
 import { isPathInside } from "./tools/util.js";
-import { DEFAULT_SYSTEM_PROMPT } from "./agent/loop.js";
 import { runOrchestratedTask, type OrchestratedRunOptions } from "./agent/orchestrator.js";
 import { inferResumePhase } from "./agent/resume.js";
 import { loadMcpTools } from "./mcp/index.js";
@@ -43,8 +42,8 @@ import { listSkills, buildSkillsPrompt, clearPluginSkillDirs } from "./plugin/sk
 import { clearTodos } from "./tools/task-tools.js";
 import { listTopics as _listTopics, readMemory as _readMemory, globalMemoryDir as _globalMemoryDir, projectMemoryDir as _projectMemoryDir } from "./memory/store.js";
 import { findInstructionFile as _findInstructionFile } from "./memory/infu.js";
-import { buildInfuPrompt, buildMemoryPrompt, findInstructionFile, parseScopeRules, sedimentTask } from "./memory/index.js";
-import { listProjects, createProject, removeProject, resolveProjectByName, ensureGitIgnore, findProjectByRoot } from "./projects.js";
+import { buildInfuPrompt, buildMemoryPrompt, findInstructionFile, parseScopeRules } from "./memory/index.js";
+import { listProjects, createProject, removeProject, resolveProjectByName, findProjectByRoot } from "./projects.js";
 import { listAgents, buildAgentsPrompt, writeAgentFile, deleteAgentFile } from "./agent/agents.js";
 import { abortBackgroundAgentsByDepth, SUBAGENT_FORBIDDEN_TOOLS } from "./agent/subagent.js";
 import { killJob } from "./tools/jobs.js";
@@ -225,12 +224,6 @@ async function handleNodeRequest(app: ReturnType<typeof createApp>, incoming: In
     if (!outgoing.writableEnded) outgoing.end(JSON.stringify({ ok: false, message: "Internal server error" }));
     console.error("[infu-agent] request failed:", error);
   }
-}
-
-/** API Key 脱敏 */
-function maskSecret(s: string): string {
-  if (s.length <= 8) return "****";
-  return s.slice(0, 4) + "****" + s.slice(-4);
 }
 
 export function createApp(opts: ServerOptions = {}) {
@@ -1276,7 +1269,6 @@ const pendingQuestions = new Map<string, { sessionId: string; resolve: (answer: 
       }
       root = safeRoot;
       execRoot = path.resolve(execRoot);
-      let effectivePrompt = prompt;
       // v2.2 断点恢复：继续会话 = 从事件流重建完整 messages（工具结果直接来自 DB，不重放副作用）
       let initialMessages: ChatMessageLike[] | undefined;
       // v2.3 阶段级精确续跑：从事件流推断续跑起点（已确认计划 → 跳过规划阶段）

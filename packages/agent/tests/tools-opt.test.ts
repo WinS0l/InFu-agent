@@ -3,7 +3,7 @@ import { mkdtempSync, writeFileSync, mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { TOOLS, getReadOnlyTools } from "../src/tools/index.js";
-import { pruneToolResults, compressMessages } from "../src/agent/context.js";
+import { pruneToolResults, pruneHistoricalToolResults, compressMessages } from "../src/agent/context.js";
 
 let passed = 0;
 let failed = 0;
@@ -56,6 +56,19 @@ console.log("\n▶ 压缩剪枝");
   check("剪枝含标记", toolText.includes("中间部分已剪"));
   const small = [{ role: "tool", tool_call_id: "c1", content: "tiny" }];
   check("短结果不剪", pruneToolResults(small)[0].content === "tiny");
+}
+
+// ── 2.5 长任务历史工具输出裁剪（不等到 1M 窗口才省 token）──
+console.log("\n▶ 长任务历史工具输出裁剪");
+{
+  const messages = [
+    { role: "system" as const, content: "sys" },
+    ...Array.from({ length: 8 }, (_, i) => ({ role: "tool" as const, tool_call_id: `c${i}`, content: `${i}:` + "z".repeat(4000) })),
+  ];
+  const pruned = pruneHistoricalToolResults(messages, 2);
+  check("较早大型工具结果被裁剪", typeof pruned[1].content === "string" && (pruned[1].content as string).includes("较早工具结果已压缩"));
+  check("最近工具结果保持完整", pruned[7].content === messages[7].content && pruned[8].content === messages[8].content);
+  check("历史裁剪保留头尾证据", typeof pruned[1].content === "string" && (pruned[1].content as string).startsWith((messages[1].content as string).slice(0, 1600)) && (pruned[1].content as string).endsWith("z".repeat(600)));
 }
 
 // ── 3. compressMessages 剪枝后不超预算则不压缩 ──

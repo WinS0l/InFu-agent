@@ -9,7 +9,7 @@
  *  - 各能力面板：MCP/插件/技能/子智能体/钩子/浏览器/记忆/统计/索引
  */
 
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   Plus, Trash2, Loader2, RefreshCw, ChevronDown, ChevronRight, Check, Blocks, Pencil, Save,
   Coins, MessageSquare, MessagesSquare, CalendarCheck, Flame, Sparkles, FolderOpen,
@@ -1368,8 +1368,6 @@ export function StatsPane() {
     </div>
   );
 
-  // v3.0 UI 审查批 2：横向条形图归一化基准 = 各日总量最大值（byModel 真实数据优先）
-  const maxDayTotal = Math.max(1, ...(stats?.dailyTrend.map((d) => Math.max(d.tokens, d.byModel.reduce((s, m) => s + m.tokens, 0))) ?? [1]));
   // v3.3 补 12（用户拍板）：统一标尺 8.5 亿 tokens = 100%——按天趋势 Y 轴上限固定
   // 8.5 亿（不再随数据浮动），热力图色阶同样按 8.5 亿的比例分档（口径一致）：
   // 日常消耗（几万-几十万 ≈ 0.1% 以下）落在最浅档，真·重度（>1.7 亿）才深色
@@ -1688,7 +1686,7 @@ export function DataDirPane() {
       .then((d) => setInfo(d as DataDirInfo))
       .catch((e) => setError((e as Error).message));
   };
-  useEffect(() => { load(); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, []);
+  useEffect(() => { load();   }, []);
 
   const runMigrate = async (target: string) => {
     setBusy(true); setError(""); setNotice(""); setConfirming(false);
@@ -1899,7 +1897,7 @@ export function SchedulePane() {
       .then((list) => setItems(list as ScheduleItem[]))
       .catch((e) => setError((e as Error).message));
   };
-  useEffect(() => { load(); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, []);
+  useEffect(() => { load();   }, []);
 
   const add = async () => {
     if (!cron.trim() || !prompt.trim()) { setError("cron 与任务描述必填"); return; }
@@ -2057,7 +2055,7 @@ export function AuditPane() {
   const [busy, setBusy] = useState(false);
   const seqRef = useRef(0);
 
-  const load = (query = q, errOnly = onlyErr) => {
+  const load = useCallback((query: string, errOnly: boolean) => {
     const seq = ++seqRef.current;
     setBusy(true);
     const params = new URLSearchParams({ limit: "200", q: query });
@@ -2071,8 +2069,8 @@ export function AuditPane() {
       })
       .catch((e) => { if (seq === seqRef.current) setError((e as Error).message); })
       .finally(() => { if (seq === seqRef.current) setBusy(false); });
-  };
-  useEffect(() => { load("", false); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, []);
+  }, []);
+  useEffect(() => { load("", false); }, [load]);
 
   return (
     <div>

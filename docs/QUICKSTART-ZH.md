@@ -7,7 +7,7 @@
 打开项目的 GitHub Releases 页面，下载：
 
 ```text
-InFu-1.0.0-win-x64-portable.zip
+InFu-1.0.1-win-x64-portable.zip
 ```
 
 下载完成后：

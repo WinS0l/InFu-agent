@@ -176,7 +176,6 @@ export const gitTools: Record<string, ToolDef> = {
       if (!/^[A-Za-z0-9._\/-]+$/.test(name)) {
         return `错误：非法分支名 "${name}"（只允许字母数字 . _ / -）`;
       }
-      const isWrite = action !== "list";
       if (action === "create") {
         if (!(await import("./util.js")).guard(ctx, "git_branch", "low", `创建分支：${name}`)) return "用户拒绝：未创建";
         const r = await gitRun(ctx, rel, ["branch", name]);

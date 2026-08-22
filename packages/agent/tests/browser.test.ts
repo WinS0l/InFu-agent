@@ -11,6 +11,8 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ToolContext, AgentEvent } from "@infu/shared";
+import { saveConfig } from "../src/providers/registry.js";
+import { setDataDirForTest } from "../src/data-dir.js";
 
 let passed = 0;
 let failed = 0;
@@ -29,10 +31,17 @@ check("找到 chromium 可执行文件", !!chromePath, String(chromePath));
 // 2. 参数防御（不启动浏览器）
 console.log("\n▶ 参数防御");
 const proj = mkdtempSync(join(tmpdir(), "infu-browser-"));
+const configDir = mkdtempSync(join(tmpdir(), "infu-browser-config-"));
+setDataDirForTest(configDir);
+saveConfig({ models: [], approvalPolicy: { mode: "smart" } });
 const events: AgentEvent[] = [];
+const approvals: Array<{ description: string; risk: string; explicit?: boolean }> = [];
 const ctx: ToolContext = {
   root: proj, cwd: proj,
-  requestApproval: async () => true,
+  requestApproval: async (description, risk, explicit) => {
+    approvals.push({ description, risk, explicit });
+    return true;
+  },
   emit: (e) => events.push(e),
 };
 const tool = (name: string) => browserTools.find((t) => t.name === name)!;
@@ -65,11 +74,26 @@ if (chromePath) {
     check("截图文件名阻止路径穿越", traversalPath.startsWith(join(proj, ".infu", "browser")) && !traversalPath.includes(".."), traversalPath);
     const snap = await tool("browser_snapshot").execute({}, ctx);
     check("snapshot 返回页面状态", snap.includes("Hello Browser"), snap.slice(0, 200));
+    const verified = await tool("browser_verify").execute({ kind: "title", expected: "InFu 浏览器测试页" }, ctx);
+    check("browser_verify 提供可观察验证证据", verified.startsWith("验证通过") && verified.includes("证据"), verified);
+    approvals.length = 0;
+    const sensitiveFill = await tool("browser_fill").execute({
+      selector: "密码",
+      value: "do-not-log-this",
+      expected: { kind: "selector", value: "input" },
+    }, ctx);
+    check("敏感字段填写成功", sensitiveFill.includes("已填写"), sensitiveFill);
+    check("fill 可在单次调用中验证结果", sensitiveFill.includes("验证通过"), sensitiveFill);
+    check("敏感字段要求显式高风险审批且不泄露值", approvals.length === 1 && approvals[0].risk === "high" && approvals[0].explicit === true && !approvals[0].description.includes("do-not-log-this"), JSON.stringify(approvals));
     const submitIndex = /\[(\d+)\].*提交/.exec(snap)?.[1];
     await tool("browser_eval").execute({ code: "document.querySelector('button').dataset.clicked = 'yes'; document.body.insertAdjacentHTML('afterbegin', '<button>新按钮</button>')" }, ctx);
-    const clicked = submitIndex ? await tool("browser_click").execute({ target: submitIndex }, ctx) : "";
+    const clicked = submitIndex ? await tool("browser_click").execute({
+      target: submitIndex,
+      expected: { kind: "selector", value: "button[data-clicked='yes']" },
+    }, ctx) : "";
     const clickState = await tool("browser_eval").execute({ code: "return document.querySelector('button[data-clicked]')?.dataset.clicked" }, ctx);
     check("编号点击使用快照句柄而非重建编号", clicked.includes("已点击") && clickState.includes("yes"), `${clicked}\n${clickState}`);
+    check("click 可在单次调用中验证结果", clicked.includes("验证通过"), clicked);
   } finally {
     await tool("browser_close").execute({}, ctx);
     server.close();
@@ -89,6 +113,7 @@ check("未知插件 → null", findMarketplacePlugin("nope") === null);
 
 // 清理
 rmSync(proj, { recursive: true, force: true });
+rmSync(configDir, { recursive: true, force: true });
 await closeBrowser();
 
 console.log(`\n=== 结果：${passed} 通过 / ${failed} 失败 ===`);

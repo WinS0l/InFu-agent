@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { FileDiff, FlaskConical, GitCompare, Loader2, ArrowLeft, ChevronRight } from "lucide-react";
+import { FlaskConical, GitCompare, Loader2, ArrowLeft, ChevronRight } from "lucide-react";
 import { useStore } from "../store";
 import { gitInitProject } from "../api";
 import { GitBranch } from "lucide-react";
@@ -123,7 +123,7 @@ export default function ReviewPane() {
           useStore.getState().addError("审查文件列表加载失败（服务未就绪或目录不可读）");
         }
       });
-  }, [root]);
+  }, [root, rawRoot]);
 
   const pickFile = async (path: string) => {
     const seq = ++diffSeq.current;

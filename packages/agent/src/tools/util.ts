@@ -18,7 +18,7 @@ import {
 import { loadConfig } from "../providers/registry.js";
 import { findProjectByRoot } from "../projects.js";
 import {
-  currentApprovalPolicy, isToolDisabled, resolveToolRisk, shouldAutoApprove, isCommandAllowed,
+  currentApprovalPolicy, isToolDisabled, resolveToolRisk, shouldAutoApprove,
 } from "../approval/policy.js";
 import { approvalMemoryKey, approvalRemembered, approvalRemember, isSessionBypassed } from "../approval/cache.js";
 

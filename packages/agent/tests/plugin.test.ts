@@ -88,7 +88,7 @@ writeFileSync(badPlugin, `export const notAPlugin = 1;\n`);
 const throwPlugin = join(proj, "throw-plugin.mjs");
 writeFileSync(throwPlugin, `throw new Error("导入即失败");\n`);
 
-const emit = (e: AgentEvent) => { /* 静默收集 */ };
+const emit = (_e: AgentEvent) => { /* 静默收集 */ };
 
 // ── 1. 插件加载器 ──
 console.log("▶ loadPlugins");

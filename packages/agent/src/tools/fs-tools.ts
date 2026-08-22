@@ -7,9 +7,9 @@
 import { z } from "zod";
 import fs from "node:fs";
 import path from "node:path";
-import type { ToolDef, ToolContext } from "@infu/shared";
+import type { ToolDef } from "@infu/shared";
 import { isProtectedPath } from "../sandbox/index.js";
-import { isPathInside, clip, guard, sessionRootReadOnlyBlock } from "./util.js";
+import { isPathInside, guard, sessionRootReadOnlyBlock } from "./util.js";
 import { checkPathScope } from "../memory/index.js";
 import { backupForRecovery, restoreRecovery } from "./recovery.js";
 

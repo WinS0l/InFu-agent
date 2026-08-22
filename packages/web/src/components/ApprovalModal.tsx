@@ -1,4 +1,4 @@
-import { ShieldAlert, ShieldCheck, Shield, Zap } from "lucide-react";
+import { ShieldAlert, Shield, Zap } from "lucide-react";
 import { useStore } from "../store";
 import { Modal, CapsuleButton } from "./ui";
 import { setApprovalBypass } from "../api";

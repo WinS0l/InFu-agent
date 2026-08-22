@@ -1,6 +1,9 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { ChevronRight, FileText, Folder, FolderOpen, Loader2, Search, ExternalLink, Code2 } from "lucide-react";
-import hljs from "highlight.js";
+// `highlight.js` 的完整构建会把所有语言定义一起打进懒加载的代码浏览器，
+// 单个页面就接近 1 MB。common 构建覆盖这里映射的大多数常见语言；未注册语言
+// 会由 langOf 安全回退为纯文本。
+import hljs from "highlight.js/lib/common";
 import { useStore } from "../store";
 import { fetchFsTree, fetchFsFile, type FsTreeFile } from "../api";
 
@@ -115,7 +118,7 @@ export default function CodeView() {
         fail(new Error("root 无效"));
       }
     });
-  }, [root]);
+  }, [root, rawRoot]);
 
   // v3.3 补 22：root（工作树/项目）变化时重置生效 root——避免旧值残留串到新会话
   useEffect(() => {

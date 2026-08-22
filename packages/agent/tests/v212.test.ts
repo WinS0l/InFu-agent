@@ -14,11 +14,10 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { SessionStore } from "../src/db/store.js";
-import { compactJsonSchema, TOOL_DESC_MAX, trimToolResult } from "../src/agent/loop.js";
+import { compactJsonSchema } from "../src/agent/loop.js";
 import { streamChat, type StreamChatOptions } from "../src/providers/chat.js";
 import { TOOLS, getReadOnlyTools } from "../src/tools/index.js";
 import { setSessionStoreProvider } from "../src/tools/session-tools.js";
-import type { AgentEvent } from "@infu/shared";
 
 let passed = 0;
 let failed = 0;

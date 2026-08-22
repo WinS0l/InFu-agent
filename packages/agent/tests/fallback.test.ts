@@ -45,7 +45,6 @@ async function collect(chain: ModelChain, messages = []): Promise<string> {
 
 const A = { provider: "deepseek", model: "model-a", apiKey: "k" };
 const B = { provider: "zhipu", model: "model-b", apiKey: "k" };
-const C = { provider: "qwen", model: "model-c", apiKey: "k" };
 
 console.log("\n=== 降级链自测 ===\n");
 

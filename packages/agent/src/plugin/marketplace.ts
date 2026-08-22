@@ -27,7 +27,7 @@ const _registry: MarketplacePlugin[] = [
     name: "browser-use",
     description:
       "浏览器自动化：打开/导航网页、AI 可访问性树快照、点击/输入/填表、页面 JS 执行、截图视觉验证。用于 Web 前端测试、渲染页面抓取、交互验证（含 control-browser / web-gui-tester 两个技能）。",
-    version: "0.2.0",
+    version: "1.0.1",
     path: fileURLToPath(new URL(`./browser/tools${_moduleExt}`, import.meta.url)),
     source: "builtin",
   },

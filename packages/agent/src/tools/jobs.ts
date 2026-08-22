@@ -15,7 +15,6 @@
 
 import { spawn, type ChildProcess } from "node:child_process";
 import fs from "node:fs";
-import path from "node:path";
 import { sanitizeEnv, auditCommand } from "../sandbox/index.js";
 
 /** 输出环形缓冲上限（超出丢头部，防常驻进程输出无限膨胀） */
@@ -79,7 +78,7 @@ function trimJobRegistry(sessionId: string | undefined): void {
   if (m.size === 0) jobsBySession.delete(key);
 }
 
-function finalizeJob(h: JobHandle, code: number | null, signal: string | null): void {
+function finalizeJob(h: JobHandle, code: number | null, _signal: string | null): void {
   h.code = code;
   h.endedAt = Date.now();
   if (h.killRequested) h.status = "killed";

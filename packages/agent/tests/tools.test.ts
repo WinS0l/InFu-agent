@@ -43,7 +43,6 @@ const ctx: ToolContext = {
 };
 
 const run = (name: string, args: Record<string, unknown>) => TOOLS[name].execute(args, ctx);
-const T = TOOLS;
 
 console.log("\n=== 工具系统自测 ===\n");
 

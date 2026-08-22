@@ -8,7 +8,7 @@
  *  - 真实 OCR：PowerShell System.Drawing 绘制含文字的 PNG → ocr_image 识别出文本
  *  - path 省略 → 自动用 .infu/screenshots/ 最新截图
  */
-import { mkdtempSync, rmSync, mkdirSync, writeFileSync, existsSync, readdirSync } from "node:fs";
+import { mkdtempSync, rmSync, mkdirSync, writeFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";

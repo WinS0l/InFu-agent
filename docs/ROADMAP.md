@@ -1,8 +1,8 @@
 # InFu Roadmap
 
-## Current Release: 1.0.0
+## Current Release: 1.0.1
 
-InFu 1.0.0 is a local Windows coding agent with a React workbench and Electron desktop application.
+InFu 1.0.1 is a local Windows coding agent with a React workbench and Electron desktop application.
 
 Completed capabilities:
 

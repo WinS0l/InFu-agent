@@ -16,10 +16,10 @@ import { TOOLS, getReadOnlyTools } from "../src/tools/index.js";
 import { isProtectedPath } from "../src/sandbox/index.js";
 import {
   findInstructionFile, parseScopeRules, globToRegExp, checkPathScope,
-  buildInfuPrompt, buildMemoryPrompt, INSTRUCTION_MAX_BYTES,
+  buildInfuPrompt, INSTRUCTION_MAX_BYTES,
 } from "../src/memory/infu.js";
 import {
-  readMemory, writeMemory, listTopics, validateTopic, resolveMemoryPath, detectSensitiveContent,
+  readMemory, writeMemory, validateTopic, resolveMemoryPath, detectSensitiveContent,
 } from "../src/memory/store.js";
 import { sedimentTask } from "../src/memory/sediment.js";
 import { setDataDirForTest } from "../src/data-dir.js";
@@ -184,7 +184,7 @@ console.log("\n── 记忆读写 ──");
   const wg = writeMemory("global", "preferences", "测试模型用 agnes", "append", projMem);
   check("全局记忆写入数据目录/memory", wg.ok && existsSync(join(gdir, "preferences.md")));
   check("全局记忆读取", readMemory("global", "preferences", projMem).text.includes("测试模型用 agnes"));
-  const wg2 = writeMemory("global", "preferences", "不许用 deepseek", "append", projMem);
+  writeMemory("global", "preferences", "不许用 deepseek", "append", projMem);
   check("全局记忆追加两条", readMemory("global", "preferences", projMem).text.includes("不许用 deepseek"));
 
   // 写保护精确化：write_file 依旧拦截 ~/.infu，memory_write 是唯一合法通道（本工具内部校验路径）

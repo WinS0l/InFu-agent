@@ -1,6 +1,6 @@
 {
   "name": "@infu/desktop",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "license": "Apache-2.0",
   "private": true,
   "description": "InFu 桌面端（Electron 壳：宿主 agent 后端 + 嵌入式真浏览器）",
@@ -69,7 +69,9 @@
       "target": [
         {
           "target": "nsis",
-          "arch": ["x64"]
+          "arch": [
+            "x64"
+          ]
         }
       ],
       "icon": "build/icon.png"

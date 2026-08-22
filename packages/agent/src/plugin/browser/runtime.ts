@@ -46,7 +46,6 @@ export interface BrowserTab {
 }
 
 const g = globalThis as Record<string, unknown>;
-const NET_TIMEOUT = 30000;
 
 /** ─────────────────────────── 桌面模式（CDP 桥） ─────────────────────────── */
 
@@ -428,7 +427,7 @@ class WebTab implements BrowserTab {
   }
 }
 
-async function getWebTab(opts?: { create?: boolean }): Promise<BrowserTab> {
+async function getWebTab(_opts?: { create?: boolean }): Promise<BrowserTab> {
   if (page && !page.isClosed()) return new WebTab(page);
   const { chromium } = await import("playwright-core");
   let cfg: { headless?: boolean; executablePath?: string } | undefined;

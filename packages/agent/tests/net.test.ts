@@ -10,7 +10,6 @@ import {
   isPrivateHostText,
   isLoopbackHostText,
   ipv6EmbeddedV4,
-  isLoopbackIpv6,
 } from "@infu/shared";
 
 let passed = 0;

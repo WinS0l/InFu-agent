@@ -120,7 +120,7 @@ export async function maybeAutoVerify(input: AutoVerifyInput): Promise<AutoVerif
       out: `${input.out}\n\n[自动验证] 已自动运行 ${cmd}：${status}${hint}\n${clip(r.out, VERIFY_RESULT_LIMIT)}`,
       verification: { command: cmd, status: r.ok ? "passed" : "failed", output: r.out },
     };
-  } catch (e) {
+  } catch {
     // 验证本身异常静默（不阻塞写操作结果）
     return { out: input.out };
   }

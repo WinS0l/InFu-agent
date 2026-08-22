@@ -25,9 +25,27 @@ const MIME: Record<string, string> = {
   ".webp": "image/webp",
 };
 const MAX_IMG = 8 * 1024 * 1024; // 8MB（视觉模型输入上限附近）
+/** 避免把可能的令牌/私钥回显到审批、工具结果或会话时间线。 */
+const SENSITIVE_TYPED_TEXT = /(?:\b(?:sk|ghp|github_pat|xox[baprs]|AKIA)[-_A-Za-z0-9]{12,}\b|-----BEGIN [A-Z ]+PRIVATE KEY-----)/i;
 
 function isDesktop(): boolean {
   return process.versions.electron !== undefined;
+}
+
+async function verifyScreen(expected: string, pid?: number): Promise<string> {
+  const tree = (globalThis as Record<string, unknown>).__infuScreenTree as
+    | ((opts: { maxDepth?: number; maxElements?: number; pid?: number }) => Promise<string>)
+    | undefined;
+  if (typeof tree !== "function") return "验证失败：桌面 UI 树通道不可用（主进程未接线）";
+  try {
+    const body = await tree({ maxDepth: 6, maxElements: 160, pid });
+    const evidence = body.slice(0, 1200);
+    return body.includes(expected)
+      ? `验证通过：UI 树包含 ${JSON.stringify(expected)}\n证据：${evidence}`
+      : `验证失败：UI 树未包含 ${JSON.stringify(expected)}\n证据：${evidence}`;
+  } catch (e) {
+    return `验证失败：${(e as Error).message}`;
+  }
 }
 
 /** 截图目录（项目 .infu/screenshots/——INFU 产物统一收进 .infu/） */
@@ -231,7 +249,7 @@ export const visionTools: Record<string, ToolDef> = {
       max_elements: z.number().int().min(10).max(300).optional().describe("最多输出交互元素数（默认 120）"),
       pid: z.number().int().min(0).optional().describe("目标窗口的进程 id（screen_windows 查看；缺省 = 当前前台窗口）"),
     }),
-    async execute(args, ctx) {
+    async execute(args, _ctx) {
       if (!isDesktop()) return "错误：screen_tree 仅桌面版可用（Web 版无桌面访问能力）";
       const g = globalThis as Record<string, unknown>;
       const tree = g.__infuScreenTree as ((opts: { maxDepth?: number; maxElements?: number; pid?: number }) => Promise<string>) | undefined;
@@ -246,15 +264,31 @@ export const visionTools: Record<string, ToolDef> = {
       return `【桌面 UI 可访问性树】\n${body}`;
     },
   },
+  "screen_verify": {
+    name: "screen_verify",
+    description:
+      "验证桌面 UI 自动化结果：读取目标/前台窗口的 UI 可访问性树，并确认 expected 文本存在。关键点击、输入、安装或提交后应调用；失败会返回截断的当前 UI 证据，供重新定位或恢复。",
+    risk: "low",
+    schema: z.object({
+      expected: z.string().min(1).describe("UI 树中应出现的窗口标题、控件名称或状态文本"),
+      pid: z.number().int().min(0).optional().describe("目标窗口进程 id；缺省 = 当前前台窗口"),
+    }),
+    async execute(args) {
+      if (!isDesktop()) return "错误：screen_verify 仅桌面版可用";
+      return await verifyScreen(args.expected as string, args.pid as number | undefined);
+    },
+  },
   "screen_click": {
     name: "screen_click",
     description:
-      "在屏幕坐标（x, y）执行鼠标点击（computer-use：配合 screen_capture 观察后操作）。仅桌面版可用。坐标 = 屏幕像素（截图同坐标系）。",
+      "在屏幕坐标（x, y）执行鼠标点击（computer-use：配合 screen_capture 观察后操作）。仅桌面版可用。坐标 = 屏幕像素（截图同坐标系）。提供 expected 时会在点击后读取 UI 树并验证结果。",
     risk: "medium",
     schema: z.object({
       x: z.number().describe("屏幕 x 坐标（像素）"),
       y: z.number().describe("屏幕 y 坐标（像素）"),
       button: z.enum(["left", "right", "double"]).optional().describe("点击类型（默认 left）"),
+      expected: z.string().min(1).optional().describe("点击后 UI 树中应出现的文本"),
+      pid: z.number().int().min(0).optional().describe("验证目标窗口进程 id"),
     }),
     async execute(args, ctx) {
       if (!isDesktop()) return "错误：screen_click 仅桌面版可用";
@@ -264,25 +298,40 @@ export const visionTools: Record<string, ToolDef> = {
       if (typeof input !== "function") return "错误：桌面输入通道不可用（主进程未接线）";
       const btn = (args.button as string) ?? "left";
       const r = await input("click", [args.x as number, args.y as number, btn], ctx.abortSignal);
-      return r.startsWith("OK") ? `已点击 (${args.x}, ${args.y}) ${btn === "double" ? "双击" : btn === "right" ? "右键" : "左键"}` : `点击失败：${r}`;
+      if (!r.startsWith("OK")) return `点击失败：${r}`;
+      const out = `已点击 (${args.x}, ${args.y}) ${btn === "double" ? "双击" : btn === "right" ? "右键" : "左键"}`;
+      return typeof args.expected === "string"
+        ? `${out}\n${await verifyScreen(args.expected, args.pid as number | undefined)}`
+        : out;
     },
   },
   "screen_type": {
     name: "screen_type",
     description:
-      "向当前聚焦窗口输入文本（computer-use：点击输入框后键入）。仅桌面版可用。注意：输入落在系统当前焦点处——使用前先 screen_click 聚焦目标。",
+      "向当前聚焦窗口输入文本（computer-use：点击输入框后键入）。仅桌面版可用。注意：输入落在系统当前焦点处——使用前先 screen_click 聚焦目标。提供 expected 时会在输入后验证 UI 树，输入内容始终不回显。",
     risk: "medium",
     schema: z.object({
       text: z.string().describe("要输入的文本"),
+      expected: z.string().min(1).optional().describe("输入后 UI 树中应出现的非敏感状态文本"),
+      pid: z.number().int().min(0).optional().describe("验证目标窗口进程 id"),
     }),
     async execute(args, ctx) {
       if (!isDesktop()) return "错误：screen_type 仅桌面版可用";
-      if (!(await guard(ctx, "screen_type", "medium", `桌面键盘输入：${(args.text as string).slice(0, 40)}`))) return "用户拒绝：未输入";
+      const text = args.text as string;
+      const sensitive = SENSITIVE_TYPED_TEXT.test(text);
+      const description = sensitive
+        ? `向桌面应用输入疑似敏感凭据（${text.length} 个字符，内容已遮蔽）`
+        : `桌面键盘输入（${text.length} 个字符）`;
+      if (!(await guard(ctx, "screen_type", sensitive ? "high" : "medium", description, sensitive))) return "用户拒绝：未输入";
       const g = globalThis as Record<string, unknown>;
       const input = g.__infuScreenInput as DesktopScreenInput | undefined;
       if (typeof input !== "function") return "错误：桌面输入通道不可用（主进程未接线）";
-      const r = await input("type", [args.text as string], ctx.abortSignal);
-      return r.startsWith("OK") ? `已输入 ${(args.text as string).slice(0, 40)}` : `输入失败：${r}`;
+      const r = await input("type", [text], ctx.abortSignal);
+      if (!r.startsWith("OK")) return `输入失败：${r}`;
+      const out = `已输入 ${text.length} 个字符（内容不回显）`;
+      return typeof args.expected === "string"
+        ? `${out}\n${await verifyScreen(args.expected, args.pid as number | undefined)}`
+        : out;
     },
   },
   "screen_scroll": {

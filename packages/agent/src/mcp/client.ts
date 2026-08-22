@@ -50,7 +50,7 @@ export async function validateHttpMcpUrl(raw: string): Promise<URL> {
 }
 
 export async function connectMcp(cfg: McpServerConfig): Promise<McpConnection> {
-  const client = new Client({ name: "infu-agent", version: "1.0.0" });
+  const client = new Client({ name: "infu-agent", version: "1.0.1" });
   let transport: StdioClientTransport | StreamableHTTPClientTransport;
   if (cfg.type === "http") {
     if (!cfg.url) throw new Error(`MCP 服务器「${cfg.name}」：http 类型需要 url`);

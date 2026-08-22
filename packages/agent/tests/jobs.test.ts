@@ -77,13 +77,11 @@ let events: AgentEvent[] = [];
 
   // ── 4. 每会话活跃上限 ──
   const started: string[] = [];
-  let limitErr = "";
   for (let i = 0; i < MAX_JOBS_PER_SESSION; i++) {
     try {
       const h = startBackgroundJob(`node -e "setInterval(()=>{},1000)"`, root, SID, 0, () => {});
       started.push(h.id);
-    } catch (e) {
-      limitErr = (e as Error).message;
+    } catch {
       break;
     }
   }

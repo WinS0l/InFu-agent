@@ -2,12 +2,11 @@ import { memo, useCallback, useEffect, useMemo, useRef, useState, lazy, Suspense
 import {
   Send, Square, GitBranch, Loader2,
   RotateCcw, AlertTriangle, Files, Folder, FolderOpen, ChevronDown, Check,
-  BrainCircuit, ShieldCheck, ShieldAlert, Scale, Cpu, Paperclip, FileText, X, Pencil, Image as ImageIcon, WifiOff, Zap, Globe,
+  BrainCircuit, ShieldCheck, ShieldAlert, Scale, Paperclip, FileText, X, Pencil, WifiOff, Zap, Globe,
   CheckCircle2, XCircle, OctagonX, Skull, Command, ListTree, Bot, Activity, ClipboardCheck, ChevronRight,
 } from "lucide-react";
-import { Streamdown } from "streamdown";
-import type { DeliverySummary, PhaseId } from "@infu/shared";
-import { useStore, type ChatMsg, type ToolEventState } from "../store";
+import type { DeliverySummary } from "@infu/shared";
+import { useStore, type ChatMsg } from "../store";
 import { sendChat, mergeWorktree, discardWorktree, rewindSession, fetchProjects, fetchConfig, updateConfig, fetchPlugins, setApprovalBypass, fetchReviewFiles, killBackgroundJob, type ApprovalMode, type ChatFileInput, type PluginInfo, egressAllow, egressDisallow } from "../api";
 import Timeline from "./Timeline";
 import ReasoningBlock from "./ReasoningBlock";
@@ -17,8 +16,13 @@ import TodoPanel from "./TodoPanel";
 import { useCleanMarkdownBoxes } from "./markdown-clean";
 import AttachmentRail, { AttachmentLine, ATTACH_LIMITS, type AttachmentDraft } from "./AttachmentRail";
 import PlanCard from "./PlanCard";
-const TerminalPanel = lazy(() => import("./TerminalPanel"));
+// TerminalToggleButton 在 App 首屏已静态依赖本模块；这里再懒加载不会拆分 chunk，
+// 反而让 Vite 产生无效拆包告警。
+import TerminalPanel from "./TerminalPanel";
 import { CopyButton } from "./ui";
+
+// Markdown 解析器仅在首条助手回复后才需要；欢迎页与输入交互不必下载它。
+const Streamdown = lazy(async () => ({ default: (await import("streamdown")).Streamdown }));
 
 const EMPTY_TRACE_EVENTS: import("@infu/shared").StoredEvent[] = [];
 
@@ -177,9 +181,19 @@ function ActivityDock({ visible }: { visible: boolean }) {
     window.addEventListener("pointerup", onUp);
   };
   if (!visible || viewMode === "code") return null;
-  return <div ref={dockRef} className="absolute right-4 top-2 z-40 select-none" onPointerDown={resetIdle}>
+  return <div
+    ref={dockRef}
+    className="absolute right-4 top-2 z-40 select-none"
+    style={position ? { left: position.x, top: position.y, right: "auto" } : undefined}
+    onPointerDown={resetIdle}
+  >
     <div
-      onClick={() => { resetIdle(); setMenuOpen((v) => !v); }}
+      onPointerDown={beginDrag}
+      onClick={() => {
+        if (moved.current) { moved.current = false; return; }
+        resetIdle();
+        setMenuOpen((v) => !v);
+      }}
       className={`task-capsule group inline-flex h-7 max-w-[180px] cursor-pointer items-center rounded-full border bg-elevated/95 px-1.5 text-text backdrop-blur transition-[box-shadow,transform] duration-150 ${active ? "border-info/45" : "border-line hover:border-info/25"}`}
       title="打开会话状态"
     >
@@ -682,16 +696,12 @@ function ModelSelectMenu({ groups, modelId, thinkingLevel, thinkingHint, onSelec
 export default function ChatPanel() {
   const messages = useStore((s) => s.messages);
   const running = useStore((s) => s.running);
-  const runningIds = useStore((s) => s.runningIds);
   const abortRun = useStore((s) => s.abortRun);
   const worktree = useStore((s) => s.worktree);
-  const worktreeNote = useStore((s) => s.worktreeNote);
   const root = useStore((s) => s.root);
   const setRoot = useStore((s) => s.setRoot);
   const clearWorktree = useStore((s) => s.clearWorktree);
   const plan = useStore((s) => s.plan);
-  const useWorktree = useStore((s) => s.useWorktree);
-  const setUseWorktree = useStore((s) => s.setUseWorktree);
   const activeSessionId = useStore((s) => s.activeSessionId);
   const models = useStore((s) => s.models);
   const modelId = useStore((s) => s.modelId);
@@ -702,7 +712,6 @@ export default function ChatPanel() {
   const setPendingRollback = useStore((s) => s.setPendingRollback);
   const clearPendingRollback = useStore((s) => s.clearPendingRollback);
   const terminalOpen = useStore((s) => s.terminalOpen);
-  const setTerminalOpen = useStore((s) => s.setTerminalOpen);
   const viewMode = useStore((s) => s.viewMode);
   const queuesBySession = useStore((s) => s.queuesBySession);
   const [input, setInput] = useState("");
@@ -794,7 +803,7 @@ export default function ChatPanel() {
         setApprovalMode("smart");
         useStore.getState().addError("审批档位加载失败，已回退默认（smart）");
       });
-  }, []);
+  }, [setApprovalMode]);
 
   // v2 模型选择器：按供应商分组 + 思考级别映射提示
   const PROVIDER_GROUPS = (() => {
@@ -886,7 +895,6 @@ export default function ChatPanel() {
   // 消息变化（新回复/重放）后重新定位浮标
   useEffect(() => {
     updateActiveMsg();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [messages]);
 
   /** 进入回滚待定态：锚点 = 被点轮次对应的最后一条用户消息（编辑重发 = 替换它），
@@ -918,7 +926,7 @@ export default function ChatPanel() {
         if (ta) ta.focus();
       });
     },
-    [pendingRollback]
+    [pendingRollback, setPendingRollback]
   );
 
   /** 本地截断消息流（回滚/编辑确认后立即移除锚点及之后消息，等重放前先同步视觉） */
@@ -1469,9 +1477,9 @@ export default function ChatPanel() {
       {!narrow && messages.filter((m) => m.role === "user").length > 1 && (
         <div className="no-scrollbar absolute left-1 top-1/2 z-10 flex max-h-[70%] -translate-y-1/2 flex-col items-center gap-2.5 overflow-y-auto px-0.5 py-1">
           {messages
-            .map((m, i) => ({ m, i }))
+            .map((m) => ({ m }))
             .filter(({ m }) => m.role === "user")
-            .map(({ m, i }, n) => (
+            .map(({ m }, n) => (
               <button
                 key={m.id}
                 className={`relative h-[3px] shrink-0 cursor-pointer rounded-full transition-all duration-200 ease-out before:absolute before:-inset-x-2 before:-inset-y-2.5 before:content-[''] ${
@@ -1581,7 +1589,6 @@ export default function ChatPanel() {
                   m={m}
                   pending={pending}
                   turnEnd={turnEnd}
-                  lastEditIdx={lastEditIdx}
                   isLastUser={idx === lastUserIdx}
                   isWorktreeTarget={idx === lastEditIdx}
                   running={running}
@@ -1694,9 +1701,7 @@ export default function ChatPanel() {
 
       {/* v3 终端（仅对话模式；代码模式隐藏） */}
       {terminalOpen && viewMode === "chat" && (
-        <Suspense fallback={null}>
-          <TerminalPanel />
-        </Suspense>
+        <TerminalPanel />
       )}
 
       {/* v2.14 批 9：回滚完成提示（3 秒自动消失；主题样式悬浮条） */}
@@ -1716,13 +1721,12 @@ export default function ChatPanel() {
  * 回调由父组件 useCallback 化（onAskRewind/onStartEdit/onMerge），引用稳定。
  */
 const MessageItem = memo(function MessageItem({
-  m, pending, turnEnd, lastEditIdx, isLastUser, isWorktreeTarget, running, rollbackActive,
+  m, pending, turnEnd, isLastUser, isWorktreeTarget, running, rollbackActive,
   worktreeName, mergeBusy, onDiscard, onAskRewind, onStartEdit, onMerge,
 }: {
   m: ChatMsg;
   pending: boolean;
   turnEnd: boolean;
-  lastEditIdx: number;
   isLastUser: boolean;
   isWorktreeTarget: boolean;
   running: boolean;
@@ -1899,13 +1903,15 @@ const MessageItem = memo(function MessageItem({
       )}
       {m.text && !isEnvInfo(m.text) && (
         <div className={`${m.streaming ? "stream-cursor" : ""}`}>
-          <Streamdown
-            children={m.text}
-            mode={m.streaming ? "streaming" : "static"}
-            parseIncompleteMarkdown={m.streaming}
-            className="infu-md"
-            controls={{ table: false, code: false, mermaid: false }}
-          />
+          <Suspense fallback={<div className="whitespace-pre-wrap text-text/90">{m.text}</div>}>
+            <Streamdown
+              children={m.text}
+              mode={m.streaming ? "streaming" : "static"}
+              parseIncompleteMarkdown={m.streaming}
+              className="infu-md"
+              controls={{ table: false, code: false, mermaid: false }}
+            />
+          </Suspense>
         </div>
       )}
       {!m.streaming && <DeliverySummaryCard delivery={m.delivery} />}

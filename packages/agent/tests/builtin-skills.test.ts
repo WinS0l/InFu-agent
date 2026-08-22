@@ -35,8 +35,8 @@ console.log("\n▶ 插件技能挂载");
 const events: unknown[] = [];
 const r = await loadPlugins([], (e) => events.push(e));
 check("无失败插件", r.failures.length === 0, JSON.stringify(r.failures));
-// v3.0 批 5：+browser_tabs/browser_tab_new/browser_tab_select/browser_viewport → 12 工具
-check("browser-use 12 工具", r.tools.length === 12 && r.tools.some((t) => t.name === "browser_tab_select") && r.tools.some((t) => t.name === "browser_viewport"), JSON.stringify(r.tools.map((t) => t.name)));
+// browser_verify 为关键交互提供可观察的完成证据，避免只凭动作成功文案收尾。
+check("browser-use 13 工具", r.tools.length === 13 && r.tools.some((t) => t.name === "browser_verify") && r.tools.some((t) => t.name === "browser_tab_select") && r.tools.some((t) => t.name === "browser_viewport"), JSON.stringify(r.tools.map((t) => t.name)));
 check("插件技能目录 3 个", r.skillDirs.length === 3, JSON.stringify(r.skillDirs.map((d) => d.split(/[\\/]/).pop())));
 registerPluginSkillDirs(r.skillDirs);
 const skills = listSkills({ models: [] }, "E:/nonexistent-root");

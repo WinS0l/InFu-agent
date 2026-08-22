@@ -37,7 +37,7 @@ jobs:
           path: packages/web/artifacts/visual-reference
           # Increment this deliberately when an approved visual redesign replaces
           # the reference set. Routine UI regressions still use the 0.1% gate below.
-          key: infu-visual-baseline-v1.1.0-${{ github.ref_name }}
+          key: infu-visual-baseline-v1.1.0-r2-${{ github.ref_name }}
 
       - name: Start web preview for visual baseline
         shell: pwsh

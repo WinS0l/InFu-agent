@@ -3,7 +3,9 @@ import react from "@vitejs/plugin-react";
 import tailwindcss from "@tailwindcss/vite";
 
 export default defineConfig(({ mode }) => {
-  const token = process.env.INFU_LOCAL_TOKEN;
+  // 本地开发预览默认连接同机 Agent；桌面端仍以 URL 中的短期令牌为准。
+  // 显式环境变量优先，避免开发预览因缺少 header 把已有项目和会话误显示为空。
+  const token = process.env.INFU_LOCAL_TOKEN ?? (mode === "development" ? "dev-preview-token" : undefined);
   return {
   plugins: [react(), tailwindcss()],
   build: {

@@ -43,9 +43,16 @@ jobs:
           $chrome = Get-ChildItem "$env:USERPROFILE\AppData\Local\ms-playwright" -Recurse -Filter chrome.exe | Select-Object -First 1
           if (-not $chrome) { throw "Chromium executable not found after install" }
           "INFU_CHROMIUM_PATH=$($chrome.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          Start-Process npm -ArgumentList "run preview -w @infu/web -- --host 127.0.0.1 --port 5174" -WindowStyle Hidden
+          $previewLog = Join-Path $env:RUNNER_TEMP "infu-web-preview.log"
+          $previewCommand = "npm run preview -w @infu/web -- --host 127.0.0.1 --port 5174 > `"$previewLog`" 2>&1"
+          Start-Process -FilePath "cmd.exe" -ArgumentList "/d", "/s", "/c", $previewCommand -WindowStyle Hidden
+          $ready = $false
           for ($i = 0; $i -lt 30; $i++) {
-            try { Invoke-WebRequest http://127.0.0.1:5174 -UseBasicParsing -TimeoutSec 2 | Out-Null; break } catch { Start-Sleep -Seconds 1 }
+            try { Invoke-WebRequest http://127.0.0.1:5174 -UseBasicParsing -TimeoutSec 2 | Out-Null; $ready = $true; break } catch { Start-Sleep -Seconds 1 }
+          }
+          if (-not $ready) {
+            if (Test-Path $previewLog) { Get-Content $previewLog }
+            throw "Web preview did not become ready on port 5174"
           }
 
       - name: Capture visual baselines (light/dark, desktop/narrow)

@@ -281,6 +281,7 @@ export default function App() {
         <Sidebar
           className="row-span-2"
           onOpenSettings={(tab) => { setSettingsTab(tab); setSettingsOpen(true); }}
+          onOpenCommandPalette={() => setCommandOpen(true)}
         />
 
         {/* 中间列与工作区共用一条紧凑顶部基线；正文不再像浮在窗口中的独立白纸。 */}

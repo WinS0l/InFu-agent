@@ -243,6 +243,8 @@ function SectionHeader({ icon, label, children, onClick }: {
 interface SidebarProps {
   /** v3.0 UI 审查：类型收紧为 SettingsTab（此前 string 需在 App 侧强转） */
   onOpenSettings: (tab: SettingsTab) => void;
+  /** 打开全局命令面板；左栏搜索与 Ctrl+K 保持同一入口。 */
+  onOpenCommandPalette: () => void;
   /** v3：grid 布局扩展类（如 row-span-2——顶部区域不覆盖侧栏） */
   className?: string;
 }
@@ -251,7 +253,7 @@ interface SidebarProps {
  * 左侧栏（v3：重构——60px Logo 行 / 新建会话 38px r12 / 搜索胶囊 / 会话树 32px 行 /
  * 底部设置行；可折叠为 56px rail：Logo=展开、新建图标、设置图标）。
  */
-export default function Sidebar({ onOpenSettings, className = "" }: SidebarProps) {
+export default function Sidebar({ onOpenSettings, onOpenCommandPalette, className = "" }: SidebarProps) {
   const root = useStore((s) => s.root);
   const setRoot = useStore((s) => s.setRoot);
   const sessions = useStore((s) => s.sessions);
@@ -496,8 +498,8 @@ export default function Sidebar({ onOpenSettings, className = "" }: SidebarProps
                 ? "border-info/50 bg-info-soft text-info"
                 : "border-line bg-elevated text-text shadow-lv1 hover:bg-hover"
             }`}
-            onClick={() => { setSearchOpen(true); requestAnimationFrame(() => searchRef.current?.focus()); }}
-            title="搜索会话（Ctrl+K）"
+            onClick={onOpenCommandPalette}
+            title="打开命令面板（Ctrl+K）"
           >
             <Search className="h-3.5 w-3.5" />
             搜索

@@ -288,7 +288,7 @@ export default function App() {
         className="relative min-h-0 min-w-0"
         style={{ gridColumn: 2, gridRow: "1 / span 2" }}
       >
-          <div className="flex h-full flex-col overflow-hidden">
+          <div className="flex h-full flex-col overflow-hidden bg-sidebar">
             {/* 顶部工作台栏：会话上下文、模式切换与右侧动作在同一视觉基线。 */}
             {hasMessages && (
               <header
@@ -343,15 +343,15 @@ export default function App() {
               </header>
             )}
             {/* 顶栏无额外底线；正文卡片自身上边线是唯一分隔，贴紧顶部并只在左侧圆角悬浮。 */}
-            <div className="infu-stage ml-2 min-h-0 flex-1 overflow-hidden rounded-l-[22px] border border-r-0 border-line bg-ink shadow-[-5px_10px_26px_rgba(0,0,0,0.10),0_2px_6px_rgba(0,0,0,0.04)]">
+            <div className="infu-stage ml-2 min-h-0 flex-1 overflow-hidden rounded-l-[18px] border border-r-0 border-line bg-ink shadow-[-5px_10px_26px_rgba(0,0,0,0.10),0_2px_6px_rgba(0,0,0,0.04)]">
               <ChatPanel />
             </div>
           </div>
         </div>
         {effectiveViewMode === "code" && (
           <div
-            className="absolute bottom-0 z-40 isolate overflow-hidden rounded-l-[22px] border border-r-0 border-line bg-base shadow-[-5px_10px_26px_rgba(0,0,0,0.10),0_2px_6px_rgba(0,0,0,0.04)]"
-            style={{ left: sideW + 8, top: hasMessages ? "40px" : 0, right: 0, backgroundColor: "var(--bg-base)", opacity: 1 }}
+            className="absolute bottom-0 z-40 isolate overflow-hidden rounded-l-[18px] border border-r-0 border-line bg-base shadow-[-5px_10px_26px_rgba(0,0,0,0.10),0_2px_6px_rgba(0,0,0,0.04)]"
+            style={{ left: sideW, top: hasMessages ? "40px" : 0, right: 0, backgroundColor: "var(--bg-base)", opacity: 1 }}
           >
             <Suspense fallback={<SuspenseFallback />}>
               <CodeView />
@@ -362,7 +362,7 @@ export default function App() {
         {hasMessages && viewMode === "chat" && (detailsOpen ? (
           <aside className="infu-context-rail row-span-2 flex min-h-0 min-w-0 flex-col bg-ink" style={{ gridColumn: 3 }}>
             <div className="h-10 shrink-0 bg-sidebar" />
-            <div className="min-h-0 flex-1 border-t border-line">
+            <div className="min-h-0 flex-1">
               <Suspense fallback={<SuspenseFallback />}><RightRail /></Suspense>
             </div>
           </aside>

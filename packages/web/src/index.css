@@ -170,13 +170,13 @@ body {
   opacity: .38;
 }
 .infu-sidebar {
-  border-right: 1px solid var(--border-l2);
+  border-right: 0;
   background: color-mix(in srgb, var(--bg-sidebar) 94%, transparent) !important;
 }
 .infu-sidebar > :first-child {
-  height: 52px !important;
+  height: 40px !important;
   padding-inline: 18px !important;
-  border-bottom: 1px solid var(--border-l2);
+  border-bottom: 0;
   background: transparent !important;
 }
 .infu-sidebar button {
@@ -187,7 +187,7 @@ body {
 }
 .infu-topbar {
   height: 40px !important;
-  border-bottom: 1px solid var(--border-l2);
+  border-bottom: 0;
   background: var(--bg-sidebar) !important;
 }
 .infu-top-actions {
@@ -195,11 +195,43 @@ body {
   background: var(--bg-sidebar) !important;
 }
 .infu-stage {
-  margin-left: 8px !important;
+  margin-left: 0 !important;
   border: 1px solid var(--border-l2) !important;
-  border-radius: 26px 0 0 26px !important;
+  border-radius: 18px 0 0 18px !important;
   box-shadow: -2px 8px 18px rgba(0,0,0,.045) !important;
   background: var(--bg-base) !important;
+}
+.infu-right-empty {
+  container-type: inline-size;
+  justify-content: center;
+}
+.infu-right-launchers {
+  margin-inline: auto;
+  width: min(100%, 330px);
+}
+.infu-right-launcher { min-height: 52px; }
+@container (min-width: 440px) {
+  .infu-right-empty { justify-content: center; }
+  .infu-right-empty-head { margin-bottom: 14px; }
+  .infu-right-launchers {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 10px;
+    width: min(100%, 440px);
+  }
+  .infu-right-launcher {
+    min-height: 116px;
+    flex-direction: column;
+    align-items: flex-start;
+    justify-content: center;
+    gap: 8px;
+    padding: 16px;
+  }
+  .infu-right-launcher > span:first-child {
+    height: 30px;
+    width: 30px;
+    border-radius: 9px;
+    background: color-mix(in srgb, var(--bg-elevated) 72%, transparent);
+  }
 }
 .infu-context-rail {
   border-left: 0;
@@ -207,7 +239,7 @@ body {
 }
 .infu-context-rail > :first-child {
   height: 40px !important;
-  background: transparent !important;
+  background: var(--bg-sidebar) !important;
 }
 .infu-composer {
   border-radius: 18px !important;

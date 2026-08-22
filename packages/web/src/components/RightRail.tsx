@@ -87,23 +87,28 @@ function SubagentsList() {
  *  v3.2：主按钮（审查）独立区 + 分隔线 + 三个次按钮（更清晰的层级引导） */
 function RightRailEmpty() {
   const openRightTab = useStore((s) => s.openRightTab);
-  const btn = "group flex min-h-[74px] w-full cursor-pointer items-center gap-3 rounded-2xl border border-line/60 bg-hover/35 px-4 py-3 text-left transition-colors hover:border-info/30 hover:bg-hover";
-  const items = [
+  const [showMore, setShowMore] = useState(false);
+  const btn = "infu-right-launcher group flex w-full cursor-pointer items-center gap-2.5 rounded-xl border border-line/60 bg-hover/30 px-3 py-2 text-left transition-colors hover:border-info/30 hover:bg-hover";
+  const primaryItems = [
     { id: "review", label: "审查", sub: "查看改动与验证", icon: <FileSearch className="h-4 w-4" /> },
     { id: "browser", label: "浏览器", sub: "页面与 Agent 协作", icon: <Globe className="h-4 w-4" /> },
+    { id: "taskgraph", label: "任务", sub: "查看执行顺序", icon: <Network className="h-4 w-4" /> },
     { id: "subagents", label: "子 Agent", sub: "委派任务与过程", icon: <Bot className="h-4 w-4" /> },
+  ] as const;
+  const moreItems = [
     { id: "computeruse", label: "桌面操作", sub: "截图与输入记录", icon: <Monitor className="h-4 w-4" /> },
     { id: "trace", label: "会话追踪", sub: "事件与用量账本", icon: <ListTree className="h-4 w-4" /> },
-    { id: "taskgraph", label: "任务图", sub: "依赖与执行顺序", icon: <Network className="h-4 w-4" /> },
   ] as const;
   return (
-    <div className="infu-right-empty flex h-full flex-col items-center justify-center px-5 py-8">
-      <div className="mb-6 text-center"><div className="text-[20px] font-semibold tracking-tight text-text">打开标签页</div><div className="mt-1.5 text-[13px] text-sub">选择要在侧边面板中打开的标签。</div></div>
-      <div className="grid w-full max-w-[420px] grid-cols-1 gap-2.5 sm:grid-cols-2">
-        {items.map((item) => <button key={item.id} className={btn} onClick={() => openRightTab({ id: item.id, kind: item.id as RightTab["kind"], label: item.label })} title={item.sub}>
-          <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-sub">{item.icon}</span><span className="min-w-0"><span className="block text-[14px] font-medium text-text">{item.label}</span><span className="mt-0.5 block truncate text-[11px] text-caption">{item.sub}</span></span>
+    <div className="infu-right-empty flex h-full flex-col px-4 py-4">
+      <div className="infu-right-empty-head mb-3 text-center"><div className="text-[14px] font-semibold text-text">工作区</div><div className="mt-0.5 text-[11px] text-caption">按需打开上下文工具</div></div>
+      <div className="infu-right-launchers grid grid-cols-1 gap-2">
+        {primaryItems.map((item) => <button key={item.id} className={btn} onClick={() => openRightTab({ id: item.id, kind: item.id as RightTab["kind"], label: item.label })} title={item.sub}>
+          <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg text-sub">{item.icon}</span><span className="min-w-0"><span className="block text-[13px] font-medium text-text">{item.label}</span><span className="mt-0.5 block truncate text-[11px] text-caption">{item.sub}</span></span>
         </button>)}
       </div>
+      <button className="mt-1.5 flex h-8 w-full cursor-pointer items-center justify-center rounded-lg text-[12px] text-sub transition-colors hover:bg-hover hover:text-text" onClick={() => setShowMore((value) => !value)}>{showMore ? "收起更多" : "更多工具"}</button>
+      {showMore && <div className="grid grid-cols-1 gap-2 border-t border-line/60 pt-2">{moreItems.map((item) => <button key={item.id} className={btn} onClick={() => openRightTab({ id: item.id, kind: item.id as RightTab["kind"], label: item.label })} title={item.sub}><span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg text-sub">{item.icon}</span><span className="min-w-0"><span className="block text-[13px] font-medium text-text">{item.label}</span><span className="mt-0.5 block truncate text-[11px] text-caption">{item.sub}</span></span></button>)}</div>}
     </div>
   );
 }

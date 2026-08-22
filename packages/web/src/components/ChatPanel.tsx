@@ -177,7 +177,7 @@ function ActivityDock({ visible }: { visible: boolean }) {
   if (!visible || viewMode === "code") return null;
   return <div
     ref={dockRef}
-    className="absolute right-4 top-2 z-40 select-none"
+    className="absolute right-5 top-3 z-40 select-none"
     style={position ? { left: position.x, top: position.y, right: "auto" } : undefined}
     onPointerDown={resetIdle}
   >
@@ -1622,7 +1622,7 @@ export default function ChatPanel() {
               const pending = rmIdx >= 0 && idx >= rmIdx;
               const turnEnd = idx + 1 >= messages.length || messages[idx + 1].role === "user";
               return (
-                <div key={m.id} ref={messageVirtualizer.measureElement} data-index={virtualRow.index} className="pb-6" style={{ position: "absolute", top: 0, left: 0, width: "100%", transform: `translateY(${virtualRow.start}px)` }}>
+                <div key={m.id} ref={messageVirtualizer.measureElement} data-index={virtualRow.index} className={`${idx === 0 ? "pt-8 " : ""}pb-6`} style={{ position: "absolute", top: 0, left: 0, width: "100%", transform: `translateY(${virtualRow.start}px)` }}>
                   <MessageItem
                     m={m}
                     pending={pending}
@@ -1917,10 +1917,10 @@ const MessageItem = memo(function MessageItem({
       )}
       {/* 错误消息（addError 产生）：专用错误行（对齐 主流 TurnErrorItem：红点 + 标题 + 消息） */}
       {m.text && m.text.startsWith("⚠️ ") ? (
-        <div className="flex items-start gap-2 py-0.5">
+        <div className="flex items-start gap-2 py-1 text-center">
           <span className="mt-[7px] h-2 w-2 shrink-0 rounded-full bg-danger" />
           <div className="min-w-0">
-            <div className="flex items-center gap-2 text-[13px] font-medium leading-5 text-danger">
+            <div className="flex items-center justify-center gap-2 text-[13px] font-medium leading-5 text-danger">
               任务失败
               {/* v3.2：错误类型徽标（对齐 主流 code 徽标） */}
               {(() => { const t = classifyError(m.text); return t ? (
